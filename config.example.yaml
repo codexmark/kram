@@ -1,0 +1,54 @@
+# kram-gateway configuration
+#
+# Copy this file to config.yaml, set the env vars it references, and run:
+#   go run ./cmd/gateway -config config.yaml
+#
+# The gateway exposes a single OpenAI-compatible endpoint at
+# /v1/chat/completions. The "model" field in a request selects a combo
+# below (or falls back to default_combo); the combo's providers are tried
+# in order, skipping any whose circuit breaker is currently open.
+
+host: 127.0.0.1
+port: 20128
+
+providers:
+  - id: anthropic
+    kind: anthropic
+    api_key_env: ANTHROPIC_API_KEY
+    model: claude-sonnet-4-5
+
+  - id: openai
+    kind: openai-compat
+    base_url: https://api.openai.com/v1
+    api_key_env: OPENAI_API_KEY
+    model: gpt-5
+
+  - id: gemini
+    kind: gemini
+    api_key_env: GEMINI_API_KEY
+    model: gemini-2.5-pro
+
+  - id: openrouter
+    kind: openai-compat
+    base_url: https://openrouter.ai/api/v1
+    api_key_env: OPENROUTER_API_KEY
+    # model left empty: passes through whatever the client requests
+
+  - id: opencode-zen
+    kind: openai-compat
+    base_url: https://opencode.ai/zen/v1
+    api_key_env: OPENCODE_ZEN_API_KEY
+
+combos:
+  # "default" is what most clients will call with model: "default".
+  - id: default
+    strategy: round-robin
+    providers: [anthropic, openai, gemini, openrouter, opencode-zen]
+
+  # Narrower combos let a client pin a specific fallback chain by using
+  # the combo ID as the "model" value.
+  - id: anthropic-only
+    strategy: round-robin
+    providers: [anthropic]
+
+default_combo: default
