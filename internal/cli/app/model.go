@@ -369,6 +369,22 @@ func (m Model) handlePickerKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // last two rows, so hit-testing is just a column check against the same
 // right-aligned block footerLine2 renders.
 func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	// Enabling mouse mode at all (needed for the footer-icon click below)
+	// takes the wheel away from the terminal's own scrollback, so we have
+	// to implement it ourselves or the transcript becomes unscrollable by
+	// mouse entirely. Text selection is unaffected by any of this — every
+	// mainstream terminal (GNOME Terminal, kitty, Alacritty, foot, xterm)
+	// lets you hold Shift while dragging to bypass an app's mouse capture
+	// and select natively, same as it would for any other TUI.
+	if msg.Button == tea.MouseButtonWheelUp {
+		m.viewport.LineUp(3)
+		return m, nil
+	}
+	if msg.Button == tea.MouseButtonWheelDown {
+		m.viewport.LineDown(3)
+		return m, nil
+	}
+
 	if msg.Action != tea.MouseActionPress || msg.Button != tea.MouseButtonLeft {
 		return m, nil
 	}

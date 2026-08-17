@@ -21,8 +21,10 @@ func (m *Model) refreshTranscript() {
 		case "user":
 			// User text is never run through the markdown renderer — it's
 			// what was typed, not a formatted reply, and echoing it back
-			// reformatted would be surprising.
-			b.WriteString(styleYouTag.Render("you") + "  " + styleBody.Render(msg.Content))
+			// reformatted would be surprising. Anchored to the right, the
+			// basic chat convention this was missing — the agent's replies
+			// stay on the left below.
+			b.WriteString(m.renderUserBubble(msg.Content))
 		default:
 			for _, act := range msg.ToolActivity {
 				b.WriteString(renderToolActivity(act) + "\n")
@@ -63,6 +65,24 @@ func (m Model) thinkingLine() string {
 	tagStyle := thinkingPalette[(m.animFrame/3)%len(thinkingPalette)].Bold(true)
 	dots := strings.Repeat(".", 1+(m.animFrame/2)%3)
 	return tagStyle.Render("kram") + "  " + m.spin.View() + " " + styleMeta.Render("pensando"+dots)
+}
+
+// renderUserBubble right-aligns a user message — the "you" tag and
+// content wrapped to a bubble narrower than the full width, then the
+// whole block pushed flush right, so the transcript reads as a normal
+// two-sided chat (you on the right, kram on the left) instead of
+// everything stacked in one left-aligned column.
+func (m Model) renderUserBubble(content string) string {
+	bubbleWidth := m.viewport.Width - 10
+	if bubbleWidth > 64 {
+		bubbleWidth = 64
+	}
+	if bubbleWidth < 20 {
+		bubbleWidth = m.viewport.Width
+	}
+	wrappedContent := lipgloss.NewStyle().Width(bubbleWidth).Render(styleBody.Render(content))
+	block := styleYouTag.Render("you") + "\n" + wrappedContent
+	return lipgloss.NewStyle().Width(m.viewport.Width).Align(lipgloss.Right).Render(block)
 }
 
 func (m Model) View() string {

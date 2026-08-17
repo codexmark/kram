@@ -178,6 +178,16 @@ the two live indicators read as one visual language rather than two.
 go run ./cmd/cli -daemon http://127.0.0.1:20130 -gateway http://127.0.0.1:20128
 ```
 
+- Messages are laid out like an actual chat: yours anchored to the right,
+  Kram's replies on the left — not everything stacked in one left-aligned
+  column.
+- The mouse wheel scrolls the transcript. Mouse mode has to be enabled for
+  the footer-icon click below, which takes the wheel away from the
+  terminal's own scrollback — so it's reimplemented against the viewport
+  directly rather than just losing it. Text selection is unaffected: every
+  mainstream terminal (GNOME Terminal, kitty, Alacritty, foot, xterm) lets
+  you hold Shift while dragging to bypass an app's mouse capture, same as
+  it would for any other TUI.
 - The footer is always exactly two lines: the active provider with a
   breathing dot and an animated latency indicator while a request is in
   flight, settling — once the reply lands — into the real per-request
