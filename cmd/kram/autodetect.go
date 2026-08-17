@@ -28,14 +28,17 @@ var knownProviders = []knownProvider{
 	{id: "gemini", kind: "gemini", envVar: "GEMINI_API_KEY", defaultModel: "gemini-2.5-pro", supportsImages: true, supportsTools: true},
 	// OpenRouter free-tier models: several entries sharing one key so they
 	// form a real fallback chain (a $0 combo) rather than a single pinned
-	// model. Free-model slugs rotate on OpenRouter's end — check
-	// https://openrouter.ai/models?max_price=0 and override via -config
-	// if one of these has been retired. Conservatively marked as not
-	// supporting images: capability varies per free model and Kram never
-	// assumes.
-	{id: "openrouter-deepseek", kind: "openai-compat", baseURL: openRouterBaseURL, envVar: "OPENROUTER_API_KEY", defaultModel: "deepseek/deepseek-chat-v3.1:free", supportsTools: true},
-	{id: "openrouter-llama", kind: "openai-compat", baseURL: openRouterBaseURL, envVar: "OPENROUTER_API_KEY", defaultModel: "meta-llama/llama-3.3-70b-instruct:free", supportsTools: true},
-	{id: "openrouter-qwen", kind: "openai-compat", baseURL: openRouterBaseURL, envVar: "OPENROUTER_API_KEY", defaultModel: "qwen/qwen-2.5-72b-instruct:free", supportsTools: true},
+	// model. Free-model slugs rotate on OpenRouter's end (verified against
+	// GET https://openrouter.ai/api/v1/models on 2026-08-17 — the previous
+	// picks here had already been retired) — check
+	// https://openrouter.ai/models?max_price=0 and override via -config if
+	// one of these has been retired too. Only models whose
+	// supported_parameters include "tools" were picked. Conservatively
+	// marked as not supporting images: capability varies per free model
+	// and Kram never assumes.
+	{id: "openrouter-gptoss", kind: "openai-compat", baseURL: openRouterBaseURL, envVar: "OPENROUTER_API_KEY", defaultModel: "openai/gpt-oss-20b:free", supportsTools: true},
+	{id: "openrouter-gemma", kind: "openai-compat", baseURL: openRouterBaseURL, envVar: "OPENROUTER_API_KEY", defaultModel: "google/gemma-4-31b-it:free", supportsTools: true},
+	{id: "openrouter-nemotron", kind: "openai-compat", baseURL: openRouterBaseURL, envVar: "OPENROUTER_API_KEY", defaultModel: "nvidia/nemotron-3-super-120b-a12b:free", supportsTools: true},
 }
 
 // detectGatewayConfig builds a single-combo gateway config from whichever
