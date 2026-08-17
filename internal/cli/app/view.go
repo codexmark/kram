@@ -56,8 +56,11 @@ func (m Model) View() string {
 	b.WriteString(m.input.View())
 	b.WriteString("\n")
 
-	if m.panelOpen {
-		b.WriteString(m.renderPanel())
+	switch m.active {
+	case panelStrategy:
+		b.WriteString(m.renderStrategyPanel())
+	case panelContext:
+		b.WriteString(m.renderContextPanel())
 	}
 	b.WriteString(m.renderFooter())
 
@@ -115,8 +118,34 @@ func (m Model) footerLine2() string {
 		count = styleMeta.Render(fmt.Sprintf("%d %s", n, word))
 	}
 	left := joinNonEmpty("  ", trail, count)
-	hint := styleHint.Render("^p estratégia")
-	return padBetween(m.width, left, hint)
+	return padBetween(m.width, left, m.footerRightBlock())
+}
+
+// footerRightBlock is the clickable context-usage icon plus keyboard
+// hints, right-aligned on the footer's bottom row. It's a method (not
+// inlined) because handleMouse needs the exact same string to compute
+// where the click target starts.
+func (m Model) footerRightBlock() string {
+	return joinNonEmpty("  ", m.contextIcon(), styleHint.Render("^t contexto"), styleHint.Render("^p estratégia"))
+}
+
+// contextIcon is the discreet, clickable context-window badge: a filled
+// dot whose color reflects real usage (from the daemon's own compaction
+// threshold — see internal/daemon/compaction) plus a percentage. Opens
+// the context panel on click or ^t.
+func (m Model) contextIcon() string {
+	if !m.haveContext || m.contextData.Budget <= 0 {
+		return styleBadgeIdle.Render("◔ …")
+	}
+	pct := m.contextData.Used * 100 / m.contextData.Budget
+	style := styleBadgeOK
+	switch {
+	case pct >= 90:
+		style = styleBadgeBad
+	case pct >= 70:
+		style = styleBadgeWarn
+	}
+	return style.Render(fmt.Sprintf("◔ %d%%", pct))
 }
 
 // renderToolActivity draws one line per tool call the agent loop made,

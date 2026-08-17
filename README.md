@@ -142,6 +142,14 @@ go run ./cmd/cli -daemon http://127.0.0.1:20130 -gateway http://127.0.0.1:20128
   rate straight from `/admin/status`. Arrow keys move focus between
   providers; the explanation line updates to describe whichever one is
   focused. `esc` or `enter` closes it.
+- A discreet badge on the footer's bottom-right (`◔ NN%`) is a real click
+  target, not just decoration — click it, or press `ctrl+t`, to open the
+  context-window panel: a segmented bar plus a per-category token
+  breakdown (messages, tool definitions, compaction summary, free space)
+  computed by `GET /sessions/{id}/context` the same way the daemon decides
+  when to compact (`internal/daemon/compaction`), so the panel and the
+  actual compaction trigger never disagree. Only real categories Kram
+  actually has — no invented "skills" or "MCP tools" line items.
 - `ctrl+c` quits.
 
 ## Agent loop (component 4)
@@ -156,10 +164,19 @@ model call.
   (accumulated across fragmented SSE chunks), Anthropic `tool_use`/
   `tool_result` content blocks, and Gemini `functionCall`/
   `functionResponse` parts.
-- **Tools** (`internal/daemon/tools`): `read_file`, `write_file`,
-  `list_dir`, `grep` (pure Go, no `ripgrep` dependency), and `bash`
-  (foreground-only, timeout-bounded). Every file/shell tool is confined to
-  the daemon's `-workspace` directory — a path that would escape it is
+- **Tools** (`internal/daemon/tools`), 14 total: `read_file`, `write_file`,
+  `edit_file` (exact find-and-replace — cheaper in tokens than rewriting a
+  whole file, and refuses an ambiguous match instead of guessing which
+  occurrence was meant), `list_dir`, `glob` (`**` supported, no external
+  glob-library dependency), `grep` (pure Go, no `ripgrep` dependency),
+  `move_file`, `delete_file` (refuses directories — recursive deletes go
+  through `bash`, where the command is at least visible in the tool-call
+  log), `bash` (foreground-only, timeout-bounded), `git_status`,
+  `git_diff`, `web_fetch` (GET + HTML-tag stripping, size-capped), and
+  `todo_write`/`todo_read` (a project-wide task list persisted to
+  `.kram/todos.json`, so the agent can plan multi-step work and pick it
+  back up after a restart). Every file/shell tool is confined to the
+  daemon's `-workspace` directory — a path that would escape it is
   rejected before touching the filesystem.
 - **The loop**: waits for a complete (non-streaming) model response before
   acting on tool calls — every agent-loop implementation we looked at

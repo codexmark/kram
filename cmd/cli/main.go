@@ -48,7 +48,7 @@ func run(daemonURL, gatewayURL, sessionID, title, combo string) error {
 	}
 
 	m := app.New(daemon, gateway, sessionID, combo)
-	p := tea.NewProgram(m, tea.WithAltScreen())
+	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
 	_, err := p.Run()
 	return err
 }

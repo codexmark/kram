@@ -21,10 +21,13 @@ var (
 	styleHint     = lipgloss.NewStyle().Foreground(colorFaint)
 	styleErrBadge = lipgloss.NewStyle().Foreground(colorDanger)
 
-	styleBadgeOK   = lipgloss.NewStyle().Foreground(colorOK)
-	styleBadgeWarn = lipgloss.NewStyle().Foreground(colorWarn)
-	styleBadgeBad  = lipgloss.NewStyle().Foreground(colorDanger)
-	styleBadgeIdle = lipgloss.NewStyle().Foreground(colorMuted)
+	styleBadgeOK     = lipgloss.NewStyle().Foreground(colorOK)
+	styleBadgeWarn   = lipgloss.NewStyle().Foreground(colorWarn)
+	styleBadgeBad    = lipgloss.NewStyle().Foreground(colorDanger)
+	styleBadgeIdle   = lipgloss.NewStyle().Foreground(colorMuted)
+	styleBadgeAccent = lipgloss.NewStyle().Foreground(colorAccent)
+
+	styleFaintTrack = lipgloss.NewStyle().Foreground(colorFaint)
 
 	stylePanelBG = lipgloss.NewStyle().Background(lipgloss.Color("235")).Foreground(colorText)
 )

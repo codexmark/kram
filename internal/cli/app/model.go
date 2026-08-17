@@ -1,9 +1,9 @@
 // Package app is the Kram CLI's Bubble Tea program: a chat transcript over
 // a durable daemon session, with a compact live footer tracking the
-// gateway's real fallback behavior and an on-demand panel showing the
-// full routing strategy. The CLI never talks to an LLM provider or
-// persists anything itself — it's purely a view over what the daemon and
-// gateway already own.
+// gateway's real fallback behavior and two on-demand panels — routing
+// strategy and context-window usage. The CLI never talks to an LLM
+// provider or persists anything itself — it's purely a view over what the
+// daemon and gateway already own.
 package app
 
 import (
@@ -14,6 +14,7 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 
 	"github.com/codexmark/kram-gateway/internal/cli/daemonclient"
 	"github.com/codexmark/kram-gateway/internal/cli/statusclient"
@@ -21,6 +22,16 @@ import (
 )
 
 const footerHeight = 2 // the pulse bar is always exactly two lines
+
+// panel identifies which (if any) of the two on-demand panels is open.
+// Only one is ever shown at a time — the 25%-height budget is shared.
+type panel int
+
+const (
+	panelNone panel = iota
+	panelStrategy
+	panelContext
+)
 
 type chatMessage struct {
 	Role         string
@@ -49,10 +60,15 @@ type Model struct {
 	lastAttempts []openai.AttemptInfo
 	lastUsage    openai.Usage
 
-	panelOpen  bool
-	panelData  statusclient.Status
-	panelErr   error
-	panelFocus int
+	active panel
+
+	strategyData  statusclient.Status
+	strategyErr   error
+	strategyFocus int
+
+	contextData daemonclient.ContextUsage
+	contextErr  error
+	haveContext bool
 
 	animFrame int
 
@@ -85,9 +101,11 @@ func New(daemon *daemonclient.Client, gateway *statusclient.Client, sessionID, c
 }
 
 // Init kicks off loading whatever history the daemon already has for this
-// session (it may not be empty — sessions are durable).
+// session (it may not be empty — sessions are durable) and a first,
+// silent context-usage fetch so the footer icon has real data as soon as
+// the screen draws.
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(textinput.Blink, loadHistoryCmd(m.daemon, m.sessionID))
+	return tea.Batch(textinput.Blink, loadHistoryCmd(m.daemon, m.sessionID), fetchContextCmd(m.daemon, m.sessionID))
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -101,6 +119,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyMsg:
 		return m.handleKey(msg)
+
+	case tea.MouseMsg:
+		return m.handleMouse(msg)
 
 	case historyLoadedMsg:
 		if msg.err != nil {
@@ -139,12 +160,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			ToolActivity: msg.result.ToolActivity, Notices: notices,
 		})
 		m.refreshTranscript()
-		return m, nil
+		// The turn may have changed how much context is used (new
+		// messages, maybe a compaction) — refresh the icon quietly.
+		return m, fetchContextCmd(m.daemon, m.sessionID)
 
 	case statusResultMsg:
-		m.panelErr = msg.err
+		m.strategyErr = msg.err
 		if msg.err == nil {
-			m.panelData = msg.status
+			m.strategyData = msg.status
+		}
+		return m, nil
+
+	case contextResultMsg:
+		m.contextErr = msg.err
+		if msg.err == nil {
+			m.contextData = msg.usage
+			m.haveContext = true
 		}
 		return m, nil
 
@@ -173,25 +204,22 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 
 	case "ctrl+p":
-		m.panelOpen = !m.panelOpen
-		m.syncViewportSize()
-		if m.panelOpen {
-			m.panelFocus = 0
-			return m, fetchStatusCmd(m.gateway)
-		}
-		return m, nil
+		return m.togglePanel(panelStrategy)
+
+	case "ctrl+t":
+		return m.togglePanel(panelContext)
 
 	case "esc":
-		if m.panelOpen {
-			m.panelOpen = false
+		if m.active != panelNone {
+			m.active = panelNone
 			m.syncViewportSize()
 		}
 		return m, nil
 
 	case "up":
-		if m.panelOpen {
-			if m.panelFocus > 0 {
-				m.panelFocus--
+		if m.active == panelStrategy {
+			if m.strategyFocus > 0 {
+				m.strategyFocus--
 			}
 			return m, nil
 		}
@@ -199,10 +227,10 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case "down":
-		if m.panelOpen {
+		if m.active == panelStrategy {
 			combo := m.currentCombo()
-			if combo != nil && m.panelFocus < len(combo.Providers)-1 {
-				m.panelFocus++
+			if combo != nil && m.strategyFocus < len(combo.Providers)-1 {
+				m.strategyFocus++
 			}
 			return m, nil
 		}
@@ -210,8 +238,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case "enter":
-		if m.panelOpen {
-			m.panelOpen = false
+		if m.active != panelNone {
+			m.active = panelNone
 			m.syncViewportSize()
 			return m, nil
 		}
@@ -221,6 +249,44 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	m.input, cmd = m.input.Update(msg)
 	return m, cmd
+}
+
+// handleMouse implements the "discreet clickable icon" affordance: the
+// context-usage badge on the footer's bottom-right is a real click target,
+// not just a keyboard shortcut. The footer always occupies the terminal's
+// last two rows, so hit-testing is just a column check against the same
+// right-aligned block footerLine2 renders.
+func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	if msg.Action != tea.MouseActionPress || msg.Button != tea.MouseButtonLeft {
+		return m, nil
+	}
+	footerRow2 := m.height - 1
+	if msg.Y != footerRow2 {
+		return m, nil
+	}
+	iconStart := m.width - lipgloss.Width(m.footerRightBlock())
+	if msg.X >= iconStart {
+		return m.togglePanel(panelContext)
+	}
+	return m, nil
+}
+
+func (m Model) togglePanel(p panel) (tea.Model, tea.Cmd) {
+	if m.active == p {
+		m.active = panelNone
+		m.syncViewportSize()
+		return m, nil
+	}
+	m.active = p
+	m.syncViewportSize()
+	switch p {
+	case panelStrategy:
+		m.strategyFocus = 0
+		return m, fetchStatusCmd(m.gateway)
+	case panelContext:
+		return m, fetchContextCmd(m.daemon, m.sessionID)
+	}
+	return m, nil
 }
 
 func (m Model) submit() (tea.Model, tea.Cmd) {
@@ -241,13 +307,13 @@ func (m Model) submit() (tea.Model, tea.Cmd) {
 // falling back to the first combo the gateway reports if there's no exact
 // match (e.g. status hasn't loaded yet).
 func (m Model) currentCombo() *statusclient.Combo {
-	for i := range m.panelData.Combos {
-		if m.panelData.Combos[i].ID == m.combo {
-			return &m.panelData.Combos[i]
+	for i := range m.strategyData.Combos {
+		if m.strategyData.Combos[i].ID == m.combo {
+			return &m.strategyData.Combos[i]
 		}
 	}
-	if len(m.panelData.Combos) > 0 {
-		return &m.panelData.Combos[0]
+	if len(m.strategyData.Combos) > 0 {
+		return &m.strategyData.Combos[0]
 	}
 	return nil
 }
@@ -255,7 +321,7 @@ func (m Model) currentCombo() *statusclient.Combo {
 func (m *Model) syncViewportSize() {
 	inputLines := 1
 	reserved := footerHeight + inputLines
-	if m.panelOpen {
+	if m.active != panelNone {
 		reserved += m.panelHeight()
 	}
 	h := m.height - reserved

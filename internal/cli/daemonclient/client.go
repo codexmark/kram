@@ -93,6 +93,27 @@ func (c *Client) SendMessage(ctx context.Context, sessionID, content string, ima
 	return out, err
 }
 
+// ContextCategory is one real contributor to a session's context-window usage.
+type ContextCategory struct {
+	Name   string `json:"name"`
+	Tokens int    `json:"tokens"`
+}
+
+// ContextUsage is a session's current context-window breakdown.
+type ContextUsage struct {
+	Budget     int               `json:"budget"`
+	Used       int               `json:"used"`
+	Free       int               `json:"free"`
+	Categories []ContextCategory `json:"categories"`
+}
+
+// GetContext fetches a session's current context-window usage breakdown.
+func (c *Client) GetContext(ctx context.Context, sessionID string) (ContextUsage, error) {
+	var out ContextUsage
+	err := c.doJSON(ctx, http.MethodGet, "/sessions/"+sessionID+"/context", nil, &out)
+	return out, err
+}
+
 func (c *Client) doJSON(ctx context.Context, method, path string, body any, out any) error {
 	var reader *bytes.Reader
 	if body != nil {

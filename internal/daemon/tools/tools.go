@@ -37,12 +37,22 @@ type Registry struct {
 // and shell tool refuses to operate outside this directory.
 func NewRegistry(workspace string) *Registry {
 	r := &Registry{workspace: workspace, byName: make(map[string]Tool)}
+	todos := newTodoStore(workspace)
 	for _, t := range []Tool{
 		newReadFile(workspace),
 		newWriteFile(workspace),
+		newEditFile(workspace),
 		newListDir(workspace),
 		newGrep(workspace),
+		newGlob(workspace),
+		newMoveFile(workspace),
+		newDeleteFile(workspace),
 		newBash(workspace),
+		newGitStatus(workspace),
+		newGitDiff(workspace),
+		newWebFetch(),
+		newTodoWrite(todos),
+		newTodoRead(todos),
 	} {
 		r.byName[t.Name()] = t
 	}

@@ -7,17 +7,17 @@ import (
 	"github.com/codexmark/kram-gateway/internal/cli/statusclient"
 )
 
-// renderPanel draws the end-to-end strategy panel: every provider in the
-// active combo's fallback chain, staggered to show routing order, each
-// tagged with its live circuit-breaker state and real telemetry from the
-// gateway. Everything shown here comes straight from GET /admin/status —
-// nothing is inferred or simulated.
-func (m Model) renderPanel() string {
+// renderStrategyPanel draws the end-to-end strategy panel: every provider
+// in the active combo's fallback chain, staggered to show routing order,
+// each tagged with its live circuit-breaker state and real telemetry from
+// the gateway. Everything shown here comes straight from GET
+// /admin/status — nothing is inferred or simulated.
+func (m Model) renderStrategyPanel() string {
 	h := m.panelHeight()
 	var lines []string
 
-	if m.panelErr != nil {
-		lines = append(lines, styleErrBadge.Render("não consegui falar com o gateway: "+m.panelErr.Error()))
+	if m.strategyErr != nil {
+		lines = append(lines, styleErrBadge.Render("não consegui falar com o gateway: "+m.strategyErr.Error()))
 		return padLines(lines, h, m.width)
 	}
 
@@ -27,15 +27,15 @@ func (m Model) renderPanel() string {
 		return padLines(lines, h, m.width)
 	}
 
-	statsByID := make(map[string]statusclient.Provider, len(m.panelData.Providers))
-	for _, p := range m.panelData.Providers {
+	statsByID := make(map[string]statusclient.Provider, len(m.strategyData.Providers))
+	for _, p := range m.strategyData.Providers {
 		statsByID[p.ID] = p
 	}
 
 	lines = append(lines, styleMeta.Render(fmt.Sprintf("combo %s · estratégia %s", combo.ID, combo.Strategy)))
 	lines = append(lines, "")
 
-	focus := m.panelFocus
+	focus := m.strategyFocus
 	if focus >= len(combo.Providers) {
 		focus = len(combo.Providers) - 1
 	}

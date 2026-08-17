@@ -53,6 +53,20 @@ func fetchStatusCmd(c *statusclient.Client) tea.Cmd {
 	}
 }
 
+type contextResultMsg struct {
+	usage daemonclient.ContextUsage
+	err   error
+}
+
+func fetchContextCmd(c *daemonclient.Client, sessionID string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		usage, err := c.GetContext(ctx, sessionID)
+		return contextResultMsg{usage: usage, err: err}
+	}
+}
+
 // animTickMsg drives the footer's breathing dot and sparkline while a
 // request is in flight. It reschedules itself only while waiting — once
 // the real response lands, the footer settles on real telemetry instead.

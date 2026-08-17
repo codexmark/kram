@@ -37,6 +37,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /sessions", s.handleCreateSession)
 	mux.HandleFunc("GET /sessions", s.handleListSessions)
 	mux.HandleFunc("GET /sessions/{id}", s.handleGetSession)
+	mux.HandleFunc("GET /sessions/{id}/context", s.handleGetContext)
 	mux.HandleFunc("POST /sessions/{id}/messages", s.handleSendMessage)
 	return s.recoverMiddleware(s.logMiddleware(mux))
 }
@@ -107,6 +108,20 @@ func (s *Server) handleGetSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"session": sess, "messages": messages})
+}
+
+func (s *Server) handleGetContext(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	usage, err := s.agent.ContextUsage(r.Context(), id)
+	if err != nil {
+		if errors.Is(err, agent.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "session not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, usage)
 }
 
 type sendMessageRequest struct {
