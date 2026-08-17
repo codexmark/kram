@@ -173,6 +173,12 @@ func (s *Service) Run(ctx context.Context, sessionID, userContent string, images
 		}
 
 		modelMessages := toModelMessages(effective)
+		if memoryMsg, ok := s.recentMemoryMessage(); ok {
+			// Prepended fresh each turn (not persisted into history) so
+			// memory written mid-conversation is visible on the very next
+			// turn, same as project context below.
+			modelMessages = append([]openai.ChatMessage{memoryMsg}, modelMessages...)
+		}
 		if projectContext, found := loadProjectContext(s.cfg.Workspace); found {
 			// Prepended, not persisted: this reflects the file's current
 			// contents on every turn, so an edit takes effect on the very
@@ -296,6 +302,37 @@ func (s *Service) runTool(ctx context.Context, tc openai.ToolCall) (ToolActivity
 	activity := ToolActivity{Name: tc.Function.Name, Args: tc.Function.Arguments, Result: display, OK: ok}
 	toolMsg := store.Message{Role: "tool", Content: resultText, ToolCallID: tc.ID, Name: tc.Function.Name}
 	return activity, toolMsg
+}
+
+// recentMemoryLimit bounds the automatic injection — small and cheap on
+// purpose. Anything older or from a less-relevant angle is still
+// reachable through the memory_search tool; this is only the "handoff"
+// slice, not the whole memory store.
+const recentMemoryLimit = 8
+
+// recentMemoryMessage builds the system message carrying pinned/recent
+// cross-session memory (this workspace plus store.GlobalScope), or
+// reports ok=false if there's nothing to inject (a fresh workspace, or
+// the lookup itself failed — memory is a nice-to-have, never worth
+// failing the turn over).
+func (s *Service) recentMemoryMessage() (openai.ChatMessage, bool) {
+	entries, err := s.store.RecentMemory([]string{s.cfg.Workspace, store.GlobalScope}, recentMemoryLimit)
+	if err != nil || len(entries) == 0 {
+		return openai.ChatMessage{}, false
+	}
+
+	var b strings.Builder
+	for _, e := range entries {
+		scope := "project"
+		if e.Scope == store.GlobalScope {
+			scope = "global"
+		}
+		fmt.Fprintf(&b, "- [%s] %s\n", scope, e.Content)
+	}
+	return openai.ChatMessage{
+		Role:    "system",
+		Content: "Persistent memory from previous sessions (search memory_search for anything not listed here):\n\n" + b.String(),
+	}, true
 }
 
 func (s *Service) comboSupportsImages(ctx context.Context) (bool, error) {

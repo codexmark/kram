@@ -39,6 +39,40 @@ CREATE TABLE IF NOT EXISTS messages (
 CREATE INDEX IF NOT EXISTS idx_messages_session_id ON messages(session_id);
 `
 
+// memorySchema is applied separately from schema — see memory.go — kept
+// apart because it's a distinct concern (cross-session memory, not
+// session/message persistence) with its own FTS5 virtual table and sync
+// triggers.
+const memorySchema = `
+CREATE TABLE IF NOT EXISTS memory_entries (
+	id         INTEGER PRIMARY KEY AUTOINCREMENT,
+	scope      TEXT NOT NULL,
+	content    TEXT NOT NULL,
+	pinned     INTEGER NOT NULL DEFAULT 0,
+	created_at INTEGER NOT NULL,
+	updated_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_memory_scope ON memory_entries(scope);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
+	content, content='memory_entries', content_rowid='id'
+);
+
+CREATE TRIGGER IF NOT EXISTS memory_entries_ai AFTER INSERT ON memory_entries BEGIN
+	INSERT INTO memory_fts(rowid, content) VALUES (new.id, new.content);
+END;
+
+CREATE TRIGGER IF NOT EXISTS memory_entries_ad AFTER DELETE ON memory_entries BEGIN
+	INSERT INTO memory_fts(memory_fts, rowid, content) VALUES('delete', old.id, old.content);
+END;
+
+CREATE TRIGGER IF NOT EXISTS memory_entries_au AFTER UPDATE ON memory_entries BEGIN
+	INSERT INTO memory_fts(memory_fts, rowid, content) VALUES('delete', old.id, old.content);
+	INSERT INTO memory_fts(rowid, content) VALUES (new.id, new.content);
+END;
+`
+
 // Session is a durable conversation thread owned by the daemon.
 type Session struct {
 	ID        string `json:"id"`
@@ -85,6 +119,10 @@ func Open(path string) (*Store, error) {
 	if _, err := db.Exec(schema); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("applying schema: %w", err)
+	}
+	if _, err := db.Exec(memorySchema); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("applying memory schema: %w", err)
 	}
 
 	return &Store{db: db}, nil

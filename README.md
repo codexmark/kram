@@ -39,6 +39,12 @@ three existing projects:
 - **[OpenClaude](https://github.com/Gitlawb/openclaude)** and
   **[Antigravity CLI](https://github.com/google-antigravity/antigravity-cli)**
   — per-session model routing and terminal-first agent UX patterns.
+- **[ai-memory](https://github.com/akitaonrails/ai-memory)** — the idea of
+  agent-curated, scoped (project vs. global) persistent memory searchable
+  by full-text index, surfaced automatically at the start of a turn
+  instead of requiring the user to repeat themselves every session. Kram's
+  version is a deliberately smaller slice of that design — see "Memory"
+  below for what was kept and what wasn't.
 
 No code from any of these is reused; only the architectural ideas are.
 
@@ -269,7 +275,7 @@ model call.
   (accumulated across fragmented SSE chunks), Anthropic `tool_use`/
   `tool_result` content blocks, and Gemini `functionCall`/
   `functionResponse` parts.
-- **Tools** (`internal/daemon/tools`), 14 total: `read_file`, `write_file`,
+- **Tools** (`internal/daemon/tools`), 16 total: `read_file`, `write_file`,
   `edit_file` (exact find-and-replace — cheaper in tokens than rewriting a
   whole file, and refuses an ambiguous match instead of guessing which
   occurrence was meant), `list_dir`, `glob` (`**` supported, no external
@@ -280,9 +286,10 @@ model call.
   `git_diff`, `web_fetch` (GET + HTML-tag stripping, size-capped), and
   `todo_write`/`todo_read` (a project-wide task list persisted to
   `.kram/todos.json`, so the agent can plan multi-step work and pick it
-  back up after a restart). Every file/shell tool is confined to the
-  daemon's `-workspace` directory — a path that would escape it is
-  rejected before touching the filesystem.
+  back up after a restart), and `memory_write`/`memory_search` (see
+  "Memory" below). Every file/shell tool is confined to the daemon's
+  `-workspace` directory — a path that would escape it is rejected before
+  touching the filesystem.
 - **The loop**: waits for a complete (non-streaming) model response before
   acting on tool calls — every agent-loop implementation we looked at
   decouples token streaming from tool execution rather than interleaving
@@ -316,3 +323,43 @@ model call.
 Every message, tool call, tool result, and compaction summary is
 persisted through the same durable store as component 2 — an agent run
 survives a daemon restart exactly like a plain conversation does.
+
+## Memory
+
+Session history (component 2) is durable but session-scoped — a new
+session starts with no memory of past ones. `internal/daemon/store`'s
+`memory_entries` table plus a `memory_fts` FTS5 virtual index (external-
+content, kept in sync with insert/delete/update triggers) add a second,
+cross-session layer, inspired by
+[akitaonrails/ai-memory](https://github.com/akitaonrails/ai-memory) but
+scaled down deliberately:
+
+- **Agent-curated, not auto-captured.** The model calls `memory_write`
+  itself to save a compiled fact, decision, or preference — Kram never
+  scrapes raw conversation into memory automatically. This keeps entries
+  short and intentional instead of accumulating noise that has to be
+  pruned later.
+- **Two scopes**: `project` (the current workspace path) and `global`
+  (`store.GlobalScope`, literally `"_global"`) for things true across
+  every project, e.g. a user's name or preferences.
+- **Automatic injection**: at the start of every turn, the agent loop
+  (`Service.recentMemoryMessage`) pulls up to 8 entries — pinned first,
+  then most-recently-updated — across both scopes and prepends them as a
+  system message, so a brand-new session already has this context before
+  the user says anything. The same method backs the context-usage panel's
+  `memory` category, so what the panel reports and what actually gets
+  sent to the model can never disagree.
+- **`memory_search`**: an FTS5 full-text query tool for anything not
+  already covered by the automatic top-8 injection — the model reaches
+  for this itself when it needs older or more specific context.
+- **No embeddings, no decay, no MCP surface, no git-backed markdown
+  source-of-truth.** ai-memory's hybrid RRF retrieval and durability
+  model are out of scope for this v0 — SQLite FTS5 is the only retrieval
+  path, and entries live only in the daemon's existing SQLite store.
+
+Verified end-to-end with the disposable mock provider (see below): a
+memory written in one session was independently confirmed in the SQLite
+`memory_entries`/`memory_fts` tables, and a second, brand-new session's
+`/sessions/{id}/context` response showed a non-zero `memory` category
+before any message was sent in it — proving the injection is automatic,
+not dependent on the model deciding to search.

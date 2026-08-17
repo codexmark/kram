@@ -13,6 +13,7 @@ var (
 	colorOK     = lipgloss.Color("114") // success / closed breaker
 	colorWarn   = lipgloss.Color("179") // half-open / retrying
 	colorDanger = lipgloss.Color("167") // open breaker / failure
+	colorMemory = lipgloss.Color("183") // cross-session memory
 
 	styleYouTag   = lipgloss.NewStyle().Foreground(colorAccent).Bold(true)
 	styleKramTag  = lipgloss.NewStyle().Foreground(colorOK).Bold(true)
@@ -26,6 +27,7 @@ var (
 	styleBadgeBad    = lipgloss.NewStyle().Foreground(colorDanger)
 	styleBadgeIdle   = lipgloss.NewStyle().Foreground(colorMuted)
 	styleBadgeAccent = lipgloss.NewStyle().Foreground(colorAccent)
+	styleBadgeMemory = lipgloss.NewStyle().Foreground(colorMemory)
 
 	styleFaintTrack = lipgloss.NewStyle().Foreground(colorFaint)
 

@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/codexmark/kram-gateway/internal/daemon/store"
 	"github.com/codexmark/kram-gateway/internal/openai"
 )
 
@@ -34,11 +35,15 @@ type Registry struct {
 }
 
 // NewRegistry builds the default tool set scoped to workspace — every file
-// and shell tool refuses to operate outside this directory.
-func NewRegistry(workspace string) *Registry {
+// and shell tool refuses to operate outside this directory. st, if
+// non-nil, backs the memory_write/memory_search tools (cross-session
+// memory, scoped to this workspace plus store.GlobalScope); passing nil
+// omits those two tools entirely rather than registering ones that would
+// always fail.
+func NewRegistry(workspace string, st *store.Store) *Registry {
 	r := &Registry{workspace: workspace, byName: make(map[string]Tool)}
 	todos := newTodoStore(workspace)
-	for _, t := range []Tool{
+	toolList := []Tool{
 		newReadFile(workspace),
 		newWriteFile(workspace),
 		newEditFile(workspace),
@@ -53,7 +58,11 @@ func NewRegistry(workspace string) *Registry {
 		newWebFetch(),
 		newTodoWrite(todos),
 		newTodoRead(todos),
-	} {
+	}
+	if st != nil {
+		toolList = append(toolList, newMemoryWrite(st, workspace), newMemorySearch(st, workspace))
+	}
+	for _, t := range toolList {
 		r.byName[t.Name()] = t
 	}
 	return r

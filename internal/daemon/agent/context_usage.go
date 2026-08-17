@@ -65,7 +65,12 @@ func (s *Service) ContextUsage(ctx context.Context, sessionID string) (ContextUs
 		projectContextTokens = len(pc) / 4
 	}
 
-	used := summaryTokens + messageTokens + toolTokens + projectContextTokens
+	var memoryTokens int
+	if memoryMsg, ok := s.recentMemoryMessage(); ok {
+		memoryTokens = len(memoryMsg.Content) / 4
+	}
+
+	used := summaryTokens + messageTokens + toolTokens + projectContextTokens + memoryTokens
 	free := s.cfg.MaxContextTokens - used
 	if free < 0 {
 		free = 0
@@ -77,6 +82,9 @@ func (s *Service) ContextUsage(ctx context.Context, sessionID string) (ContextUs
 	}
 	if projectContextTokens > 0 {
 		categories = append(categories, ContextCategory{Name: "project_context", Tokens: projectContextTokens})
+	}
+	if memoryTokens > 0 {
+		categories = append(categories, ContextCategory{Name: "memory", Tokens: memoryTokens})
 	}
 	if summaryTokens > 0 {
 		categories = append(categories, ContextCategory{Name: "compaction_summary", Tokens: summaryTokens})
