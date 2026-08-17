@@ -9,6 +9,10 @@ This is the first component of **Kram**, a coding-agent platform being
 built from scratch in Go, aimed at performance, reliability ("never
 crash") and token economy.
 
+**To actually use Kram, run `cmd/kram`** (see "All-in-one" below) — the
+rest of this doc mostly describes the individual components for
+development. The gateway, daemon and CLI all still work standalone too.
+
 ## Inspirations
 
 Kram is a clean-room build, not a fork — but its design borrows ideas from
@@ -37,6 +41,39 @@ three existing projects:
   — per-session model routing and terminal-first agent UX patterns.
 
 No code from any of these is reused; only the architectural ideas are.
+
+## All-in-one (`cmd/kram`)
+
+This is the actual entry point for using Kram — one binary, one command,
+no separate terminals and no manual port coordination.
+
+```bash
+export ANTHROPIC_API_KEY=sk-...   # or OPENAI_API_KEY / GEMINI_API_KEY
+go run ./cmd/kram -workspace ~/projects/whatever
+```
+
+`cmd/kram` starts the gateway and daemon **in-process** (goroutines, not
+subprocesses — `internal/gateway` and `internal/daemon` export the same
+`Run()` each standalone binary calls) on free localhost ports, waits for
+both `/health` checks, creates a session, and drops straight into the CLI.
+Gateway/daemon logs go to `<workspace>/.kram/kram.log` instead of stdout,
+since stdout belongs to the CLI's alt-screen once it starts. `ctrl+c`
+shuts everything down together — no orphaned processes, no ports left
+bound.
+
+With no `-config`, it auto-detects a gateway config from whichever of
+`ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `GEMINI_API_KEY` are set in your
+environment, pinned to a sensible default model each, in one round-robin
+combo. Pass `-config path/to/config.yaml` (see `config.example.yaml`) for
+anything more specific — multiple providers per kind, OpenRouter/opencode
+zen, custom strategies. If neither is available it fails immediately with
+a clear message rather than starting partially.
+
+Session state persists to `<workspace>/.kram/kram-daemon.db` — same
+durability guarantees as running the daemon standalone (component 2).
+
+Everything below describes the individual components — useful for
+development, or if you want the gateway/daemon on separate machines.
 
 ## Run
 

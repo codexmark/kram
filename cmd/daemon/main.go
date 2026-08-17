@@ -1,26 +1,16 @@
-// Command daemon runs the Kram daemon: the single, local, durable owner of
-// sessions and their message history, and the agent loop that drives
-// tool-calling, memory compaction, and image-capability gating for them.
-// Clients (CLI, HTTP, future TUI) all read and write through it, so
-// closing one client never erases work, and restarting the daemon itself
-// never loses a session — everything is persisted to SQLite before this
-// process reports success to a caller.
+// Command daemon runs the Kram daemon standalone: the single, local,
+// durable owner of sessions and the agent loop that drives them. For the
+// all-in-one experience, see cmd/kram, which runs this same logic
+// in-process alongside the gateway and CLI.
 package main
 
 import (
+	"context"
 	"flag"
-	"fmt"
 	"log/slog"
-	"net/http"
 	"os"
-	"path/filepath"
 
-	"github.com/codexmark/kram-gateway/internal/daemon/agent"
-	"github.com/codexmark/kram-gateway/internal/daemon/gatewayclient"
-	"github.com/codexmark/kram-gateway/internal/daemon/server"
-	"github.com/codexmark/kram-gateway/internal/daemon/session"
-	"github.com/codexmark/kram-gateway/internal/daemon/store"
-	"github.com/codexmark/kram-gateway/internal/daemon/tools"
+	"github.com/codexmark/kram-gateway/internal/daemon"
 )
 
 func main() {
@@ -35,35 +25,12 @@ func main() {
 
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
 
-	if err := run(*host, *port, *dbPath, *gatewayURL, *model, *workspace, *maxTurns, logger); err != nil {
+	cfg := daemon.Config{
+		Host: *host, Port: *port, DBPath: *dbPath, GatewayURL: *gatewayURL,
+		Model: *model, Workspace: *workspace, MaxTurns: *maxTurns,
+	}
+	if err := daemon.Run(context.Background(), cfg, logger); err != nil {
 		logger.Error("fatal", "error", err)
 		os.Exit(1)
 	}
-}
-
-func run(host string, port int, dbPath, gatewayURL, model, workspace string, maxTurns int, logger *slog.Logger) error {
-	absWorkspace, err := absPath(workspace)
-	if err != nil {
-		return fmt.Errorf("resolving workspace: %w", err)
-	}
-
-	st, err := store.Open(dbPath)
-	if err != nil {
-		return fmt.Errorf("opening store: %w", err)
-	}
-	defer st.Close()
-
-	gw := gatewayclient.New(gatewayURL)
-	sessions := session.New(st)
-	toolRegistry := tools.NewRegistry(absWorkspace)
-	agentSvc := agent.New(st, gw, toolRegistry, agent.Config{Model: model, MaxTurns: maxTurns})
-	srv := server.New(sessions, agentSvc, logger)
-
-	addr := fmt.Sprintf("%s:%d", host, port)
-	logger.Info("kram-daemon listening", "addr", addr, "db", dbPath, "gateway", gatewayURL, "workspace", absWorkspace)
-	return http.ListenAndServe(addr, srv.Handler())
-}
-
-func absPath(path string) (string, error) {
-	return filepath.Abs(path)
 }
