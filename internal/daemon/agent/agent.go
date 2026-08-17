@@ -54,6 +54,9 @@ type Config struct {
 	// MaxContextTokens is the effective-history budget before compaction
 	// triggers (see internal/daemon/compaction).
 	MaxContextTokens int
+	// Workspace is the project root — used to load AGENTS.md/CLAUDE.md as
+	// persistent project context, injected into every turn.
+	Workspace string
 }
 
 func (c Config) withDefaults() Config {
@@ -164,6 +167,14 @@ func (s *Service) Run(ctx context.Context, sessionID, userContent string, images
 		}
 
 		modelMessages := toModelMessages(effective)
+		if projectContext, found := loadProjectContext(s.cfg.Workspace); found {
+			// Prepended, not persisted: this reflects the file's current
+			// contents on every turn, so an edit takes effect on the very
+			// next message rather than requiring a daemon restart.
+			modelMessages = append([]openai.ChatMessage{
+				{Role: "system", Content: "Project context (from AGENTS.md/CLAUDE.md):\n\n" + projectContext},
+			}, modelMessages...)
+		}
 
 		nearBudget := turn == s.cfg.MaxTurns-1
 		toolDefs := s.tools.Definitions()

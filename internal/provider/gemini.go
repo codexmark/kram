@@ -97,8 +97,15 @@ func buildGeminiContents(msgs []openai.ChatMessage) (system *geminiContent, out 
 	for _, m := range msgs {
 		switch m.Role {
 		case "system":
-			sc := geminiContent{Parts: []geminiPart{{Text: m.Content}}}
-			system = &sc
+			// Gemini accepts only one systemInstruction — concatenate
+			// rather than let a later system message (e.g. a compaction
+			// summary) silently clobber an earlier one (e.g. project
+			// context from AGENTS.md).
+			if system == nil {
+				system = &geminiContent{Parts: []geminiPart{{Text: m.Content}}}
+			} else {
+				system.Parts[0].Text += "\n\n---\n\n" + m.Content
+			}
 
 		case "tool":
 			var response map[string]any

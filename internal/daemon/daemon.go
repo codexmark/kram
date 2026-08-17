@@ -55,7 +55,7 @@ func Run(ctx context.Context, cfg Config, logger *slog.Logger) error {
 	gw := gatewayclient.New(cfg.GatewayURL)
 	sessions := session.New(st)
 	toolRegistry := tools.NewRegistry(absWorkspace)
-	agentSvc := agent.New(st, gw, toolRegistry, agent.Config{Model: cfg.Model, MaxTurns: cfg.MaxTurns})
+	agentSvc := agent.New(st, gw, toolRegistry, agent.Config{Model: cfg.Model, MaxTurns: cfg.MaxTurns, Workspace: absWorkspace})
 	srv := server.New(sessions, agentSvc, logger)
 
 	addr := fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)

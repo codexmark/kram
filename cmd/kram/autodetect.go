@@ -9,10 +9,7 @@ import (
 
 // knownProvider is one entry in the auto-detection table: if envVar is
 // set, this provider is added to the auto-built combo pinned to
-// defaultModel. Only providers we've tested adapters against get a
-// guessed default model here — OpenRouter/opencode-zen's "right" default
-// model is too provider-specific to guess safely, so they're left for
-// -config instead.
+// defaultModel.
 type knownProvider struct {
 	id             string
 	kind           string
@@ -23,10 +20,22 @@ type knownProvider struct {
 	supportsTools  bool
 }
 
+const openRouterBaseURL = "https://openrouter.ai/api/v1"
+
 var knownProviders = []knownProvider{
 	{id: "anthropic", kind: "anthropic", envVar: "ANTHROPIC_API_KEY", defaultModel: "claude-sonnet-4-5", supportsImages: true, supportsTools: true},
 	{id: "openai", kind: "openai-compat", baseURL: "https://api.openai.com/v1", envVar: "OPENAI_API_KEY", defaultModel: "gpt-5", supportsImages: true, supportsTools: true},
 	{id: "gemini", kind: "gemini", envVar: "GEMINI_API_KEY", defaultModel: "gemini-2.5-pro", supportsImages: true, supportsTools: true},
+	// OpenRouter free-tier models: several entries sharing one key so they
+	// form a real fallback chain (a $0 combo) rather than a single pinned
+	// model. Free-model slugs rotate on OpenRouter's end — check
+	// https://openrouter.ai/models?max_price=0 and override via -config
+	// if one of these has been retired. Conservatively marked as not
+	// supporting images: capability varies per free model and Kram never
+	// assumes.
+	{id: "openrouter-deepseek", kind: "openai-compat", baseURL: openRouterBaseURL, envVar: "OPENROUTER_API_KEY", defaultModel: "deepseek/deepseek-chat-v3.1:free", supportsTools: true},
+	{id: "openrouter-llama", kind: "openai-compat", baseURL: openRouterBaseURL, envVar: "OPENROUTER_API_KEY", defaultModel: "meta-llama/llama-3.3-70b-instruct:free", supportsTools: true},
+	{id: "openrouter-qwen", kind: "openai-compat", baseURL: openRouterBaseURL, envVar: "OPENROUTER_API_KEY", defaultModel: "qwen/qwen-2.5-72b-instruct:free", supportsTools: true},
 }
 
 // detectGatewayConfig builds a single-combo gateway config from whichever

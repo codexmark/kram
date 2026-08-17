@@ -60,7 +60,12 @@ func (s *Service) ContextUsage(ctx context.Context, sessionID string) (ContextUs
 
 	toolTokens := estimateToolDefinitionTokens(s.tools.Definitions())
 
-	used := summaryTokens + messageTokens + toolTokens
+	var projectContextTokens int
+	if pc, found := loadProjectContext(s.cfg.Workspace); found {
+		projectContextTokens = len(pc) / 4
+	}
+
+	used := summaryTokens + messageTokens + toolTokens + projectContextTokens
 	free := s.cfg.MaxContextTokens - used
 	if free < 0 {
 		free = 0
@@ -69,6 +74,9 @@ func (s *Service) ContextUsage(ctx context.Context, sessionID string) (ContextUs
 	categories := []ContextCategory{
 		{Name: "messages", Tokens: messageTokens},
 		{Name: "tool_definitions", Tokens: toolTokens},
+	}
+	if projectContextTokens > 0 {
+		categories = append(categories, ContextCategory{Name: "project_context", Tokens: projectContextTokens})
 	}
 	if summaryTokens > 0 {
 		categories = append(categories, ContextCategory{Name: "compaction_summary", Tokens: summaryTokens})

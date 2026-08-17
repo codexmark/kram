@@ -15,6 +15,7 @@ import (
 var categoryLabels = map[string]string{
 	"messages":           "mensagens",
 	"tool_definitions":   "definições de tools",
+	"project_context":    "contexto do projeto (AGENTS.md)",
 	"compaction_summary": "resumo de compactação",
 	"free":               "espaço livre",
 }
@@ -25,6 +26,8 @@ func categoryStyle(name string) lipgloss.Style {
 		return styleBadgeAccent
 	case "tool_definitions":
 		return styleBadgeWarn
+	case "project_context":
+		return styleBadgeOK
 	case "compaction_summary":
 		return styleBadgeBad
 	default: // free

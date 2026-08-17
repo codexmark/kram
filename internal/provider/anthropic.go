@@ -98,7 +98,14 @@ func buildAnthropicMessages(msgs []openai.ChatMessage) (system string, out []ant
 	for _, m := range msgs {
 		switch m.Role {
 		case "system":
-			system = m.Content
+			// Anthropic accepts only one top-level "system" field —
+			// concatenate rather than let a later system message (e.g. a
+			// compaction summary) silently clobber an earlier one (e.g.
+			// project context from AGENTS.md).
+			if system != "" {
+				system += "\n\n---\n\n"
+			}
+			system += m.Content
 
 		case "tool":
 			out = append(out, anthropicMessage{
