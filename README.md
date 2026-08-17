@@ -163,6 +163,17 @@ opencode/Crush's bordered-panel look. It never talks to an LLM provider
 or persists anything itself; it's a live view over the daemon and the
 gateway's real telemetry (nothing shown is simulated).
 
+Assistant replies render through a custom [Glamour](https://github.com/charmbracelet/glamour)
+style matching Kram's own palette (`internal/cli/app/markdown.go`) — bold,
+headings, lists, code blocks and blockquotes render properly instead of
+showing raw `**`/`###`. A malformed-markdown or rendering failure falls
+back to the raw text rather than crashing; user messages are never run
+through it (echoing back reformatted input would be surprising). While a
+turn is running, the transcript shows a "thinking" line — the `kram` tag
+breathing through the same color palette the footer's pulse dot uses,
+kept in lockstep via the same `animFrame` — instead of a static label, so
+the two live indicators read as one visual language rather than two.
+
 ```bash
 go run ./cmd/cli -daemon http://127.0.0.1:20130 -gateway http://127.0.0.1:20128
 ```

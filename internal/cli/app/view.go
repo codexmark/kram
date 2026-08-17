@@ -19,13 +19,16 @@ func (m *Model) refreshTranscript() {
 		}
 		switch msg.Role {
 		case "user":
+			// User text is never run through the markdown renderer — it's
+			// what was typed, not a formatted reply, and echoing it back
+			// reformatted would be surprising.
 			b.WriteString(styleYouTag.Render("you") + "  " + styleBody.Render(msg.Content))
 		default:
 			for _, act := range msg.ToolActivity {
 				b.WriteString(renderToolActivity(act) + "\n")
 			}
 			if msg.Content != "" {
-				b.WriteString(styleKramTag.Render("kram") + "  " + styleBody.Render(msg.Content))
+				b.WriteString(styleKramTag.Render("kram") + "  " + renderMarkdown(m.mdRenderer, msg.Content))
 			}
 			for _, n := range msg.Notices {
 				b.WriteString("\n" + styleHint.Render("· "+n))
@@ -36,13 +39,30 @@ func (m *Model) refreshTranscript() {
 		if m.messages != nil {
 			b.WriteString("\n\n")
 		}
-		b.WriteString(styleMeta.Render(m.spin.View() + " pensando…"))
+		b.WriteString(m.thinkingLine())
 	}
 	if m.err != nil {
 		b.WriteString("\n\n" + styleErrBadge.Render("erro: "+m.err.Error()))
 	}
 	m.viewport.SetContent(b.String())
 	m.viewport.GotoBottom()
+}
+
+// thinkingPalette is the same breathing-dot idea the footer's pulse bar
+// uses (see footer_helpers.go), reused here so the transcript's "working"
+// state reads as the same visual language rather than a second, unrelated
+// spinner style.
+var thinkingPalette = []lipgloss.Style{styleBadgeIdle, styleBadgeAccent, styleBadgeOK, styleBadgeAccent}
+
+// thinkingLine is the animated placeholder shown in the transcript while
+// the agent loop is running — a breathing "kram" tag (color cycling
+// through the same palette as the footer) plus the spinner and a
+// build-up ellipsis, driven by animFrame so it's in lockstep with the
+// footer's own animation.
+func (m Model) thinkingLine() string {
+	tagStyle := thinkingPalette[(m.animFrame/3)%len(thinkingPalette)].Bold(true)
+	dots := strings.Repeat(".", 1+(m.animFrame/2)%3)
+	return tagStyle.Render("kram") + "  " + m.spin.View() + " " + styleMeta.Render("pensando"+dots)
 }
 
 func (m Model) View() string {

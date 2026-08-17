@@ -14,6 +14,7 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/codexmark/kram-gateway/internal/cli/daemonclient"
@@ -84,6 +85,9 @@ type Model struct {
 	width, height int
 	ready         bool
 
+	mdRenderer *glamour.TermRenderer
+	mdWidth    int // width the current mdRenderer was built for
+
 	phase          phase
 	sessionList    []daemonclient.Session
 	pickerCursor   int
@@ -149,6 +153,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width, m.height = msg.Width, msg.Height
 		m.ready = true
 		m.syncViewportSize()
+		if m.mdRenderer == nil || m.mdWidth != m.width {
+			m.mdRenderer = newMarkdownRenderer(m.width)
+			m.mdWidth = m.width
+			m.refreshTranscript()
+		}
 		return m, nil
 
 	case tea.KeyMsg:
@@ -237,6 +246,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.animFrame++
+		m.refreshTranscript() // keeps the transcript's thinking line in step with the footer
 		return m, animTickCmd()
 
 	case spinner.TickMsg:
