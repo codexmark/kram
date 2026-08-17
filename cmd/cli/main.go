@@ -22,8 +22,8 @@ import (
 func main() {
 	daemonURL := flag.String("daemon", "http://127.0.0.1:20130", "base URL of a running kram-daemon")
 	gatewayURL := flag.String("gateway", "http://127.0.0.1:20128", "base URL of a running kram-gateway")
-	sessionID := flag.String("session", "", "resume an existing session ID instead of starting a new one")
-	title := flag.String("title", "", "title for a newly created session")
+	sessionID := flag.String("session", "", "resume an existing session ID, skipping the picker")
+	title := flag.String("title", "", "create a session with this title, skipping the picker")
 	combo := flag.String("model", "default", "gateway combo used for messages in this session")
 	flag.Parse()
 
@@ -37,7 +37,9 @@ func run(daemonURL, gatewayURL, sessionID, title, combo string) error {
 	daemon := daemonclient.New(daemonURL)
 	gateway := statusclient.New(gatewayURL)
 
-	if sessionID == "" {
+	// An explicit -session or -title skips straight to chat/creation;
+	// otherwise the CLI opens on the session picker.
+	if sessionID == "" && title != "" {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		sess, err := daemon.CreateSession(ctx, title)

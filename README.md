@@ -182,12 +182,20 @@ go run ./cmd/cli -daemon http://127.0.0.1:20130 -gateway http://127.0.0.1:20128
 - A discreet badge on the footer's bottom-right (`◔ NN%`) is a real click
   target, not just decoration — click it, or press `ctrl+t`, to open the
   context-window panel: a segmented bar plus a per-category token
-  breakdown (messages, tool definitions, compaction summary, free space)
+  breakdown (messages, tool definitions, project context, compaction
+  summary, free space)
   computed by `GET /sessions/{id}/context` the same way the daemon decides
   when to compact (`internal/daemon/compaction`), so the panel and the
   actual compaction trigger never disagree. Only real categories Kram
   actually has — no invented "skills" or "MCP tools" line items.
 - `ctrl+c` quits.
+- Launch without `-session`/`-title` and the CLI opens on a **session
+  picker** instead of always starting a new one — durable sessions
+  (component 2) stay reachable across restarts instead of getting buried.
+  `↑`/`↓` to move, `enter` to resume the selected session or create a new
+  one (optional title prompt, `enter` to skip it, `esc` to cancel back to
+  the list). Passing `-session <id>` or `-title <name>` skips the picker
+  entirely, for scripting.
 
 ## Agent loop (component 4)
 
@@ -236,6 +244,14 @@ model call.
   `config.yaml`, they're dropped before the request is sent and the
   caller gets an explicit notice — the CLI shows it inline rather than
   silently sending a text-only request.
+- **Project context**: an `AGENTS.md` (or `CLAUDE.md`) at the workspace
+  root is read fresh and injected as a system message on every turn — not
+  persisted into history, so editing it takes effect on the very next
+  message rather than requiring a restart. Finding this bug is what
+  surfaced a real one: Anthropic accepts only one top-level `system`
+  field and Gemini only one `systemInstruction`, so a second system
+  message (a compaction summary, say) was silently clobbering the first
+  before this was fixed — both adapters now concatenate instead.
 
 Every message, tool call, tool result, and compaction summary is
 persisted through the same durable store as component 2 — an agent run

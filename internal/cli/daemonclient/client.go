@@ -51,6 +51,13 @@ func (c *Client) CreateSession(ctx context.Context, title string) (Session, erro
 	return sess, err
 }
 
+// ListSessions returns every known session, most recently active first.
+func (c *Client) ListSessions(ctx context.Context) ([]Session, error) {
+	var out []Session
+	err := c.doJSON(ctx, http.MethodGet, "/sessions", nil, &out)
+	return out, err
+}
+
 // GetSession returns a session and its full message history.
 func (c *Client) GetSession(ctx context.Context, id string) (Session, []Message, error) {
 	var out struct {

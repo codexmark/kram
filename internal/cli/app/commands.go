@@ -10,6 +10,34 @@ import (
 	"github.com/codexmark/kram-gateway/internal/cli/statusclient"
 )
 
+type sessionsListMsg struct {
+	sessions []daemonclient.Session
+	err      error
+}
+
+func listSessionsCmd(c *daemonclient.Client) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		sessions, err := c.ListSessions(ctx)
+		return sessionsListMsg{sessions: sessions, err: err}
+	}
+}
+
+type sessionCreatedMsg struct {
+	session daemonclient.Session
+	err     error
+}
+
+func createSessionCmd(c *daemonclient.Client, title string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		sess, err := c.CreateSession(ctx, title)
+		return sessionCreatedMsg{session: sess, err: err}
+	}
+}
+
 type historyLoadedMsg struct {
 	session  daemonclient.Session
 	messages []daemonclient.Message

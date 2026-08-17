@@ -23,6 +23,15 @@ import (
 
 const footerHeight = 2 // the pulse bar is always exactly two lines
 
+// phase tracks which screen the program is showing: the session picker
+// (when launched without an explicit -session) or the chat itself.
+type phase int
+
+const (
+	phasePicker phase = iota
+	phaseChat
+)
+
 // panel identifies which (if any) of the two on-demand panels is open.
 // Only one is ever shown at a time — the 25%-height budget is shared.
 type panel int
@@ -75,10 +84,19 @@ type Model struct {
 	width, height int
 	ready         bool
 
+	phase          phase
+	sessionList    []daemonclient.Session
+	pickerCursor   int
+	pickerErr      error
+	pickerBusy     bool
+	newSessionText textinput.Model // title prompt, only shown after picking "new session"
+	titling        bool
+
 	err error
 }
 
-// New builds the initial model for a session that already exists in the daemon.
+// New builds the initial model. If sessionID is empty, the program opens
+// on the session picker instead of going straight to chat.
 func New(daemon *daemonclient.Client, gateway *statusclient.Client, sessionID, combo string) Model {
 	ti := textinput.New()
 	ti.Placeholder = "mensagem…"
@@ -86,25 +104,41 @@ func New(daemon *daemonclient.Client, gateway *statusclient.Client, sessionID, c
 	ti.CharLimit = 4000
 	ti.Prompt = "› "
 
+	titleInput := textinput.New()
+	titleInput.Placeholder = "título (opcional, enter pra pular)"
+	titleInput.CharLimit = 100
+	titleInput.Prompt = "› "
+
 	sp := spinner.New()
 	sp.Spinner = spinner.Dot
 
-	return Model{
-		daemon:    daemon,
-		gateway:   gateway,
-		combo:     combo,
-		sessionID: sessionID,
-		input:     ti,
-		viewport:  viewport.New(80, 20),
-		spin:      sp,
+	m := Model{
+		daemon: daemon, gateway: gateway, combo: combo, sessionID: sessionID,
+		input: ti, newSessionText: titleInput,
+		viewport: viewport.New(80, 20), spin: sp,
 	}
+	if sessionID == "" {
+		m.phase = phasePicker
+		m.pickerBusy = true
+	} else {
+		m.phase = phaseChat
+	}
+	return m
 }
 
-// Init kicks off loading whatever history the daemon already has for this
-// session (it may not be empty — sessions are durable) and a first,
-// silent context-usage fetch so the footer icon has real data as soon as
-// the screen draws.
+// Init kicks off the session picker (if no session was given up front) or
+// loads whatever history the daemon already has for an explicit session
+// (it may not be empty — sessions are durable), plus a first, silent
+// context-usage fetch so the footer icon has real data as soon as the
+// screen draws.
 func (m Model) Init() tea.Cmd {
+	if m.phase == phasePicker {
+		return tea.Batch(listSessionsCmd(m.daemon), m.spin.Tick)
+	}
+	return m.enterChatCmds()
+}
+
+func (m Model) enterChatCmds() tea.Cmd {
 	return tea.Batch(textinput.Blink, loadHistoryCmd(m.daemon, m.sessionID), fetchContextCmd(m.daemon, m.sessionID))
 }
 
@@ -122,6 +156,25 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.MouseMsg:
 		return m.handleMouse(msg)
+
+	case sessionsListMsg:
+		m.pickerBusy = false
+		m.pickerErr = msg.err
+		if msg.err == nil {
+			m.sessionList = msg.sessions
+		}
+		return m, nil
+
+	case sessionCreatedMsg:
+		m.pickerBusy = false
+		if msg.err != nil {
+			m.pickerErr = msg.err
+			return m, nil
+		}
+		m.sessionID = msg.session.ID
+		m.phase = phaseChat
+		m.syncViewportSize()
+		return m, m.enterChatCmds()
 
 	case historyLoadedMsg:
 		if msg.err != nil {
@@ -187,7 +240,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, animTickCmd()
 
 	case spinner.TickMsg:
-		if !m.waiting {
+		if !m.waiting && !m.pickerBusy {
 			return m, nil
 		}
 		var cmd tea.Cmd
@@ -199,10 +252,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
-	case "ctrl+c":
+	if msg.String() == "ctrl+c" {
 		return m, tea.Quit
+	}
+	if m.phase == phasePicker {
+		return m.handlePickerKey(msg)
+	}
 
+	switch msg.String() {
 	case "ctrl+p":
 		return m.togglePanel(panelStrategy)
 
@@ -249,6 +306,51 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	m.input, cmd = m.input.Update(msg)
 	return m, cmd
+}
+
+// handlePickerKey drives the session picker: an up-front list of existing
+// sessions (most recently active first) plus a "new session" row, shown
+// whenever the CLI is launched without an explicit -session.
+func (m Model) handlePickerKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.titling {
+		switch msg.String() {
+		case "esc":
+			m.titling = false
+			return m, nil
+		case "enter":
+			m.pickerBusy = true
+			title := strings.TrimSpace(m.newSessionText.Value())
+			return m, createSessionCmd(m.daemon, title)
+		}
+		var cmd tea.Cmd
+		m.newSessionText, cmd = m.newSessionText.Update(msg)
+		return m, cmd
+	}
+
+	itemCount := len(m.sessionList) + 1 // +1 for the "new session" row
+	switch msg.String() {
+	case "up":
+		if m.pickerCursor > 0 {
+			m.pickerCursor--
+		}
+	case "down":
+		if m.pickerCursor < itemCount-1 {
+			m.pickerCursor++
+		}
+	case "enter":
+		if m.pickerCursor == 0 {
+			m.titling = true
+			m.newSessionText.SetValue("")
+			m.newSessionText.Focus()
+			return m, nil
+		}
+		sess := m.sessionList[m.pickerCursor-1]
+		m.sessionID = sess.ID
+		m.phase = phaseChat
+		m.syncViewportSize()
+		return m, m.enterChatCmds()
+	}
+	return m, nil
 }
 
 // handleMouse implements the "discreet clickable icon" affordance: the

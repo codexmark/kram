@@ -128,8 +128,11 @@ func run(opts runOptions) error {
 	daemonC := daemonclient.New(daemonURL)
 	gatewayC := statusclient.New(gatewayURL)
 
+	// An explicit -session or -title skips the picker and goes straight to
+	// chat/creation; otherwise the CLI opens on the session picker so a
+	// durable session never gets buried behind "just start a new one".
 	sid := opts.sessionID
-	if sid == "" {
+	if sid == "" && opts.title != "" {
 		createCtx, cancelCreate := context.WithTimeout(ctx, 10*time.Second)
 		sess, err := daemonC.CreateSession(createCtx, opts.title)
 		cancelCreate()

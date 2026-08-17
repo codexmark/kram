@@ -49,6 +49,9 @@ func (m Model) View() string {
 	if !m.ready {
 		return "iniciando…"
 	}
+	if m.phase == phasePicker {
+		return m.renderPicker()
+	}
 
 	var b strings.Builder
 	b.WriteString(m.viewport.View())
