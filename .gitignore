@@ -3,3 +3,6 @@
 *.log
 /kram-daemon.db
 /kram-daemon
+
+# Disposable local dev tooling — never committed.
+/devtools/
