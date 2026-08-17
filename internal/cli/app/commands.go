@@ -53,17 +53,37 @@ func loadHistoryCmd(c *daemonclient.Client, sessionID string) tea.Cmd {
 	}
 }
 
-type sendResultMsg struct {
-	result daemonclient.SendMessageResult
+// streamStartMsg reports whether the connection for a new agent turn was
+// opened successfully. The turn itself hasn't produced anything yet —
+// events arrive one at a time via streamEventMsg/readNextEventCmd.
+type streamStartMsg struct {
+	stream *daemonclient.MessageStream
 	err    error
 }
 
-func sendMessageCmd(c *daemonclient.Client, sessionID, content string) tea.Cmd {
+func startSendMessageCmd(c *daemonclient.Client, sessionID, content string) tea.Cmd {
 	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
-		defer cancel()
-		res, err := c.SendMessage(ctx, sessionID, content, nil)
-		return sendResultMsg{result: res, err: err}
+		// No fixed timeout here: a multi-tool agent turn can legitimately
+		// run long. The connection is torn down when the program quits or
+		// the stream reports done/error.
+		stream, err := c.SendMessageStream(context.Background(), sessionID, content, nil)
+		return streamStartMsg{stream: stream, err: err}
+	}
+}
+
+// streamEventMsg is one event off an open MessageStream. done mirrors
+// MessageStream.Next's contract: once true, the caller stops reading.
+type streamEventMsg struct {
+	stream *daemonclient.MessageStream
+	event  daemonclient.StreamEvent
+	done   bool
+	err    error
+}
+
+func readNextEventCmd(stream *daemonclient.MessageStream) tea.Cmd {
+	return func() tea.Msg {
+		evt, done, err := stream.Next()
+		return streamEventMsg{stream: stream, event: evt, done: done, err: err}
 	}
 }
 

@@ -174,6 +174,23 @@ breathing through the same color palette the footer's pulse dot uses,
 kept in lockstep via the same `animFrame` — instead of a static label, so
 the two live indicators read as one visual language rather than two.
 
+Replies stream token by token instead of appearing as one block after the
+whole turn finishes. `POST /sessions/{id}/messages` (`internal/daemon/
+server`) always responds over SSE now — a play-by-play of the agent loop
+(`internal/daemon/agent`'s `EventFunc`: text deltas, tool start/result,
+notices) as they happen, ending in one `done` event — instead of a single
+JSON blob returned after everything completes. The daemon itself now runs
+its gateway calls through `gatewayclient.ChatCompletionStream` rather than
+the buffered `ChatCompletion`, and the gateway's own streaming responses
+(`internal/server/chat.go`) carry `provider`/`attempts`/`usage`/
+`tool_calls` on the terminal chunk so the daemon never needs a separate
+non-streaming request to get them. While a reply is streaming in, its text
+renders plain (no Glamour) — parsing a markdown string mid-formation (an
+unclosed code fence, a stray `**`) would flicker through broken rendering
+every frame — the full markdown render happens once, when the message
+completes. Tool calls show a live spinner from the moment they start,
+switching to ✓/✗ when their result lands, not just at the very end.
+
 ```bash
 go run ./cmd/cli -daemon http://127.0.0.1:20130 -gateway http://127.0.0.1:20128
 ```

@@ -102,10 +102,16 @@ type AttemptInfo struct {
 	LatencyMS int64  `json:"latency_ms"`
 }
 
-// ChatCompletionChunkDelta is the incremental content of one SSE chunk.
+// ChatCompletionChunkDelta is the incremental content of one SSE chunk. On
+// the terminal chunk (FinishReason set), ToolCalls carries the fully
+// assembled calls in one go rather than OpenAI's fragmented-by-index
+// deltas — kram-gateway already does that reassembly per provider
+// (internal/provider), and re-fragmenting it for a stream Kram itself is
+// usually the only consumer of would just be extra work with no benefit.
 type ChatCompletionChunkDelta struct {
-	Role    string `json:"role,omitempty"`
-	Content string `json:"content,omitempty"`
+	Role      string     `json:"role,omitempty"`
+	Content   string     `json:"content,omitempty"`
+	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
 }
 
 // ChatCompletionChunkChoice wraps a delta inside a streaming chunk.
@@ -115,13 +121,20 @@ type ChatCompletionChunkChoice struct {
 	FinishReason *string                  `json:"finish_reason"`
 }
 
-// ChatCompletionChunk is one `data: {...}` SSE event for streaming responses.
+// ChatCompletionChunk is one `data: {...}` SSE event for streaming
+// responses. Provider, Attempts and Usage are kram-gateway extensions,
+// set only on the terminal chunk (mirrors ChatCompletionResponse) — the
+// daemon relies on these to run its agent loop entirely off the
+// streaming path instead of needing a separate non-streaming call.
 type ChatCompletionChunk struct {
-	ID      string                      `json:"id"`
-	Object  string                      `json:"object"`
-	Created int64                       `json:"created"`
-	Model   string                      `json:"model"`
-	Choices []ChatCompletionChunkChoice `json:"choices"`
+	ID       string                      `json:"id"`
+	Object   string                      `json:"object"`
+	Created  int64                       `json:"created"`
+	Model    string                      `json:"model"`
+	Choices  []ChatCompletionChunkChoice `json:"choices"`
+	Provider string                      `json:"provider,omitempty"`
+	Attempts []AttemptInfo               `json:"attempts,omitempty"`
+	Usage    *Usage                      `json:"usage,omitempty"`
 }
 
 // ErrorResponse is the OpenAI-compatible error envelope.

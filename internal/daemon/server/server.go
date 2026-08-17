@@ -7,6 +7,7 @@ package server
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"time"
@@ -129,6 +130,12 @@ type sendMessageRequest struct {
 	Images  []string `json:"images,omitempty"` // data: URLs
 }
 
+// handleSendMessage always responds over SSE: a play-by-play of the agent
+// loop (text deltas as the model generates them, tool start/result,
+// notices) as they happen, ending in one "done" event with the same shape
+// the old single-JSON response had. The CLI is effectively the only
+// consumer, and it always wants the live view — a curl/script client
+// still gets a well-formed event stream, just not a single JSON blob.
 func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 
@@ -142,20 +149,60 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := s.agent.Run(r.Context(), id, req.Content, req.Images)
-	if err != nil {
-		if errors.Is(err, agent.ErrNotFound) {
+	// Checked before committing to the stream so an invalid session ID
+	// still gets a proper 404 instead of a 200 wrapping an error event.
+	if _, _, err := s.sessions.Get(id); err != nil {
+		if errors.Is(err, session.ErrNotFound) {
 			writeError(w, http.StatusNotFound, "session not found")
 			return
 		}
-		if errors.Is(err, agent.ErrContextOverflow) {
-			writeError(w, http.StatusInsufficientStorage, err.Error())
-			return
-		}
-		writeError(w, http.StatusBadGateway, err.Error())
+		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "streaming unsupported")
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.WriteHeader(http.StatusOK)
+
+	writeEvent := func(v any) {
+		b, err := json.Marshal(v)
+		if err != nil {
+			return
+		}
+		fmt.Fprintf(w, "data: %s\n\n", b)
+		flusher.Flush()
+	}
+
+	onEvent := func(evt agent.Event) {
+		switch evt.Kind {
+		case agent.EventDelta:
+			writeEvent(map[string]any{"type": "delta", "content": evt.Content})
+		case agent.EventToolStart:
+			writeEvent(map[string]any{"type": "tool_start", "name": evt.ToolName, "args": evt.ToolArgs})
+		case agent.EventToolResult:
+			writeEvent(map[string]any{"type": "tool_result", "name": evt.ToolName, "result": evt.ToolResult, "ok": evt.ToolOK})
+		case agent.EventNotice:
+			writeEvent(map[string]any{"type": "notice", "text": evt.Notice})
+		}
+	}
+
+	result, err := s.agent.Run(r.Context(), id, req.Content, req.Images, onEvent)
+	if err != nil {
+		writeEvent(map[string]any{"type": "error", "error": err.Error()})
+		fmt.Fprint(w, "data: [DONE]\n\n")
+		flusher.Flush()
+		return
+	}
+
+	writeEvent(map[string]any{
+		"type":          "done",
 		"message":       result.Message,
 		"attempts":      result.Attempts,
 		"usage":         result.Usage,
@@ -163,6 +210,8 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 		"compactions":   result.Compactions,
 		"image_notice":  result.ImageNotice,
 	})
+	fmt.Fprint(w, "data: [DONE]\n\n")
+	flusher.Flush()
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

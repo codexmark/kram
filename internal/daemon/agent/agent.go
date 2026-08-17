@@ -22,6 +22,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/codexmark/kram-gateway/internal/daemon/compaction"
 	"github.com/codexmark/kram-gateway/internal/daemon/gatewayclient"
@@ -111,7 +112,10 @@ func New(st *store.Store, gw *gatewayclient.Client, tr *tools.Registry, cfg Conf
 // Run handles one user message end to end: persist it, run the tool loop
 // until the model produces a final text answer (or the budget runs out),
 // and return that answer plus everything that happened along the way.
-func (s *Service) Run(ctx context.Context, sessionID, userContent string, images []string) (RunResult, error) {
+// onEvent (may be nil) receives a live play-by-play — text deltas as the
+// model generates them, tool start/result, and notices — as they happen
+// rather than only in the returned RunResult once everything is done.
+func (s *Service) Run(ctx context.Context, sessionID, userContent string, images []string, onEvent EventFunc) (RunResult, error) {
 	if _, err := s.store.GetSession(sessionID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return RunResult{}, ErrNotFound
@@ -125,6 +129,7 @@ func (s *Service) Run(ctx context.Context, sessionID, userContent string, images
 		if err == nil && !ok {
 			imageNotice = fmt.Sprintf("images were attached, but no provider in combo %q supports image input — sent as text only", s.cfg.Model)
 			images = nil
+			emit(onEvent, Event{Kind: EventNotice, Notice: imageNotice})
 		}
 		// If the status check itself failed, fail open and still attach
 		// images rather than silently dropping them over a transient
@@ -161,6 +166,7 @@ func (s *Service) Run(ctx context.Context, sessionID, userContent string, images
 				}
 				compactions++
 				result.Compactions = compactions
+				emit(onEvent, Event{Kind: EventNotice, Notice: "session history was compacted to stay in budget"})
 				continue // reload the now-much-shorter effective history before calling the model
 			}
 			effective = pruned
@@ -189,7 +195,7 @@ func (s *Service) Run(ctx context.Context, sessionID, userContent string, images
 			})
 		}
 
-		callResult, err := s.gateway.ChatCompletion(ctx, s.cfg.Model, modelMessages, toolDefs)
+		callResult, err := s.streamCall(ctx, modelMessages, toolDefs, onEvent)
 		if err != nil {
 			return RunResult{}, fmt.Errorf("gateway call failed: %w", err)
 		}
@@ -228,7 +234,9 @@ func (s *Service) Run(ctx context.Context, sessionID, userContent string, images
 		}
 
 		for _, tc := range callResult.ToolCalls {
+			emit(onEvent, Event{Kind: EventToolStart, ToolName: tc.Function.Name, ToolArgs: tc.Function.Arguments})
 			activity, toolMsg := s.runTool(ctx, tc)
+			emit(onEvent, Event{Kind: EventToolResult, ToolName: tc.Function.Name, ToolResult: activity.Result, ToolOK: activity.OK})
 			result.ToolActivity = append(result.ToolActivity, activity)
 			if _, err := s.store.AppendMessage(sessionID, toolMsg); err != nil {
 				return RunResult{}, fmt.Errorf("persisting tool result: %w", err)
@@ -239,6 +247,38 @@ func (s *Service) Run(ctx context.Context, sessionID, userContent string, images
 	}
 
 	return RunResult{}, fmt.Errorf("agent loop exhausted %d turns without a final answer", s.cfg.MaxTurns)
+}
+
+// streamCall makes one gateway call over the streaming path and
+// accumulates it into the same shape the old non-streaming call
+// returned, emitting each text fragment via onEvent as it arrives. Every
+// turn goes through here now, including tool-calling turns — those just
+// happen to never emit a delta, since the model isn't producing visible
+// text when it's deciding what to call.
+func (s *Service) streamCall(ctx context.Context, messages []openai.ChatMessage, toolDefs []openai.Tool, onEvent EventFunc) (gatewayclient.Result, error) {
+	deltas, err := s.gateway.ChatCompletionStream(ctx, s.cfg.Model, messages, toolDefs)
+	if err != nil {
+		return gatewayclient.Result{}, err
+	}
+
+	var content strings.Builder
+	var result gatewayclient.Result
+	for d := range deltas {
+		if d.Err != nil {
+			return gatewayclient.Result{}, d.Err
+		}
+		if d.Content != "" {
+			content.WriteString(d.Content)
+			emit(onEvent, Event{Kind: EventDelta, Content: d.Content})
+		}
+		if d.Done {
+			result = gatewayclient.Result{
+				Content: content.String(), ToolCalls: d.ToolCalls,
+				Provider: d.Provider, Attempts: d.Attempts, Usage: d.Usage,
+			}
+		}
+	}
+	return result, nil
 }
 
 func (s *Service) runTool(ctx context.Context, tc openai.ToolCall) (ToolActivity, store.Message) {

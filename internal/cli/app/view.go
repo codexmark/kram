@@ -27,21 +27,27 @@ func (m *Model) refreshTranscript() {
 			b.WriteString(m.renderUserBubble(msg.Content))
 		default:
 			for _, act := range msg.ToolActivity {
-				b.WriteString(renderToolActivity(act) + "\n")
+				b.WriteString(m.renderToolActivity(act) + "\n")
 			}
-			if msg.Content != "" {
+			switch {
+			case msg.streaming && msg.Content == "":
+				// Nothing generated yet this turn (still deciding, or
+				// mid-tool-call) — the breathing placeholder.
+				b.WriteString(m.thinkingLine())
+			case msg.streaming:
+				// Content is arriving live: plain text only. Markdown
+				// parsed against an incomplete string (an unclosed code
+				// fence, a stray "**") would flicker through broken
+				// formatting every frame — the full render happens once,
+				// below, when the message is complete.
+				b.WriteString(styleKramTag.Render("kram") + "  " + styleBody.Render(msg.Content))
+			case msg.Content != "":
 				b.WriteString(styleKramTag.Render("kram") + "  " + renderMarkdown(m.mdRenderer, msg.Content))
 			}
 			for _, n := range msg.Notices {
 				b.WriteString("\n" + styleHint.Render("· "+n))
 			}
 		}
-	}
-	if m.waiting {
-		if m.messages != nil {
-			b.WriteString("\n\n")
-		}
-		b.WriteString(m.thinkingLine())
 	}
 	if m.err != nil {
 		b.WriteString("\n\n" + styleErrBadge.Render("erro: "+m.err.Error()))
@@ -194,14 +200,17 @@ func (m Model) contextIcon() string {
 // renderToolActivity draws one line per tool call the agent loop made,
 // between the user's message and the final answer — real activity, not a
 // generic "thinking" placeholder.
-func renderToolActivity(act daemonclient.ToolActivity) string {
+func (m Model) renderToolActivity(act daemonclient.ToolActivity) string {
 	args := act.Args
 	if len(args) > 60 {
 		args = args[:60] + "…"
 	}
-	mark := styleBadgeOK.Render("✓")
-	if !act.OK {
-		mark = styleBadgeBad.Render("✗")
+	mark := m.spin.View() // still running: real-time spinner, not a guessed outcome
+	if !act.Running {
+		mark = styleBadgeOK.Render("✓")
+		if !act.OK {
+			mark = styleBadgeBad.Render("✗")
+		}
 	}
 	return styleHint.Render("  ↳ ") + styleMeta.Render(act.Name+"("+args+")") + " " + mark
 }

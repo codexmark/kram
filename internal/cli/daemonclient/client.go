@@ -5,11 +5,13 @@
 package daemonclient
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/codexmark/kram-gateway/internal/openai"
@@ -37,11 +39,16 @@ type Session struct {
 type Client struct {
 	baseURL string
 	http    *http.Client
+	stream  *http.Client // no fixed timeout: a multi-tool agent turn can legitimately run long; the caller's context is the only bound
 }
 
 // New builds a client pointed at a running daemon (e.g. http://127.0.0.1:20130).
 func New(baseURL string) *Client {
-	return &Client{baseURL: baseURL, http: &http.Client{Timeout: 180 * time.Second}}
+	return &Client{
+		baseURL: baseURL,
+		http:    &http.Client{Timeout: 30 * time.Second},
+		stream:  &http.Client{},
+	}
 }
 
 // CreateSession starts a new session with the given title.
@@ -69,35 +76,119 @@ func (c *Client) GetSession(ctx context.Context, id string) (Session, []Message,
 }
 
 // ToolActivity mirrors one tool call the daemon's agent loop made while
-// producing this reply.
+// producing this reply. Running is CLI-only UI state (never sent over the
+// wire) — true from the moment a tool_start event arrives until its
+// matching tool_result lands.
 type ToolActivity struct {
-	Name   string `json:"name"`
-	Args   string `json:"args"`
-	Result string `json:"result"`
-	OK     bool   `json:"ok"`
+	Name    string `json:"name"`
+	Args    string `json:"args"`
+	Result  string `json:"result"`
+	OK      bool   `json:"ok"`
+	Running bool   `json:"-"`
 }
 
-// SendMessageResult is a reply plus the real fallback trail the gateway
-// walked to produce it, and everything the agent loop did along the way.
-type SendMessageResult struct {
-	Message      Message              `json:"message"`
-	Attempts     []openai.AttemptInfo `json:"attempts"`
-	Usage        openai.Usage         `json:"usage"`
-	ToolActivity []ToolActivity       `json:"tool_activity"`
-	Compactions  int                  `json:"compactions"`
-	ImageNotice  string               `json:"image_notice"`
+// StreamEvent is one event from a message stream. Type selects which
+// other fields are meaningful: "delta" (Content), "tool_start" (Name,
+// Args), "tool_result" (Name, Result, OK), "notice" (Text), "done"
+// (Message, Attempts, Usage, ToolActivity, Compactions, ImageNotice), or
+// "error" (Error).
+type StreamEvent struct {
+	Type         string               `json:"type"`
+	Content      string               `json:"content,omitempty"`
+	Name         string               `json:"name,omitempty"`
+	Args         string               `json:"args,omitempty"`
+	Result       string               `json:"result,omitempty"`
+	OK           bool                 `json:"ok,omitempty"`
+	Text         string               `json:"text,omitempty"`
+	Message      Message              `json:"message,omitempty"`
+	Attempts     []openai.AttemptInfo `json:"attempts,omitempty"`
+	Usage        openai.Usage         `json:"usage,omitempty"`
+	ToolActivity []ToolActivity       `json:"tool_activity,omitempty"`
+	Compactions  int                  `json:"compactions,omitempty"`
+	ImageNotice  string               `json:"image_notice,omitempty"`
+	Error        string               `json:"error,omitempty"`
 }
 
-// SendMessage posts a user message (with optional image data: URLs) to a
-// session and returns the assistant's reply.
-func (c *Client) SendMessage(ctx context.Context, sessionID, content string, images []string) (SendMessageResult, error) {
-	var out SendMessageResult
+// MessageStream is an open connection to a running agent turn — read it
+// with Next until it reports done, then Close it.
+type MessageStream struct {
+	resp    *http.Response
+	scanner *bufio.Scanner
+}
+
+// Next blocks until the next SSE event arrives. done is true once the
+// stream has logically ended (a "done"/"error" event, EOF, or a read
+// error) — the caller should stop calling Next at that point, though it
+// remains safe to call again (it will just report done with a zero event).
+func (s *MessageStream) Next() (evt StreamEvent, done bool, err error) {
+	for s.scanner.Scan() {
+		line := s.scanner.Text()
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if data == "" {
+			continue
+		}
+		if data == "[DONE]" {
+			return StreamEvent{}, true, nil
+		}
+		if err := json.Unmarshal([]byte(data), &evt); err != nil {
+			continue // skip malformed event, keep reading
+		}
+		return evt, evt.Type == "done" || evt.Type == "error", nil
+	}
+	if err := s.scanner.Err(); err != nil {
+		return StreamEvent{}, true, fmt.Errorf("reading daemon stream: %w", err)
+	}
+	return StreamEvent{}, true, nil // EOF
+}
+
+// Close releases the underlying HTTP connection.
+func (s *MessageStream) Close() error {
+	return s.resp.Body.Close()
+}
+
+// SendMessageStream posts a user message (with optional image data: URLs)
+// and returns a live stream of what the agent loop does to answer it —
+// text deltas as they're generated, tool activity, notices, ending in one
+// "done" (or "error") event.
+func (c *Client) SendMessageStream(ctx context.Context, sessionID, content string, images []string) (*MessageStream, error) {
 	body := map[string]any{"content": content}
 	if len(images) > 0 {
 		body["images"] = images
 	}
-	err := c.doJSON(ctx, http.MethodPost, "/sessions/"+sessionID+"/messages", body, &out)
-	return out, err
+	payload, err := json.Marshal(body)
+	if err != nil {
+		return nil, fmt.Errorf("encoding request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/sessions/"+sessionID+"/messages", bytes.NewReader(payload))
+	if err != nil {
+		return nil, fmt.Errorf("building request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "text/event-stream")
+
+	resp, err := c.stream.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("calling daemon: %w", err)
+	}
+
+	if resp.StatusCode >= 400 {
+		defer resp.Body.Close()
+		var errBody struct {
+			Error string `json:"error"`
+		}
+		if json.NewDecoder(resp.Body).Decode(&errBody) == nil && errBody.Error != "" {
+			return nil, fmt.Errorf("daemon: %s", errBody.Error)
+		}
+		return nil, fmt.Errorf("daemon returned %s", resp.Status)
+	}
+
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+	return &MessageStream{resp: resp, scanner: scanner}, nil
 }
 
 // ContextCategory is one real contributor to a session's context-window usage.

@@ -49,6 +49,12 @@ type chatMessage struct {
 	Provider     string
 	ToolActivity []daemonclient.ToolActivity
 	Notices      []string // e.g. image capability fallback, compaction happened
+	// streaming is true from the moment this assistant message's turn
+	// starts until its "done"/"error" event lands. While true, content
+	// renders as plain text (deltas arriving mid-markdown would flicker
+	// through half-parsed formatting); the full markdown render happens
+	// once, when the message is complete.
+	streaming bool
 }
 
 // Model is the CLI's full Bubble Tea state.
@@ -197,34 +203,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.refreshTranscript()
 		return m, nil
 
-	case sendResultMsg:
-		m.waiting = false
+	case streamStartMsg:
 		if msg.err != nil {
+			m.waiting = false
 			m.err = msg.err
+			m.dropStreamingPlaceholder()
 			m.refreshTranscript()
 			return m, nil
 		}
-		m.err = nil
-		m.lastProvider = msg.result.Message.Provider
-		m.lastAttempts = msg.result.Attempts
-		m.lastUsage = msg.result.Usage
+		return m, readNextEventCmd(msg.stream)
 
-		var notices []string
-		if msg.result.ImageNotice != "" {
-			notices = append(notices, msg.result.ImageNotice)
-		}
-		if msg.result.Compactions > 0 {
-			notices = append(notices, fmt.Sprintf("session history was compacted %d time(s) to stay in budget", msg.result.Compactions))
-		}
-
-		m.messages = append(m.messages, chatMessage{
-			Role: "assistant", Content: msg.result.Message.Content, Provider: msg.result.Message.Provider,
-			ToolActivity: msg.result.ToolActivity, Notices: notices,
-		})
-		m.refreshTranscript()
-		// The turn may have changed how much context is used (new
-		// messages, maybe a compaction) — refresh the icon quietly.
-		return m, fetchContextCmd(m.daemon, m.sessionID)
+	case streamEventMsg:
+		return m.handleStreamEvent(msg)
 
 	case statusResultMsg:
 		m.strategyErr = msg.err
@@ -423,12 +413,126 @@ func (m Model) submit() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	m.input.SetValue("")
-	m.messages = append(m.messages, chatMessage{Role: "user", Content: text})
+	m.messages = append(m.messages,
+		chatMessage{Role: "user", Content: text},
+		chatMessage{Role: "assistant", streaming: true}, // filled in live as streamEventMsg events arrive
+	)
 	m.waiting = true
 	m.animFrame = 0
 	m.err = nil
 	m.refreshTranscript()
-	return m, tea.Batch(sendMessageCmd(m.daemon, m.sessionID, text), animTickCmd(), m.spin.Tick)
+	return m, tea.Batch(startSendMessageCmd(m.daemon, m.sessionID, text), animTickCmd(), m.spin.Tick)
+}
+
+// dropStreamingPlaceholder removes the trailing empty assistant message
+// submit() adds optimistically, for the case where the turn never
+// actually started (e.g. the daemon was unreachable).
+func (m *Model) dropStreamingPlaceholder() {
+	if n := len(m.messages); n > 0 && m.messages[n-1].streaming {
+		m.messages = m.messages[:n-1]
+	}
+}
+
+// handleStreamEvent applies one event from an in-flight agent turn to the
+// trailing (streaming) assistant message, and either continues reading
+// the stream or, once it's done, settles the footer/context exactly like
+// the old single-response flow did.
+func (m Model) handleStreamEvent(msg streamEventMsg) (tea.Model, tea.Cmd) {
+	if msg.err != nil {
+		m.waiting = false
+		m.err = msg.err
+		m.finishStreamingPlaceholder()
+		m.refreshTranscript()
+		return m, nil
+	}
+
+	n := len(m.messages)
+	last := func() *chatMessage {
+		if n == 0 {
+			return nil
+		}
+		return &m.messages[n-1]
+	}
+
+	switch msg.event.Type {
+	case "delta":
+		if lm := last(); lm != nil {
+			lm.Content += msg.event.Content
+		}
+		m.refreshTranscript()
+
+	case "tool_start":
+		if lm := last(); lm != nil {
+			lm.ToolActivity = append(lm.ToolActivity, daemonclient.ToolActivity{
+				Name: msg.event.Name, Args: msg.event.Args, Running: true,
+			})
+		}
+		m.refreshTranscript()
+
+	case "tool_result":
+		if lm := last(); lm != nil {
+			for i := len(lm.ToolActivity) - 1; i >= 0; i-- {
+				if lm.ToolActivity[i].Name == msg.event.Name && lm.ToolActivity[i].Running {
+					lm.ToolActivity[i].Result = msg.event.Result
+					lm.ToolActivity[i].OK = msg.event.OK
+					lm.ToolActivity[i].Running = false
+					break
+				}
+			}
+		}
+		m.refreshTranscript()
+
+	case "notice":
+		if lm := last(); lm != nil {
+			lm.Notices = append(lm.Notices, msg.event.Text)
+		}
+		m.refreshTranscript()
+
+	case "done":
+		m.waiting = false
+		m.err = nil
+		m.lastProvider = msg.event.Message.Provider
+		m.lastAttempts = msg.event.Attempts
+		m.lastUsage = msg.event.Usage
+		if lm := last(); lm != nil {
+			lm.Content = msg.event.Message.Content // authoritative final text, in case deltas ever diverge
+			lm.Provider = msg.event.Message.Provider
+			lm.streaming = false
+		}
+		_ = msg.stream.Close()
+		m.refreshTranscript()
+		// The turn may have changed how much context is used (new
+		// messages, maybe a compaction) — refresh the icon quietly.
+		return m, fetchContextCmd(m.daemon, m.sessionID)
+
+	case "error":
+		m.waiting = false
+		m.err = fmt.Errorf("%s", msg.event.Error)
+		m.finishStreamingPlaceholder()
+		_ = msg.stream.Close()
+		m.refreshTranscript()
+		return m, nil
+	}
+
+	if msg.done {
+		// Reached EOF or a [DONE] marker without a recognized terminal
+		// event — treat as a quiet end rather than reading forever.
+		m.waiting = false
+		m.finishStreamingPlaceholder()
+		_ = msg.stream.Close()
+		return m, nil
+	}
+	return m, readNextEventCmd(msg.stream)
+}
+
+// finishStreamingPlaceholder clears the streaming flag on the trailing
+// assistant message without discarding whatever partial content it has —
+// used when a stream ends abnormally, so a mid-answer failure still shows
+// what was received instead of erasing it.
+func (m *Model) finishStreamingPlaceholder() {
+	if n := len(m.messages); n > 0 {
+		m.messages[n-1].streaming = false
+	}
 }
 
 // currentCombo returns the combo the daemon is actually configured to use,

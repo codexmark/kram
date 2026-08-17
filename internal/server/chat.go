@@ -73,8 +73,10 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			}
 			// Committed: headers are about to be written, no more fallback
 			// is possible for this request after this point.
-			s.telemetry.RecordLatency(p.ID(), time.Since(attemptStart).Milliseconds())
-			s.streamResponse(w, p.ID(), req.Model, first, events)
+			commitElapsed := time.Since(attemptStart).Milliseconds()
+			s.telemetry.RecordLatency(p.ID(), commitElapsed)
+			trail = append(trail, openai.AttemptInfo{Provider: p.ID(), OK: true, LatencyMS: commitElapsed})
+			s.streamResponse(w, p.ID(), req.Model, first, events, trail)
 			return
 		}
 
@@ -155,8 +157,12 @@ func writeBufferedResponse(w http.ResponseWriter, model, providerID, content str
 
 // streamResponse writes SSE chunks to w as events arrive. Once called, the
 // response is committed: headers are sent immediately, so no further
-// fallback is possible if a later event carries an error.
-func (s *Server) streamResponse(w http.ResponseWriter, providerID, model string, first provider.StreamEvent, rest <-chan provider.StreamEvent) {
+// fallback is possible if a later event carries an error. The terminal
+// chunk carries provider/attempts/usage/tool_calls (kram-gateway
+// extensions) so a caller can run entirely off the streaming path — the
+// daemon's agent loop does exactly that, rather than needing a separate
+// non-streaming request.
+func (s *Server) streamResponse(w http.ResponseWriter, providerID, model string, first provider.StreamEvent, rest <-chan provider.StreamEvent, trail []openai.AttemptInfo) {
 	flusher, _ := w.(http.Flusher)
 
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -167,15 +173,7 @@ func (s *Server) streamResponse(w http.ResponseWriter, providerID, model string,
 	id := newID()
 	created := time.Now().Unix()
 
-	writeChunk := func(delta string, role string, finish *string) {
-		chunk := openai.ChatCompletionChunk{
-			ID: id, Object: "chat.completion.chunk", Created: created, Model: model,
-			Choices: []openai.ChatCompletionChunkChoice{{
-				Index:        0,
-				Delta:        openai.ChatCompletionChunkDelta{Role: role, Content: delta},
-				FinishReason: finish,
-			}},
-		}
+	write := func(chunk openai.ChatCompletionChunk) {
 		b, err := json.Marshal(chunk)
 		if err != nil {
 			return
@@ -186,26 +184,51 @@ func (s *Server) streamResponse(w http.ResponseWriter, providerID, model string,
 		}
 	}
 
-	writeChunk("", "assistant", nil)
+	writeDelta := func(delta, role string) {
+		write(openai.ChatCompletionChunk{
+			ID: id, Object: "chat.completion.chunk", Created: created, Model: model,
+			Choices: []openai.ChatCompletionChunkChoice{{
+				Index: 0, Delta: openai.ChatCompletionChunkDelta{Role: role, Content: delta},
+			}},
+		})
+	}
 
-	finishStop := "stop"
-	finishErr := "error"
+	writeFinal := func(finish string, toolCalls []openai.ToolCall, usage *openai.Usage) {
+		chunk := openai.ChatCompletionChunk{
+			ID: id, Object: "chat.completion.chunk", Created: created, Model: model,
+			Choices: []openai.ChatCompletionChunkChoice{{
+				Index:        0,
+				Delta:        openai.ChatCompletionChunkDelta{ToolCalls: toolCalls},
+				FinishReason: &finish,
+			}},
+			Provider: providerID,
+			Attempts: trail,
+			Usage:    usage,
+		}
+		write(chunk)
+	}
+
+	writeDelta("", "assistant")
 
 	handle := func(evt provider.StreamEvent) (keepGoing bool) {
 		if evt.Err != nil {
 			s.markFailure(providerID, evt.Err)
-			writeChunk("", "", &finishErr)
+			writeFinal("error", nil, nil)
 			return false
 		}
 		if evt.Delta != "" {
-			writeChunk(evt.Delta, "", nil)
+			writeDelta(evt.Delta, "")
 		}
 		if evt.Done {
 			s.breakers.ReportSuccess(providerID)
 			if evt.Usage != nil {
 				s.telemetry.RecordUsage(providerID, evt.Usage.PromptTokens, evt.Usage.CompletionTokens)
 			}
-			writeChunk("", "", &finishStop)
+			finish := "stop"
+			if len(evt.ToolCalls) > 0 {
+				finish = "tool_calls"
+			}
+			writeFinal(finish, evt.ToolCalls, evt.Usage)
 			return false
 		}
 		return true
