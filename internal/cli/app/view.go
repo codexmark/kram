@@ -3,6 +3,7 @@ package app
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/lipgloss"
 
@@ -56,21 +57,33 @@ func (m *Model) refreshTranscript() {
 	m.viewport.GotoBottom()
 }
 
-// thinkingPalette is the same breathing-dot idea the footer's pulse bar
-// uses (see footer_helpers.go), reused here so the transcript's "working"
-// state reads as the same visual language rather than a second, unrelated
-// spinner style.
-var thinkingPalette = []lipgloss.Style{styleBadgeIdle, styleBadgeAccent, styleBadgeOK, styleBadgeAccent}
+// stallThreshold is how long without any event (delta, tool_start,
+// tool_result, notice) before the "working" indicator stops implying
+// steady progress and admits it might be stuck. This is a real signal
+// (time since the last byte actually arrived), not a guess — the visual
+// research pass that motivated this (OpenClaude's useStalledAnimation)
+// found this distinction matters: an app that looks identically "busy"
+// whether it's making progress or hung reads as broken once someone
+// notices, and a plain spinner can't tell the two apart.
+const stallThreshold = 8 * time.Second
 
 // thinkingLine is the animated placeholder shown in the transcript while
-// the agent loop is running — a breathing "kram" tag (color cycling
-// through the same palette as the footer) plus the spinner and a
-// build-up ellipsis, driven by animFrame so it's in lockstep with the
-// footer's own animation.
+// the agent loop is running: a genuine color-gradient shimmer across the
+// "kram" tag (see shimmer.go — go-colorful interpolation, not a discrete
+// palette step) plus a live elapsed-time counter, driven by animFrame so
+// it's in lockstep with the footer's own animation. Past stallThreshold
+// with no new event, it switches to a distinct warm color and says so
+// plainly instead of continuing to shimmer as if nothing were wrong.
 func (m Model) thinkingLine() string {
-	tagStyle := thinkingPalette[(m.animFrame/3)%len(thinkingPalette)].Bold(true)
-	dots := strings.Repeat(".", 1+(m.animFrame/2)%3)
-	return tagStyle.Render("kram") + "  " + m.spin.View() + " " + styleMeta.Render("pensando"+dots)
+	elapsed := time.Since(m.waitStartedAt).Round(time.Second)
+
+	if !m.waitStartedAt.IsZero() && time.Since(m.lastEventAt) > stallThreshold {
+		return styleBadgeWarn.Bold(true).Render("kram") + "  " + m.spin.View() + " " +
+			styleBadgeWarn.Render(fmt.Sprintf("ainda trabalhando… (%s sem resposta)", elapsed))
+	}
+
+	return shimmerText("kram", m.animFrame) + "  " + m.spin.View() + " " +
+		styleMeta.Render(fmt.Sprintf("pensando (%s)", elapsed))
 }
 
 // renderUserBubble right-aligns a user message — the "you" tag and
@@ -78,6 +91,14 @@ func (m Model) thinkingLine() string {
 // whole block pushed flush right, so the transcript reads as a normal
 // two-sided chat (you on the right, kram on the left) instead of
 // everything stacked in one left-aligned column.
+//
+// Padding is computed by hand, per line, rather than leaning on lipgloss's
+// Style.Width+Align: that combination pads a block out to a fixed box
+// only when its content actually reaches that width on some line — a
+// short message (or the lone "you" tag line) has no line that long, so
+// nothing pads it and it renders hugging the left edge instead. Measuring
+// each line's real rendered width and left-padding it individually always
+// anchors the block flush right, regardless of content length.
 func (m Model) renderUserBubble(content string) string {
 	bubbleWidth := m.viewport.Width - 10
 	if bubbleWidth > 64 {
@@ -86,9 +107,31 @@ func (m Model) renderUserBubble(content string) string {
 	if bubbleWidth < 20 {
 		bubbleWidth = m.viewport.Width
 	}
-	wrappedContent := lipgloss.NewStyle().Width(bubbleWidth).Render(styleBody.Render(content))
-	block := styleYouTag.Render("you") + "\n" + wrappedContent
-	return lipgloss.NewStyle().Width(m.viewport.Width).Align(lipgloss.Right).Render(block)
+
+	// Width() wraps long lines at bubbleWidth, but it also pads short
+	// ones out to bubbleWidth with trailing spaces (left-aligned inside
+	// that box by default) — trimmed back off below, since otherwise the
+	// per-line pad computed next would measure the padded box width
+	// instead of the real content, and the visible text would sit at the
+	// box's left edge rather than flush against the transcript's right
+	// edge.
+	wrapped := lipgloss.NewStyle().Width(bubbleWidth).Render(styleBody.Render(content))
+	rawLines := strings.Split(wrapped, "\n")
+	lines := make([]string, 0, len(rawLines)+1)
+	lines = append(lines, styleYouTag.Render("you"))
+	for _, l := range rawLines {
+		lines = append(lines, strings.TrimRight(l, " "))
+	}
+
+	rightAligned := make([]string, len(lines))
+	for i, line := range lines {
+		pad := m.viewport.Width - lipgloss.Width(line)
+		if pad < 0 {
+			pad = 0
+		}
+		rightAligned[i] = strings.Repeat(" ", pad) + line
+	}
+	return strings.Join(rightAligned, "\n")
 }
 
 func (m Model) View() string {
@@ -133,7 +176,7 @@ func (m Model) footerLine1() string {
 	if m.waiting {
 		dot = styleBadgeWarn.Render("●")
 		name = styleBody.Render(m.combo)
-		latency = styleMeta.Render("…")
+		latency = styleMeta.Render(time.Since(m.waitStartedAt).Round(time.Second).String())
 		spark = animatedSparkline(m.animFrame)
 	} else if m.lastProvider != "" {
 		dot = styleBadgeOK.Render("●")

@@ -9,6 +9,7 @@ package app
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textinput"
@@ -87,6 +88,13 @@ type Model struct {
 	haveContext bool
 
 	animFrame int
+	// waitStartedAt/lastEventAt drive the rich status line (elapsed time)
+	// and stalled-connection detection while a turn is in flight — real
+	// signal, not just an animated glyph implying progress that may not
+	// be happening. See the visual-research note in view.go's
+	// thinkingLine for why this matters.
+	waitStartedAt time.Time
+	lastEventAt   time.Time
 
 	width, height int
 	ready         bool
@@ -419,6 +427,8 @@ func (m Model) submit() (tea.Model, tea.Cmd) {
 	)
 	m.waiting = true
 	m.animFrame = 0
+	m.waitStartedAt = time.Now()
+	m.lastEventAt = time.Now()
 	m.err = nil
 	m.refreshTranscript()
 	return m, tea.Batch(startSendMessageCmd(m.daemon, m.sessionID, text), animTickCmd(), m.spin.Tick)
@@ -438,6 +448,8 @@ func (m *Model) dropStreamingPlaceholder() {
 // the stream or, once it's done, settles the footer/context exactly like
 // the old single-response flow did.
 func (m Model) handleStreamEvent(msg streamEventMsg) (tea.Model, tea.Cmd) {
+	m.lastEventAt = time.Now() // any event, including error, proves the connection is alive — resets stalled detection
+
 	if msg.err != nil {
 		m.waiting = false
 		m.err = msg.err

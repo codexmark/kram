@@ -170,9 +170,31 @@ showing raw `**`/`###`. A malformed-markdown or rendering failure falls
 back to the raw text rather than crashing; user messages are never run
 through it (echoing back reformatted input would be surprising). While a
 turn is running, the transcript shows a "thinking" line — the `kram` tag
-breathing through the same color palette the footer's pulse dot uses,
-kept in lockstep via the same `animFrame` — instead of a static label, so
-the two live indicators read as one visual language rather than two.
+under a real color-gradient shimmer (`internal/cli/app/shimmer.go`,
+[go-colorful](https://github.com/lucasb-eyer/go-colorful) interpolation
+sweeping per character, not a discrete palette step) plus a live elapsed
+counter. This came out of a research pass on Crush and OpenClaude's chat
+UIs specifically: both independently converged on a moving color gradient
+as their "working" indicator instead of a spinner glyph, and OpenClaude
+separately tracks stalled-vs-progressing state rather than showing the
+same "busy" look either way — so past 8s with no new event (delta, tool
+start/result, notice — see `stallThreshold`), the line switches to a
+distinct color and says plainly that it's still going, instead of
+shimmering as if everything's normal. Same real elapsed time is echoed in
+the footer while waiting.
+
+User message bubbles anchor flush right regardless of length: Lip Gloss's
+`Style.Width` pads short content out to that width with trailing spaces
+by default, which the naive version of this used as the input to its
+own right-alignment math — so a short message inherited the padded box's
+width, not its own, and rendered hugging the left edge inside an
+invisible box instead of flush against the true right edge. Fixed by
+trimming that trailing padding before measuring each line.
+
+A small block-letter "KRAM" banner (`internal/cli/app/banner.go`) opens
+the session picker — hand-built and verified by direct render before
+shipping, not typed freehand into the final file (ASCII art is easy to
+get subtly misaligned).
 
 Replies stream token by token instead of appearing as one block after the
 whole turn finishes. `POST /sessions/{id}/messages` (`internal/daemon/
