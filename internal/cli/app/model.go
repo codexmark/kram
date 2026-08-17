@@ -7,6 +7,7 @@
 package app
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/spinner"
@@ -22,9 +23,11 @@ import (
 const footerHeight = 2 // the pulse bar is always exactly two lines
 
 type chatMessage struct {
-	Role     string
-	Content  string
-	Provider string
+	Role         string
+	Content      string
+	Provider     string
+	ToolActivity []daemonclient.ToolActivity
+	Notices      []string // e.g. image capability fallback, compaction happened
 }
 
 // Model is the CLI's full Bubble Tea state.
@@ -122,8 +125,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.lastProvider = msg.result.Message.Provider
 		m.lastAttempts = msg.result.Attempts
 		m.lastUsage = msg.result.Usage
+
+		var notices []string
+		if msg.result.ImageNotice != "" {
+			notices = append(notices, msg.result.ImageNotice)
+		}
+		if msg.result.Compactions > 0 {
+			notices = append(notices, fmt.Sprintf("session history was compacted %d time(s) to stay in budget", msg.result.Compactions))
+		}
+
 		m.messages = append(m.messages, chatMessage{
 			Role: "assistant", Content: msg.result.Message.Content, Provider: msg.result.Message.Provider,
+			ToolActivity: msg.result.ToolActivity, Notices: notices,
 		})
 		m.refreshTranscript()
 		return m, nil

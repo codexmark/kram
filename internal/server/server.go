@@ -74,10 +74,12 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 type statusProvider struct {
-	ID          string                  `json:"id"`
-	Kind        string                  `json:"kind"`
-	BreakerOpen bool                    `json:"breaker_open"`
-	Stats       telemetry.ProviderStats `json:"stats"`
+	ID             string                  `json:"id"`
+	Kind           string                  `json:"kind"`
+	BreakerOpen    bool                    `json:"breaker_open"`
+	SupportsImages bool                    `json:"supports_images"`
+	SupportsTools  bool                    `json:"supports_tools"`
+	Stats          telemetry.ProviderStats `json:"stats"`
 }
 
 type statusCombo struct {
@@ -97,10 +99,12 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	resp := statusResponse{Providers: make([]statusProvider, 0, len(s.providers))}
 	for id, p := range s.providers {
 		resp.Providers = append(resp.Providers, statusProvider{
-			ID:          id,
-			Kind:        p.Kind(),
-			BreakerOpen: s.breakers.IsOpen(id),
-			Stats:       snapshot[id],
+			ID:             id,
+			Kind:           p.Kind(),
+			BreakerOpen:    s.breakers.IsOpen(id),
+			SupportsImages: p.SupportsImages(),
+			SupportsTools:  p.SupportsTools(),
+			Stats:          snapshot[id],
 		})
 	}
 

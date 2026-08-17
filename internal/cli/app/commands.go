@@ -32,9 +32,9 @@ type sendResultMsg struct {
 
 func sendMessageCmd(c *daemonclient.Client, sessionID, content string) tea.Cmd {
 	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
 		defer cancel()
-		res, err := c.SendMessage(ctx, sessionID, content)
+		res, err := c.SendMessage(ctx, sessionID, content, nil)
 		return sendResultMsg{result: res, err: err}
 	}
 }

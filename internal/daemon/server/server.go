@@ -11,21 +11,23 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/codexmark/kram-gateway/internal/daemon/agent"
 	"github.com/codexmark/kram-gateway/internal/daemon/session"
 )
 
-// Server holds the session service and exposes it over HTTP.
+// Server holds the session and agent services and exposes them over HTTP.
 type Server struct {
 	sessions *session.Service
+	agent    *agent.Service
 	logger   *slog.Logger
 }
 
 // New builds a daemon Server.
-func New(sessions *session.Service, logger *slog.Logger) *Server {
+func New(sessions *session.Service, agentSvc *agent.Service, logger *slog.Logger) *Server {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Server{sessions: sessions, logger: logger}
+	return &Server{sessions: sessions, agent: agentSvc, logger: logger}
 }
 
 // Handler returns the fully wired HTTP handler, including panic recovery.
@@ -108,7 +110,8 @@ func (s *Server) handleGetSession(w http.ResponseWriter, r *http.Request) {
 }
 
 type sendMessageRequest struct {
-	Content string `json:"content"`
+	Content string   `json:"content"`
+	Images  []string `json:"images,omitempty"` // data: URLs
 }
 
 func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
@@ -124,16 +127,27 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	reply, attempts, usage, err := s.sessions.SendMessage(r.Context(), id, req.Content)
+	result, err := s.agent.Run(r.Context(), id, req.Content, req.Images)
 	if err != nil {
-		if errors.Is(err, session.ErrNotFound) {
+		if errors.Is(err, agent.ErrNotFound) {
 			writeError(w, http.StatusNotFound, "session not found")
+			return
+		}
+		if errors.Is(err, agent.ErrContextOverflow) {
+			writeError(w, http.StatusInsufficientStorage, err.Error())
 			return
 		}
 		writeError(w, http.StatusBadGateway, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"message": reply, "attempts": attempts, "usage": usage})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"message":       result.Message,
+		"attempts":      result.Attempts,
+		"usage":         result.Usage,
+		"tool_activity": result.ToolActivity,
+		"compactions":   result.Compactions,
+		"image_notice":  result.ImageNotice,
+	})
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

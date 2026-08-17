@@ -16,6 +16,7 @@ import (
 // and most other aggregators. Only base URL, API key and an optional
 // pinned model differ between them.
 type OpenAICompatible struct {
+	capabilities
 	id      string
 	baseURL string
 	apiKey  string
@@ -24,13 +25,14 @@ type OpenAICompatible struct {
 }
 
 // NewOpenAICompatible constructs an adapter for an OpenAI-shaped backend.
-func NewOpenAICompatible(id, baseURL, apiKey, model string) *OpenAICompatible {
+func NewOpenAICompatible(id, baseURL, apiKey, model string, caps capabilities) *OpenAICompatible {
 	return &OpenAICompatible{
-		id:      id,
-		baseURL: baseURL,
-		apiKey:  apiKey,
-		model:   model,
-		client:  &http.Client{Timeout: 120 * time.Second},
+		capabilities: caps,
+		id:           id,
+		baseURL:      baseURL,
+		apiKey:       apiKey,
+		model:        model,
+		client:       &http.Client{Timeout: 120 * time.Second},
 	}
 }
 
@@ -40,7 +42,16 @@ func (p *OpenAICompatible) Kind() string { return "openai-compat" }
 type openaiCompatChunk struct {
 	Choices []struct {
 		Delta struct {
-			Content string `json:"content"`
+			Content   string `json:"content"`
+			ToolCalls []struct {
+				Index    int    `json:"index"`
+				ID       string `json:"id"`
+				Type     string `json:"type"`
+				Function struct {
+					Name      string `json:"name"`
+					Arguments string `json:"arguments"`
+				} `json:"function"`
+			} `json:"tool_calls"`
 		} `json:"delta"`
 		FinishReason *string `json:"finish_reason"`
 	} `json:"choices"`
@@ -84,6 +95,7 @@ func (p *OpenAICompatible) ChatCompletion(ctx context.Context, req openai.ChatCo
 		defer resp.Body.Close()
 
 		var usage *openai.Usage
+		toolCalls := newToolCallAccumulator()
 		err := scanSSEData(resp.Body, func(data string) bool {
 			if data == "[DONE]" {
 				return false
@@ -103,6 +115,9 @@ func (p *OpenAICompatible) ChatCompletion(ctx context.Context, req openai.ChatCo
 						return false
 					}
 				}
+				for _, tc := range c.Delta.ToolCalls {
+					toolCalls.add(tc.Index, tc.ID, tc.Function.Name, tc.Function.Arguments)
+				}
 			}
 			return true
 		})
@@ -110,7 +125,7 @@ func (p *OpenAICompatible) ChatCompletion(ctx context.Context, req openai.ChatCo
 			events <- StreamEvent{Err: fmt.Errorf("%s: stream read: %w", p.id, err)}
 			return
 		}
-		events <- StreamEvent{Done: true, Usage: usage}
+		events <- StreamEvent{Done: true, Usage: usage, ToolCalls: toolCalls.finish()}
 	}()
 
 	return events, nil

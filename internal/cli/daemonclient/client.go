@@ -61,18 +61,35 @@ func (c *Client) GetSession(ctx context.Context, id string) (Session, []Message,
 	return out.Session, out.Messages, err
 }
 
-// SendMessageResult is a reply plus the real fallback trail the gateway
-// walked to produce it.
-type SendMessageResult struct {
-	Message  Message              `json:"message"`
-	Attempts []openai.AttemptInfo `json:"attempts"`
-	Usage    openai.Usage         `json:"usage"`
+// ToolActivity mirrors one tool call the daemon's agent loop made while
+// producing this reply.
+type ToolActivity struct {
+	Name   string `json:"name"`
+	Args   string `json:"args"`
+	Result string `json:"result"`
+	OK     bool   `json:"ok"`
 }
 
-// SendMessage posts a user message to a session and returns the assistant's reply.
-func (c *Client) SendMessage(ctx context.Context, sessionID, content string) (SendMessageResult, error) {
+// SendMessageResult is a reply plus the real fallback trail the gateway
+// walked to produce it, and everything the agent loop did along the way.
+type SendMessageResult struct {
+	Message      Message              `json:"message"`
+	Attempts     []openai.AttemptInfo `json:"attempts"`
+	Usage        openai.Usage         `json:"usage"`
+	ToolActivity []ToolActivity       `json:"tool_activity"`
+	Compactions  int                  `json:"compactions"`
+	ImageNotice  string               `json:"image_notice"`
+}
+
+// SendMessage posts a user message (with optional image data: URLs) to a
+// session and returns the assistant's reply.
+func (c *Client) SendMessage(ctx context.Context, sessionID, content string, images []string) (SendMessageResult, error) {
 	var out SendMessageResult
-	err := c.doJSON(ctx, http.MethodPost, "/sessions/"+sessionID+"/messages", map[string]string{"content": content}, &out)
+	body := map[string]any{"content": content}
+	if len(images) > 0 {
+		body["images"] = images
+	}
+	err := c.doJSON(ctx, http.MethodPost, "/sessions/"+sessionID+"/messages", body, &out)
 	return out, err
 }
 

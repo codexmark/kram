@@ -78,7 +78,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		content, usage, err := drainToBuffer(events)
+		content, toolCalls, usage, err := drainToBuffer(events)
 		elapsed := time.Since(attemptStart).Milliseconds()
 		if err != nil {
 			lastErr = err
@@ -93,7 +93,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			s.telemetry.RecordUsage(p.ID(), usage.PromptTokens, usage.CompletionTokens)
 		}
 		trail = append(trail, openai.AttemptInfo{Provider: p.ID(), OK: true, LatencyMS: elapsed})
-		writeBufferedResponse(w, req.Model, p.ID(), content, usage, trail)
+		writeBufferedResponse(w, req.Model, p.ID(), content, toolCalls, usage, trail)
 		return
 	}
 
@@ -107,35 +107,41 @@ func (s *Server) markFailure(id string, err error) {
 }
 
 // drainToBuffer fully consumes a provider's stream and concatenates its
-// deltas. Used for non-streaming requests, where nothing is written to the
-// client until we know the whole response succeeded — so a failure here can
-// still fall back to the next provider.
-func drainToBuffer(events <-chan provider.StreamEvent) (string, *openai.Usage, error) {
+// deltas and any tool calls. Used for non-streaming requests, where
+// nothing is written to the client until we know the whole response
+// succeeded — so a failure here can still fall back to the next provider.
+func drainToBuffer(events <-chan provider.StreamEvent) (string, []openai.ToolCall, *openai.Usage, error) {
 	var content strings.Builder
+	var toolCalls []openai.ToolCall
 	var usage *openai.Usage
 	for evt := range events {
 		if evt.Err != nil {
-			return "", nil, evt.Err
+			return "", nil, nil, evt.Err
 		}
 		content.WriteString(evt.Delta)
 		if evt.Usage != nil {
 			usage = evt.Usage
 		}
 		if evt.Done {
+			toolCalls = evt.ToolCalls
 			break
 		}
 	}
-	return content.String(), usage, nil
+	return content.String(), toolCalls, usage, nil
 }
 
-func writeBufferedResponse(w http.ResponseWriter, model, providerID, content string, usage *openai.Usage, trail []openai.AttemptInfo) {
+func writeBufferedResponse(w http.ResponseWriter, model, providerID, content string, toolCalls []openai.ToolCall, usage *openai.Usage, trail []openai.AttemptInfo) {
+	finish := "stop"
+	if len(toolCalls) > 0 {
+		finish = "tool_calls"
+	}
 	resp := openai.ChatCompletionResponse{
 		ID:      newID(),
 		Object:  "chat.completion",
 		Created: time.Now().Unix(),
 		Model:   model,
 		Choices: []openai.ChatCompletionChoice{
-			{Index: 0, Message: openai.ChatMessage{Role: "assistant", Content: content}, FinishReason: "stop"},
+			{Index: 0, Message: openai.ChatMessage{Role: "assistant", Content: content, ToolCalls: toolCalls}, FinishReason: finish},
 		},
 		Provider: providerID,
 		Attempts: trail,

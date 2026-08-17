@@ -27,10 +27,16 @@ three existing projects:
 - **[Compozy](https://github.com/compozy/compozy)** — the daemon-owned,
   local-first orchestration model: durable sessions/tasks that survive
   closing a terminal, multiple control surfaces (CLI/HTTP/MCP), a single
-  source of truth. The next component of Kram (a daemon) will follow this
-  model.
+  source of truth. `cmd/daemon` follows this model.
+- **[Hermes Agent](https://github.com/NousResearch/hermes-agent)** — the
+  agent loop's iteration-budget "soft landing" (a warning near the limit,
+  then one forced final answer instead of a hard cutoff), and its
+  foreground-only, timeout-bounded shell tool.
+- **[OpenClaude](https://github.com/Gitlawb/openclaude)** and
+  **[Antigravity CLI](https://github.com/google-antigravity/antigravity-cli)**
+  — per-session model routing and terminal-first agent UX patterns.
 
-No code from any of the three is reused; only the architectural ideas are.
+No code from any of these is reused; only the architectural ideas are.
 
 ## Run
 
@@ -137,3 +143,46 @@ go run ./cmd/cli -daemon http://127.0.0.1:20130 -gateway http://127.0.0.1:20128
   providers; the explanation line updates to describe whichever one is
   focused. `esc` or `enter` closes it.
 - `ctrl+c` quits.
+
+## Agent loop (component 4)
+
+`internal/daemon/agent` is what makes Kram an agent rather than a chat
+relay: each user message runs a full tool-calling loop, not a single
+model call.
+
+- **Tool-calling protocol** (`internal/openai`, `internal/provider`): the
+  gateway translates Kram's normalized tool-call format to and from each
+  provider's native wire format — OpenAI-style `tool_calls` deltas
+  (accumulated across fragmented SSE chunks), Anthropic `tool_use`/
+  `tool_result` content blocks, and Gemini `functionCall`/
+  `functionResponse` parts.
+- **Tools** (`internal/daemon/tools`): `read_file`, `write_file`,
+  `list_dir`, `grep` (pure Go, no `ripgrep` dependency), and `bash`
+  (foreground-only, timeout-bounded). Every file/shell tool is confined to
+  the daemon's `-workspace` directory — a path that would escape it is
+  rejected before touching the filesystem.
+- **The loop**: waits for a complete (non-streaming) model response before
+  acting on tool calls — every agent-loop implementation we looked at
+  decouples token streaming from tool execution rather than interleaving
+  them. Tool calls run sequentially and their results are persisted and
+  fed back until the model answers in plain text. `-max-turns` bounds the
+  round-trips (default 50); near the limit, tools are withdrawn from the
+  next call and the model is asked directly for a final answer (Hermes's
+  "soft landing" pattern) rather than being cut off mid-loop.
+- **Memory and compaction** (`internal/daemon/compaction`): a tiered
+  strategy — cheap structural pruning of old tool output first, full LLM
+  summarization only if that isn't enough. The summary is stored as a
+  system message wrapped as explicitly non-actionable reference material,
+  and consecutive compactions are capped at 3 per run: both are direct
+  guards against a real, repeatedly-hit bug in other agent loops where the
+  model re-executes its own summary as a new task, overflows again, and
+  loops forever (see package doc for the specific issues this targets).
+- **Images**: gated by capability, never assumed. If images are attached
+  but no provider in the active combo declares `supports_images: true` in
+  `config.yaml`, they're dropped before the request is sent and the
+  caller gets an explicit notice — the CLI shows it inline rather than
+  silently sending a text-only request.
+
+Every message, tool call, tool result, and compaction summary is
+persisted through the same durable store as component 2 — an agent run
+survives a daemon restart exactly like a plain conversation does.

@@ -1,15 +1,18 @@
 // Package store persists sessions and messages to a local SQLite database
 // so the daemon remains the single source of truth across restarts — a
 // client disconnecting, or the daemon itself being restarted, never loses
-// a session's history.
+// a session's history, including its tool-call trail.
 package store
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"time"
 
 	_ "modernc.org/sqlite" // pure-Go driver: keeps the daemon a static, cgo-free binary
+
+	"github.com/codexmark/kram-gateway/internal/openai"
 )
 
 const schema = `
@@ -21,12 +24,16 @@ CREATE TABLE IF NOT EXISTS sessions (
 );
 
 CREATE TABLE IF NOT EXISTS messages (
-	id         INTEGER PRIMARY KEY AUTOINCREMENT,
-	session_id TEXT NOT NULL REFERENCES sessions(id),
-	role       TEXT NOT NULL,
-	content    TEXT NOT NULL,
-	provider   TEXT NOT NULL DEFAULT '',
-	created_at INTEGER NOT NULL
+	id           INTEGER PRIMARY KEY AUTOINCREMENT,
+	session_id   TEXT NOT NULL REFERENCES sessions(id),
+	role         TEXT NOT NULL,
+	content      TEXT NOT NULL,
+	provider     TEXT NOT NULL DEFAULT '',
+	tool_calls   TEXT NOT NULL DEFAULT '',
+	tool_call_id TEXT NOT NULL DEFAULT '',
+	name         TEXT NOT NULL DEFAULT '',
+	images       TEXT NOT NULL DEFAULT '',
+	created_at   INTEGER NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_messages_session_id ON messages(session_id);
@@ -40,15 +47,23 @@ type Session struct {
 	UpdatedAt int64  `json:"updated_at"`
 }
 
-// Message is one turn within a session. Provider is empty for user
-// messages and set to whichever gateway provider served an assistant reply.
+// Message is one turn within a session — a user message, an assistant
+// reply (Provider set to whoever served it, ToolCalls set if it's
+// requesting tool invocations instead of/before answering), or a tool
+// result (Role "tool", ToolCallID + Name identifying which call it
+// answers). Name doubles as the marker for a compaction summary message
+// (Name == CompactionMarker) — see internal/daemon/compaction.
 type Message struct {
-	ID        int64  `json:"id"`
-	SessionID string `json:"session_id"`
-	Role      string `json:"role"`
-	Content   string `json:"content"`
-	Provider  string `json:"provider,omitempty"`
-	CreatedAt int64  `json:"created_at"`
+	ID         int64             `json:"id"`
+	SessionID  string            `json:"session_id"`
+	Role       string            `json:"role"`
+	Content    string            `json:"content"`
+	Provider   string            `json:"provider,omitempty"`
+	ToolCalls  []openai.ToolCall `json:"tool_calls,omitempty"`
+	ToolCallID string            `json:"tool_call_id,omitempty"`
+	Name       string            `json:"name,omitempty"`
+	Images     []string          `json:"images,omitempty"`
+	CreatedAt  int64             `json:"created_at"`
 }
 
 // Store wraps the SQLite connection and the daemon's persistence methods.
@@ -123,10 +138,12 @@ func (s *Store) GetSession(id string) (Session, error) {
 	return sess, nil
 }
 
-// ListMessages returns every message in a session, oldest first.
+// ListMessages returns every message in a session, oldest first, including
+// the full tool-call/tool-result trail and any compaction summaries.
 func (s *Store) ListMessages(sessionID string) ([]Message, error) {
 	rows, err := s.db.Query(
-		`SELECT id, session_id, role, content, provider, created_at FROM messages WHERE session_id = ? ORDER BY id ASC`,
+		`SELECT id, session_id, role, content, provider, tool_calls, tool_call_id, name, images, created_at
+		 FROM messages WHERE session_id = ? ORDER BY id ASC`,
 		sessionID,
 	)
 	if err != nil {
@@ -136,22 +153,64 @@ func (s *Store) ListMessages(sessionID string) ([]Message, error) {
 
 	var out []Message
 	for rows.Next() {
-		var m Message
-		if err := rows.Scan(&m.ID, &m.SessionID, &m.Role, &m.Content, &m.Provider, &m.CreatedAt); err != nil {
-			return nil, fmt.Errorf("scanning message row: %w", err)
+		m, err := scanMessage(rows)
+		if err != nil {
+			return nil, err
 		}
 		out = append(out, m)
 	}
 	return out, rows.Err()
 }
 
-// AppendMessage stores one message (provider is "" for user messages) and
-// touches the parent session's updated_at timestamp.
-func (s *Store) AppendMessage(sessionID, role, content, provider string) (Message, error) {
+type rowScanner interface {
+	Scan(dest ...any) error
+}
+
+func scanMessage(row rowScanner) (Message, error) {
+	var m Message
+	var toolCallsJSON, imagesJSON string
+	if err := row.Scan(&m.ID, &m.SessionID, &m.Role, &m.Content, &m.Provider, &toolCallsJSON, &m.ToolCallID, &m.Name, &imagesJSON, &m.CreatedAt); err != nil {
+		return Message{}, fmt.Errorf("scanning message row: %w", err)
+	}
+	if toolCallsJSON != "" {
+		if err := json.Unmarshal([]byte(toolCallsJSON), &m.ToolCalls); err != nil {
+			return Message{}, fmt.Errorf("decoding stored tool_calls: %w", err)
+		}
+	}
+	if imagesJSON != "" {
+		if err := json.Unmarshal([]byte(imagesJSON), &m.Images); err != nil {
+			return Message{}, fmt.Errorf("decoding stored images: %w", err)
+		}
+	}
+	return m, nil
+}
+
+// AppendMessage stores one message and touches the parent session's
+// updated_at timestamp. Callers set only the fields relevant to the
+// message's role; ID and CreatedAt are assigned here.
+func (s *Store) AppendMessage(sessionID string, msg Message) (Message, error) {
 	now := time.Now().Unix()
+
+	var toolCallsJSON, imagesJSON string
+	if len(msg.ToolCalls) > 0 {
+		b, err := json.Marshal(msg.ToolCalls)
+		if err != nil {
+			return Message{}, fmt.Errorf("encoding tool_calls: %w", err)
+		}
+		toolCallsJSON = string(b)
+	}
+	if len(msg.Images) > 0 {
+		b, err := json.Marshal(msg.Images)
+		if err != nil {
+			return Message{}, fmt.Errorf("encoding images: %w", err)
+		}
+		imagesJSON = string(b)
+	}
+
 	res, err := s.db.Exec(
-		`INSERT INTO messages (session_id, role, content, provider, created_at) VALUES (?, ?, ?, ?, ?)`,
-		sessionID, role, content, provider, now,
+		`INSERT INTO messages (session_id, role, content, provider, tool_calls, tool_call_id, name, images, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		sessionID, msg.Role, msg.Content, msg.Provider, toolCallsJSON, msg.ToolCallID, msg.Name, imagesJSON, now,
 	)
 	if err != nil {
 		return Message{}, fmt.Errorf("appending message: %w", err)
@@ -165,5 +224,8 @@ func (s *Store) AppendMessage(sessionID, role, content, provider string) (Messag
 		return Message{}, fmt.Errorf("touching session: %w", err)
 	}
 
-	return Message{ID: id, SessionID: sessionID, Role: role, Content: content, Provider: provider, CreatedAt: now}, nil
+	msg.ID = id
+	msg.SessionID = sessionID
+	msg.CreatedAt = now
+	return msg, nil
 }

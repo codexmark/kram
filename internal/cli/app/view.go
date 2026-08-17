@@ -5,6 +5,8 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
+
+	"github.com/codexmark/kram-gateway/internal/cli/daemonclient"
 )
 
 // refreshTranscript rebuilds the viewport content from m.messages and
@@ -19,7 +21,15 @@ func (m *Model) refreshTranscript() {
 		case "user":
 			b.WriteString(styleYouTag.Render("you") + "  " + styleBody.Render(msg.Content))
 		default:
-			b.WriteString(styleKramTag.Render("kram") + "  " + styleBody.Render(msg.Content))
+			for _, act := range msg.ToolActivity {
+				b.WriteString(renderToolActivity(act) + "\n")
+			}
+			if msg.Content != "" {
+				b.WriteString(styleKramTag.Render("kram") + "  " + styleBody.Render(msg.Content))
+			}
+			for _, n := range msg.Notices {
+				b.WriteString("\n" + styleHint.Render("· "+n))
+			}
 		}
 	}
 	if m.waiting {
@@ -107,6 +117,21 @@ func (m Model) footerLine2() string {
 	left := joinNonEmpty("  ", trail, count)
 	hint := styleHint.Render("^p estratégia")
 	return padBetween(m.width, left, hint)
+}
+
+// renderToolActivity draws one line per tool call the agent loop made,
+// between the user's message and the final answer — real activity, not a
+// generic "thinking" placeholder.
+func renderToolActivity(act daemonclient.ToolActivity) string {
+	args := act.Args
+	if len(args) > 60 {
+		args = args[:60] + "…"
+	}
+	mark := styleBadgeOK.Render("✓")
+	if !act.OK {
+		mark = styleBadgeBad.Render("✗")
+	}
+	return styleHint.Render("  ↳ ") + styleMeta.Render(act.Name+"("+args+")") + " " + mark
 }
 
 func joinNonEmpty(sep string, parts ...string) string {

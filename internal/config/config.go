@@ -23,6 +23,14 @@ type ProviderConfig struct {
 	// Model is the upstream model ID to request, if it should be pinned
 	// regardless of what the client asked for. Empty means passthrough.
 	Model string `yaml:"model,omitempty"`
+	// SupportsImages declares whether this provider's model accepts image
+	// input. Callers must check this (via /admin/status) before attaching
+	// images — the gateway never guesses.
+	SupportsImages bool `yaml:"supports_images,omitempty"`
+	// SupportsTools declares whether this provider's model can be sent
+	// tool/function definitions. Kram's agent loop skips providers that
+	// don't when a request requires tool calling.
+	SupportsTools bool `yaml:"supports_tools,omitempty"`
 }
 
 // APIKey resolves the provider's credential from its configured env var.
