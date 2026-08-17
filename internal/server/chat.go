@@ -30,7 +30,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	attempts, err := s.router.Attempts(comboID)
+	candidates, err := s.router.Attempts(comboID)
 	if err != nil {
 		writeError(w, http.StatusServiceUnavailable, err.Error())
 		return
@@ -38,45 +38,62 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
 	var lastErr error
+	var trail []openai.AttemptInfo // real per-request fallback trail, streamed back to clients that ask for it
 
-	for _, p := range attempts {
+	for _, p := range candidates {
 		s.telemetry.RecordAttempt(p.ID())
+		attemptStart := time.Now()
 		events, err := p.ChatCompletion(ctx, req)
 		if err != nil {
+			elapsed := time.Since(attemptStart).Milliseconds()
 			s.markFailure(p.ID(), err)
+			s.telemetry.RecordLatency(p.ID(), elapsed)
 			lastErr = err
+			trail = append(trail, openai.AttemptInfo{Provider: p.ID(), OK: false, LatencyMS: elapsed})
 			continue
 		}
 
 		if req.Stream {
 			first, ok := <-events
 			if !ok {
+				elapsed := time.Since(attemptStart).Milliseconds()
 				lastErr = fmt.Errorf("%s: closed stream with no data", p.ID())
 				s.markFailure(p.ID(), lastErr)
+				s.telemetry.RecordLatency(p.ID(), elapsed)
+				trail = append(trail, openai.AttemptInfo{Provider: p.ID(), OK: false, LatencyMS: elapsed})
 				continue
 			}
 			if first.Err != nil {
+				elapsed := time.Since(attemptStart).Milliseconds()
 				lastErr = first.Err
 				s.markFailure(p.ID(), lastErr)
+				s.telemetry.RecordLatency(p.ID(), elapsed)
+				trail = append(trail, openai.AttemptInfo{Provider: p.ID(), OK: false, LatencyMS: elapsed})
 				continue
 			}
 			// Committed: headers are about to be written, no more fallback
 			// is possible for this request after this point.
+			s.telemetry.RecordLatency(p.ID(), time.Since(attemptStart).Milliseconds())
 			s.streamResponse(w, p.ID(), req.Model, first, events)
 			return
 		}
 
 		content, usage, err := drainToBuffer(events)
+		elapsed := time.Since(attemptStart).Milliseconds()
 		if err != nil {
 			lastErr = err
 			s.markFailure(p.ID(), err)
+			s.telemetry.RecordLatency(p.ID(), elapsed)
+			trail = append(trail, openai.AttemptInfo{Provider: p.ID(), OK: false, LatencyMS: elapsed})
 			continue
 		}
 		s.breakers.ReportSuccess(p.ID())
+		s.telemetry.RecordLatency(p.ID(), elapsed)
 		if usage != nil {
 			s.telemetry.RecordUsage(p.ID(), usage.PromptTokens, usage.CompletionTokens)
 		}
-		writeBufferedResponse(w, req.Model, content, usage)
+		trail = append(trail, openai.AttemptInfo{Provider: p.ID(), OK: true, LatencyMS: elapsed})
+		writeBufferedResponse(w, req.Model, p.ID(), content, usage, trail)
 		return
 	}
 
@@ -111,7 +128,7 @@ func drainToBuffer(events <-chan provider.StreamEvent) (string, *openai.Usage, e
 	return content.String(), usage, nil
 }
 
-func writeBufferedResponse(w http.ResponseWriter, model, content string, usage *openai.Usage) {
+func writeBufferedResponse(w http.ResponseWriter, model, providerID, content string, usage *openai.Usage, trail []openai.AttemptInfo) {
 	resp := openai.ChatCompletionResponse{
 		ID:      newID(),
 		Object:  "chat.completion",
@@ -120,6 +137,8 @@ func writeBufferedResponse(w http.ResponseWriter, model, content string, usage *
 		Choices: []openai.ChatCompletionChoice{
 			{Index: 0, Message: openai.ChatMessage{Role: "assistant", Content: content}, FinishReason: "stop"},
 		},
+		Provider: providerID,
+		Attempts: trail,
 	}
 	if usage != nil {
 		resp.Usage = *usage

@@ -25,6 +25,7 @@ CREATE TABLE IF NOT EXISTS messages (
 	session_id TEXT NOT NULL REFERENCES sessions(id),
 	role       TEXT NOT NULL,
 	content    TEXT NOT NULL,
+	provider   TEXT NOT NULL DEFAULT '',
 	created_at INTEGER NOT NULL
 );
 
@@ -39,12 +40,14 @@ type Session struct {
 	UpdatedAt int64  `json:"updated_at"`
 }
 
-// Message is one turn within a session.
+// Message is one turn within a session. Provider is empty for user
+// messages and set to whichever gateway provider served an assistant reply.
 type Message struct {
 	ID        int64  `json:"id"`
 	SessionID string `json:"session_id"`
 	Role      string `json:"role"`
 	Content   string `json:"content"`
+	Provider  string `json:"provider,omitempty"`
 	CreatedAt int64  `json:"created_at"`
 }
 
@@ -123,7 +126,7 @@ func (s *Store) GetSession(id string) (Session, error) {
 // ListMessages returns every message in a session, oldest first.
 func (s *Store) ListMessages(sessionID string) ([]Message, error) {
 	rows, err := s.db.Query(
-		`SELECT id, session_id, role, content, created_at FROM messages WHERE session_id = ? ORDER BY id ASC`,
+		`SELECT id, session_id, role, content, provider, created_at FROM messages WHERE session_id = ? ORDER BY id ASC`,
 		sessionID,
 	)
 	if err != nil {
@@ -134,7 +137,7 @@ func (s *Store) ListMessages(sessionID string) ([]Message, error) {
 	var out []Message
 	for rows.Next() {
 		var m Message
-		if err := rows.Scan(&m.ID, &m.SessionID, &m.Role, &m.Content, &m.CreatedAt); err != nil {
+		if err := rows.Scan(&m.ID, &m.SessionID, &m.Role, &m.Content, &m.Provider, &m.CreatedAt); err != nil {
 			return nil, fmt.Errorf("scanning message row: %w", err)
 		}
 		out = append(out, m)
@@ -142,13 +145,13 @@ func (s *Store) ListMessages(sessionID string) ([]Message, error) {
 	return out, rows.Err()
 }
 
-// AppendMessage stores one message and touches the parent session's
-// updated_at timestamp.
-func (s *Store) AppendMessage(sessionID, role, content string) (Message, error) {
+// AppendMessage stores one message (provider is "" for user messages) and
+// touches the parent session's updated_at timestamp.
+func (s *Store) AppendMessage(sessionID, role, content, provider string) (Message, error) {
 	now := time.Now().Unix()
 	res, err := s.db.Exec(
-		`INSERT INTO messages (session_id, role, content, created_at) VALUES (?, ?, ?, ?)`,
-		sessionID, role, content, now,
+		`INSERT INTO messages (session_id, role, content, provider, created_at) VALUES (?, ?, ?, ?, ?)`,
+		sessionID, role, content, provider, now,
 	)
 	if err != nil {
 		return Message{}, fmt.Errorf("appending message: %w", err)
@@ -162,5 +165,5 @@ func (s *Store) AppendMessage(sessionID, role, content string) (Message, error) 
 		return Message{}, fmt.Errorf("touching session: %w", err)
 	}
 
-	return Message{ID: id, SessionID: sessionID, Role: role, Content: content, CreatedAt: now}, nil
+	return Message{ID: id, SessionID: sessionID, Role: role, Content: content, Provider: provider, CreatedAt: now}, nil
 }

@@ -62,25 +62,26 @@ func (s *Service) Get(id string) (store.Session, []store.Message, error) {
 }
 
 // SendMessage appends a user message, sends the full history to the
-// gateway, persists the assistant's reply, and returns it. The user
-// message is durable the moment this call returns its first half — even
-// if the gateway call fails, the daemon still owns the fact that the user
-// said something.
-func (s *Service) SendMessage(ctx context.Context, sessionID, content string) (store.Message, error) {
+// gateway, persists the assistant's reply (tagged with whichever provider
+// served it), and returns it along with the real fallback trail the
+// gateway walked for this request. The user message is durable the moment
+// this call returns its first half — even if the gateway call fails, the
+// daemon still owns the fact that the user said something.
+func (s *Service) SendMessage(ctx context.Context, sessionID, content string) (store.Message, []openai.AttemptInfo, openai.Usage, error) {
 	if _, err := s.store.GetSession(sessionID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return store.Message{}, ErrNotFound
+			return store.Message{}, nil, openai.Usage{}, ErrNotFound
 		}
-		return store.Message{}, err
+		return store.Message{}, nil, openai.Usage{}, err
 	}
 
-	if _, err := s.store.AppendMessage(sessionID, "user", content); err != nil {
-		return store.Message{}, fmt.Errorf("persisting user message: %w", err)
+	if _, err := s.store.AppendMessage(sessionID, "user", content, ""); err != nil {
+		return store.Message{}, nil, openai.Usage{}, fmt.Errorf("persisting user message: %w", err)
 	}
 
 	history, err := s.store.ListMessages(sessionID)
 	if err != nil {
-		return store.Message{}, fmt.Errorf("loading history: %w", err)
+		return store.Message{}, nil, openai.Usage{}, fmt.Errorf("loading history: %w", err)
 	}
 
 	messages := make([]openai.ChatMessage, 0, len(history))
@@ -88,16 +89,16 @@ func (s *Service) SendMessage(ctx context.Context, sessionID, content string) (s
 		messages = append(messages, openai.ChatMessage{Role: m.Role, Content: m.Content})
 	}
 
-	reply, err := s.gateway.ChatCompletion(ctx, s.model, messages)
+	result, err := s.gateway.ChatCompletion(ctx, s.model, messages)
 	if err != nil {
-		return store.Message{}, fmt.Errorf("gateway call failed: %w", err)
+		return store.Message{}, nil, openai.Usage{}, fmt.Errorf("gateway call failed: %w", err)
 	}
 
-	assistantMsg, err := s.store.AppendMessage(sessionID, "assistant", reply)
+	assistantMsg, err := s.store.AppendMessage(sessionID, "assistant", result.Content, result.Provider)
 	if err != nil {
-		return store.Message{}, fmt.Errorf("persisting assistant message: %w", err)
+		return store.Message{}, nil, openai.Usage{}, fmt.Errorf("persisting assistant message: %w", err)
 	}
-	return assistantMsg, nil
+	return assistantMsg, result.Attempts, result.Usage, nil
 }
 
 func newID() string {

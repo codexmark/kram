@@ -124,7 +124,7 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	reply, err := s.sessions.SendMessage(r.Context(), id, req.Content)
+	reply, attempts, usage, err := s.sessions.SendMessage(r.Context(), id, req.Content)
 	if err != nil {
 		if errors.Is(err, session.ErrNotFound) {
 			writeError(w, http.StatusNotFound, "session not found")
@@ -133,7 +133,7 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadGateway, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, reply)
+	writeJSON(w, http.StatusOK, map[string]any{"message": reply, "attempts": attempts, "usage": usage})
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

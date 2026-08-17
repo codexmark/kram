@@ -110,3 +110,30 @@ curl -s http://127.0.0.1:20130/sessions/ses_...
 
 Endpoints: `POST /sessions`, `GET /sessions`, `GET /sessions/{id}`,
 `POST /sessions/{id}/messages`, `GET /health`.
+
+## CLI (component 3)
+
+`cmd/cli` is Kram's user-facing interface: a Bubble Tea ([charmbracelet](https://github.com/charmbracelet/bubbletea))
+terminal app over a daemon session. Its own visual language — the "pulse
+bar" — is designed from scratch for this project, not copied from
+opencode/Crush's bordered-panel look. It never talks to an LLM provider
+or persists anything itself; it's a live view over the daemon and the
+gateway's real telemetry (nothing shown is simulated).
+
+```bash
+go run ./cmd/cli -daemon http://127.0.0.1:20130 -gateway http://127.0.0.1:20128
+```
+
+- The footer is always exactly two lines: the active provider with a
+  breathing dot and an animated latency indicator while a request is in
+  flight, settling — once the reply lands — into the real per-request
+  fallback trail (one dot per provider actually attempted) and token
+  usage. It never grows past two lines, no matter how many providers a
+  combo has.
+- `ctrl+p` opens the strategy panel (25% of the terminal height): every
+  provider in the active combo, staggered to show fallback order, each
+  tagged with its live circuit-breaker state, average latency and success
+  rate straight from `/admin/status`. Arrow keys move focus between
+  providers; the explanation line updates to describe whichever one is
+  focused. `esc` or `enter` closes it.
+- `ctrl+c` quits.

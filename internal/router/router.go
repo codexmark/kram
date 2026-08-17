@@ -69,6 +69,31 @@ func (r *Router) Resolve(model string) (string, error) {
 	return "", fmt.Errorf("no combo matches model %q and no default_combo is configured", model)
 }
 
+// ComboInfo is a read-only summary of a combo, for status/diagnostics
+// surfaces that shouldn't reach into the router's internal state.
+type ComboInfo struct {
+	ID        string
+	Strategy  string
+	Providers []string
+}
+
+// Combos returns a summary of every configured combo, in the order the
+// providers were declared — the same order the fallback chain follows.
+func (r *Router) Combos() []ComboInfo {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	out := make([]ComboInfo, 0, len(r.combos))
+	for id, c := range r.combos {
+		ids := make([]string, 0, len(c.providers))
+		for _, p := range c.providers {
+			ids = append(ids, p.ID())
+		}
+		out = append(out, ComboInfo{ID: id, Strategy: c.strategy, Providers: ids})
+	}
+	return out
+}
+
 // Attempts returns the ordered list of providers to try for a combo: the
 // round-robin strategy rotates which healthy provider leads, and the rest
 // of the combo's declared order follows as the fallback chain. Providers

@@ -40,6 +40,19 @@ type ChatCompletionResponse struct {
 	Model   string                 `json:"model"`
 	Choices []ChatCompletionChoice `json:"choices"`
 	Usage   Usage                  `json:"usage"`
+	// Provider and Attempts are kram-gateway extensions (ignored by
+	// standard OpenAI clients): which upstream actually served the
+	// request, and the full fallback trail attempted to get there.
+	Provider string        `json:"provider,omitempty"`
+	Attempts []AttemptInfo `json:"attempts,omitempty"`
+}
+
+// AttemptInfo records one provider attempt made while serving a request,
+// successful or not — the real fallback trail for a single completion.
+type AttemptInfo struct {
+	Provider  string `json:"provider"`
+	OK        bool   `json:"ok"`
+	LatencyMS int64  `json:"latency_ms"`
 }
 
 // ChatCompletionChunkDelta is the incremental content of one SSE chunk.

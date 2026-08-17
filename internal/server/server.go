@@ -80,8 +80,15 @@ type statusProvider struct {
 	Stats       telemetry.ProviderStats `json:"stats"`
 }
 
+type statusCombo struct {
+	ID        string   `json:"id"`
+	Strategy  string   `json:"strategy"`
+	Providers []string `json:"providers"`
+}
+
 type statusResponse struct {
 	Providers []statusProvider `json:"providers"`
+	Combos    []statusCombo    `json:"combos"`
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
@@ -95,6 +102,10 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 			BreakerOpen: s.breakers.IsOpen(id),
 			Stats:       snapshot[id],
 		})
+	}
+
+	for _, c := range s.router.Combos() {
+		resp.Combos = append(resp.Combos, statusCombo{ID: c.ID, Strategy: c.Strategy, Providers: c.Providers})
 	}
 
 	w.Header().Set("Content-Type", "application/json")

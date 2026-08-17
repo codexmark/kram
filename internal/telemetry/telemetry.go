@@ -7,10 +7,12 @@ import "sync"
 
 // ProviderStats is a point-in-time snapshot of one provider's counters.
 type ProviderStats struct {
-	Requests         int64 `json:"requests"`
-	Failures         int64 `json:"failures"`
-	PromptTokens     int64 `json:"prompt_tokens"`
-	CompletionTokens int64 `json:"completion_tokens"`
+	Requests         int64   `json:"requests"`
+	Failures         int64   `json:"failures"`
+	PromptTokens     int64   `json:"prompt_tokens"`
+	CompletionTokens int64   `json:"completion_tokens"`
+	AvgLatencyMS     int64   `json:"avg_latency_ms"`
+	SuccessRate      float64 `json:"success_rate"`
 }
 
 type counters struct {
@@ -19,6 +21,8 @@ type counters struct {
 	failures         int64
 	promptTokens     int64
 	completionTokens int64
+	latencySumMS     int64
+	latencyCount     int64
 }
 
 // Registry aggregates counters per provider ID.
@@ -75,6 +79,16 @@ func (r *Registry) RecordUsage(id string, promptTokens, completionTokens int) {
 	c.mu.Unlock()
 }
 
+// RecordLatency folds one attempt's wall-clock duration into the running
+// average shown in /admin/status.
+func (r *Registry) RecordLatency(id string, ms int64) {
+	c := r.get(id)
+	c.mu.Lock()
+	c.latencySumMS += ms
+	c.latencyCount++
+	c.mu.Unlock()
+}
+
 // Snapshot returns a copy of all providers' current stats, keyed by ID.
 func (r *Registry) Snapshot() map[string]ProviderStats {
 	r.mu.RLock()
@@ -83,13 +97,20 @@ func (r *Registry) Snapshot() map[string]ProviderStats {
 	out := make(map[string]ProviderStats, len(r.byID))
 	for id, c := range r.byID {
 		c.mu.Lock()
-		out[id] = ProviderStats{
+		stats := ProviderStats{
 			Requests:         c.requests,
 			Failures:         c.failures,
 			PromptTokens:     c.promptTokens,
 			CompletionTokens: c.completionTokens,
 		}
+		if c.latencyCount > 0 {
+			stats.AvgLatencyMS = c.latencySumMS / c.latencyCount
+		}
+		if c.requests > 0 {
+			stats.SuccessRate = float64(c.requests-c.failures) / float64(c.requests)
+		}
 		c.mu.Unlock()
+		out[id] = stats
 	}
 	return out
 }
