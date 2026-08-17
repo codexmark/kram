@@ -1,3 +1,5 @@
 /config.yaml
 /kram-gateway
 *.log
+/kram-daemon.db
+/kram-daemon

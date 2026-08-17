@@ -78,3 +78,35 @@ Three adapter kinds, one file each in `internal/provider/`:
 - Non-streaming requests only commit to a provider (write any bytes) after
   it has fully succeeded — a failure anywhere in the combo before that
   falls through to the next provider.
+
+## Daemon (component 2)
+
+`cmd/daemon` is the single, local, durable owner of sessions: it persists
+sessions and messages to SQLite (pure-Go driver, no cgo) before reporting
+success to any caller, so a session survives both a client disconnecting
+and the daemon itself restarting. It never talks to LLM providers
+directly — every completion goes through `kram-gateway`.
+
+```bash
+# terminal 1
+go run ./cmd/gateway -config config.yaml
+
+# terminal 2
+go run ./cmd/daemon -db kram-daemon.db -gateway http://127.0.0.1:20128
+```
+
+```bash
+# create a session
+curl -s -X POST http://127.0.0.1:20130/sessions -d '{"title":"demo"}'
+# → {"id":"ses_...","title":"demo",...}
+
+# send a message (daemon calls the gateway, persists both turns)
+curl -s -X POST http://127.0.0.1:20130/sessions/ses_.../messages \
+  -d '{"content":"hi"}'
+
+# read it back — works even after restarting the daemon
+curl -s http://127.0.0.1:20130/sessions/ses_...
+```
+
+Endpoints: `POST /sessions`, `GET /sessions`, `GET /sessions/{id}`,
+`POST /sessions/{id}/messages`, `GET /health`.
