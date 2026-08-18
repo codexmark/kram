@@ -9,3 +9,8 @@
 
 # Per-workspace daemon state (sessions DB, logs, todos).
 /.kram/
+
+# Local agent instructions — read by Kram's own agent loop and by Claude
+# Code from the workspace root, but not meant to be published to the repo.
+/AGENTS.md
+/CLAUDE.md
