@@ -68,6 +68,11 @@ func Run(ctx context.Context, cfg Config, logger *slog.Logger) error {
 	// they must be killed on shutdown or they'd outlive the daemon that
 	// started them as untracked orphans.
 	defer toolRegistry.StopBackgroundProcesses()
+	// Same reasoning for any language server an lsp_* tool call started
+	// lazily — see tools.NewRegistry's lsp.NewManager comment. No LSP
+	// tool ever being called means no server was ever started, so this
+	// is a no-op in the common case.
+	defer toolRegistry.StopLSPServers()
 
 	// MCP servers are third-party processes: connecting is I/O that can
 	// hang or fail, so it happens after the registry exists and never
