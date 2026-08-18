@@ -58,6 +58,135 @@ binary property.
 
 ---
 
+## Cross-platform shell
+
+### A central runner, not per-call-site platform checks
+
+`internal/shell` is the only place that knows how to build and kill a
+shell command; `bash.go`, `background.go`, and `customtools.go` all go
+through it instead of calling `exec.Command("sh", "-c", ...)` themselves.
+
+**Why:** every one of those three call sites had the same two bugs —
+assuming `sh` exists (false on a bare Windows install) and assuming
+`Process.Kill()` stops what the command started (false the moment a shell
+forks a child, on any platform). Fixing it in three places independently
+would have meant three chances to fix it inconsistently, or forget one.
+
+### Unix: a real process group; Windows: a Job Object
+
+Unix commands run with `Setpgid: true` so the shell leads its own process
+group; killing sends SIGTERM to the whole group (negative PID), then
+SIGKILL after a short grace period if it's still alive. Windows has no
+process-group equivalent, so commands are assigned to a Job Object
+configured with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` — the actual OS
+mechanism other tools (Docker Desktop, containerd, Chromium's launcher)
+use for the same "kill this and everything it started" problem.
+
+**Why not just track child PIDs ourselves:** a shell can fork
+grandchildren Kram never sees a PID for. Only the OS's own grouping
+primitive reliably reaches the whole tree.
+
+### `cmd.exe /S /C`, not `sh.exe`, on Windows
+
+Resolved via `COMSPEC` (falling back to the literal `cmd.exe`), never
+Git Bash or WSL's `sh`.
+
+**Why:** those only exist if the user happens to have installed them.
+Depending on that silently was the exact bug being fixed — a tool
+description that promises `sh -c` semantics on a platform where they
+don't hold is a wrong answer that looks like a right one.
+
+### Windows Job Object assignment happens after `Start()`, not via `CREATE_SUSPENDED`
+
+A known, accepted race: a child that forks in the sliver of time between
+`Start()` and job assignment could escape the job.
+
+**Why accepted rather than closed:** closing it means creating the
+process suspended and resuming it via the thread handle from
+`CreateProcess`'s `PROCESS_INFORMATION` — `os/exec` doesn't expose that
+handle, so doing it properly means reimplementing `CreateProcess`
+ourselves instead of building on `os/exec`. Shell commands spawn children
+well after `cmd.exe` itself starts running (parsing the command line,
+resolving the program), not in that first instant, so the practical risk
+is low. Revisit only if this actually bites someone.
+
+---
+
+## LSP
+
+### Lazy per-language servers, never started at daemon startup
+
+`lsp.Manager` reads no config and starts no process until the first
+`lsp_*` tool call for a given language; concurrent calls for the same
+language before it's ready all wait on the one in-flight start rather
+than racing to launch two.
+
+**Why:** the same invariant MCP servers deliberately don't get (those
+connect eagerly at daemon startup via `mcp.ConnectAll`) doesn't apply
+here — a language server can be much heavier to start (gopls indexing a
+whole module cache) and most sessions never touch most languages a
+workspace might contain. Starting only what's actually asked for keeps
+daemon startup itself free of that cost entirely.
+
+### A broken or missing language server costs only its own tools
+
+Same contract `mcp.Connect` already established: a failed handshake or a
+missing binary never brings Kram down, it just makes `lsp_diagnostics`/
+`lsp_definition`/`lsp_references` report "LSP capability unavailable for
+`<language>`: `<reason>`" as plain text, which the model can read and fall
+back to grep from.
+
+### Own transport, not MCP's — despite both being hand-rolled JSON-RPC
+
+LSP uses `Content-Length`-framed messages over stdio; MCP's stdio
+transport is newline-delimited JSON. The dispatch-by-request-id pattern
+is shared conceptually between `internal/lsp` and `internal/mcp`, but the
+two packages don't import each other — the framing difference means the
+transport layer genuinely isn't reusable, and forcing a shared
+abstraction over two protocols that happen to both be JSON-RPC would have
+been the "more generic than the problem needs" mistake this project
+otherwise avoids.
+
+---
+
+## Session search
+
+### A distinct concern from `memory_write`, on purpose
+
+`session_search` answers "where did we actually discuss X" over real
+conversation history; `memory_entries`/`memory_fts` stays exactly what it
+was — facts the model deliberately chose to remember. Neither replaces
+the other.
+
+**Why keep them separate rather than one smarter memory system:** a fact
+nobody thought to `memory_write` about is common (most of a conversation
+never gets curated), and conflating "what was said" with "what was
+decided worth remembering" would make memory noisy in exactly the way its
+size cap and curation discipline (see Memory, above) exist to prevent.
+
+### Only `user`/`assistant` messages are indexed — structurally, not by filtering results
+
+The FTS5 trigger that keeps `messages_fts` in sync only fires for
+`role IN ('user', 'assistant')` with non-empty content. Tool output and
+`system` rows (the system prompt, AGENTS.md injection, and compaction
+summaries) are simply never in the index.
+
+**Why structural exclusion instead of filtering compaction summaries out
+of search results by name:** a blanket guarantee that doesn't depend on
+remembering to check `Name == CompactionMarkerName` in every query path.
+A compaction summary can still appear as *context* inside a match's
+anchored window (clearly tagged by role), which is legitimate — it's
+appearing *as a match*, claiming to be something someone said, that's
+the actual failure mode being prevented.
+
+### `subagent: `-prefixed sessions are excluded by default
+
+A subagent's transcript repeating the same terms as the real conversation
+it was delegated from would otherwise crowd out the conversation a user
+actually wants found. `scope="all"` opts back in explicitly.
+
+---
+
 ## Agent loop
 
 ### Tool execution waits for a complete response
