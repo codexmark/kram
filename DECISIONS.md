@@ -1014,5 +1014,46 @@ Honest list of what Kram still doesn't have, as of this writing:
 
 Scheduling, memory-provider/terminal-backend plugins, and MCP elicitation
 remain deliberate omissions — narrower than what they'd extend.
-Distribution is what remains from
-matter most for Kram being trustworthy rather than merely capable.
+
+A later, larger round closed the gaps that mattered most for capability,
+safety, and reliability rather than raw feature count:
+
+- ~~Cross-platform shell / process-tree cleanup.~~ Closed: `internal/shell`
+  centralizes command construction and kill for `bash`/`run_background`/
+  custom tools — a real process group + SIGTERM/SIGKILL on Unix, a Job
+  Object on Windows (`cmd.exe`, not an assumed `sh.exe`). See "Cross-
+  platform shell" above.
+- ~~Tool permission policy.~~ Closed: `internal/permission` gates every
+  tool call (built-in, custom, MCP) with ALLOW/ASK/DENY rules, a
+  compatibility default of Allow, and a distinct approval flow from
+  `ask_question`. See "Permissions" above.
+- ~~Unbounded tool output.~~ Closed: `internal/artifact`'s `SpillWriter`
+  bounds real memory use for any command's output (not just the reported
+  size), spilling past a threshold to a retrievable artifact instead of
+  truncating and losing it; a per-turn aggregate budget catches several
+  individually-fine results adding up. See "Artifacts" above.
+- ~~Semantic code navigation.~~ Closed: `internal/lsp` gives
+  `lsp_diagnostics`/`lsp_definition`/`lsp_references` on top of grep/glob,
+  lazy per-language server startup, never required for Kram to run. See
+  "LSP" above.
+- ~~Cross-session history search.~~ Closed: `session_search`, deterministic
+  FTS5 over real conversation history — distinct from `memory_write`'s
+  curated notes. See "Session search" above.
+- ~~Workspace rollback.~~ Closed: `internal/snapshot`, reversible
+  workspace snapshots via an isolated git repository, never touching the
+  user's own `.git`. See "Workspace snapshots" above.
+- ~~MCP lifecycle hardening.~~ Closed: dropped transports reconnect with
+  backoff, `tools/list_changed` is handled, and tool schemas are cached
+  by config fingerprint. See "MCP" above.
+- ~~Eval false positives.~~ Closed: the harness reports SKIP, not a false
+  PASS, when a scenario's check never observed the model taking the
+  action it depends on.
+
+Still open, in rough priority order: a **context policy engine** (Wave 8
+in the mission that drove this round — deliberately deferred until
+artifact spill, above, had proven stable, which it now has), scheduling,
+async delegation with a real task-status subsystem, a more sophisticated
+extension host, and pluggable memory/terminal backends. None of these are
+accidental gaps — each was evaluated and set aside as narrower than what
+it would extend, the same discipline this file exists to make visible
+rather than silently re-litigated.
