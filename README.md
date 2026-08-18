@@ -10,7 +10,7 @@ The normal experience is intentionally simple:
 kram -workspace ~/code/my-project
 ```
 
-One process starts the complete runtime — gateway, durable daemon, agent loop, and TUI — while keeping those components independently runnable for development or distributed setups.
+One process starts the complete runtime — gateway, durable daemon, agent loop, and TUI — while keeping those components independently runnable for development, debugging, or distributed setups.
 
 Kram is built around a few priorities:
 
@@ -27,11 +27,394 @@ Kram is built around a few priorities:
 >
 > Kram does use normal third-party Go libraries for infrastructure such as terminal rendering, YAML parsing, and SQLite. Those are dependencies, not reused agent/runtime source code.
 
-For the architectural decisions behind the implementation, including trade-offs, reversals, and deliberately deferred features, see [`DECISIONS.md`](DECISIONS.md).
+For the detailed architectural record, including trade-offs, reversals, and deliberately deferred work, see [`DECISIONS.md`](DECISIONS.md).
 
 ---
 
-## What Kram is
+# The engineering ideas that shaped Kram
+
+Kram did not arrive at its current shape by collecting features until the checklist looked large enough. A lot of the current architecture came from discovering that an obvious implementation worked in the happy path but failed under a real agent workload.
+
+Those failures produced a set of rules that now shape the project.
+
+## 1. One gateway is cheaper than provider logic everywhere
+
+A coding agent performs many model calls inside a single user turn. If every layer knows how Anthropic, Gemini, OpenAI-style APIs, fallback, tool calls, images, streaming, and telemetry work, the entire system becomes provider-specific.
+
+The better boundary was:
+
+```text
+agent runtime
+     │
+     │ normalized requests
+     ▼
+Kram gateway
+     │
+     ├── Anthropic adapter
+     ├── Gemini adapter
+     └── OpenAI-compatible adapter
+```
+
+That decision made provider selection, fallback, circuit breaking, capability checks, telemetry, response validation, and routing strategy a gateway concern instead of contaminating the agent loop.
+
+**Result today:** the agent loop is provider-agnostic and can reason about one normalized request/response contract.
+
+---
+
+## 2. Prompt caching is part of routing, not just billing trivia
+
+A tool-calling agent repeatedly resends a large, almost identical prompt prefix:
+
+```text
+system prompt
++ project context
++ memory
++ conversation
++ tool definitions
++ growing tool-result tail
+```
+
+A naive round-robin policy can rotate providers between those calls and destroy upstream prompt-cache locality. That is especially wasteful when a paid provider is otherwise healthy.
+
+So Kram started treating **prompt-prefix stability as routing state**.
+
+That led to several behaviors:
+
+- paid-provider auto-routing prefers stable priority;
+- free-tier peers can still use round-robin because rate limits matter more than cache economics there;
+- `prefix-affinity` exists for deterministic cache locality;
+- weighted routing can score cache affinity;
+- persistent memory is frozen once per user run so the prompt prefix does not mutate between tool round-trips.
+
+**The insight:** the cheapest request is often not the provider with the lowest nominal price; it is the provider that can reuse the context you already paid to send.
+
+---
+
+## 3. Smart routing must begin with hard constraints
+
+Early routing logic is easy to over-generalize into “give every provider a score and choose the highest.” That is wrong if a provider cannot actually perform the request.
+
+Kram now separates **eligibility** from **preference**.
+
+Before scoring, routing removes candidates that are not valid for the request:
+
+```text
+candidate pool
+    │
+    ├─ circuit open?      -> remove
+    ├─ tools required?    -> require tools capability
+    ├─ images required?   -> require image capability
+    ▼
+eligible candidates
+    │
+    ▼
+strategy ranking/scoring
+```
+
+A high quality score can never override a missing required capability.
+
+**The insight:** intelligence belongs after correctness constraints, not instead of them.
+
+---
+
+## 4. Streaming fallback has a real point of no return
+
+For a buffered response, Kram can try provider A, reject it, and then try provider B before returning anything to the caller.
+
+Streaming is different. Once meaningful bytes from provider A have been sent downstream, switching to provider B would splice two different model responses into one stream.
+
+That produced the bounded-peek design:
+
+```text
+provider stream
+    │
+    ├─ role-only / keepalive / empty chunk
+    ├─ immediate error
+    ├─ malformed early termination
+    │       └─ fallback is still possible
+    │
+    └─ meaningful output
+            └─ downstream commit point
+                 fallback is no longer safe
+```
+
+**The insight:** “HTTP 200” is not the commit point. Meaningful downstream output is.
+
+Kram therefore treats pre-commit fallback and post-commit stream handling as two different lifecycle stages.
+
+---
+
+## 5. A route is the whole turn, not only the last provider call
+
+A real coding turn may look like this:
+
+```text
+model call
+  -> read_file
+model call
+  -> grep
+model call
+  -> edit_file
+model call
+  -> go test
+model call
+  -> final answer
+```
+
+Originally, keeping only the latest gateway attempt trail meant every earlier routing decision was silently overwritten. The UI could show something technically true while still hiding most of what happened.
+
+That led to `RouteTrace`: every model call in the user run gets its own ranking and attempt trail, and the complete turn is accumulated before the result is exposed.
+
+**Result today:** `Ctrl+R` can explain the entire routing story of the turn instead of only the final model request.
+
+---
+
+## 6. The UI should render truth, not implement a second router
+
+Routing explainability created another trap: the TUI could independently recalculate scores from provider stats.
+
+That would create two routing implementations:
+
+```text
+router score
+     versus
+TUI reconstruction of router score
+```
+
+Eventually they would disagree.
+
+Kram instead makes the router produce the ranking, factor values, contributions, and reasons. The TUI only renders them.
+
+The same rule applies to route progress: if the gateway cannot currently expose which internal attempt is live, the UI shows a generic routing state rather than pretending to know.
+
+**The insight:** observability is only useful when it describes the system that actually made the decision.
+
+---
+
+## 7. Truncating output is not enough if RAM already exploded
+
+A classic command-tool implementation does this:
+
+```text
+command stdout
+    -> bytes.Buffer
+    -> command exits
+    -> truncate to 50 KB
+```
+
+That bounds what is *reported*, but not what was held in memory while the command ran. A command that produces hundreds of megabytes can still consume hundreds of megabytes before truncation happens.
+
+Kram replaced that pattern with a spill writer attached directly to stdout/stderr.
+
+```text
+command output
+     │
+     ├─ small -> inline result
+     │
+     └─ large -> artifact file
+                  + bounded preview
+                  + artifact ID
+```
+
+The complete oversized output remains retrievable through `artifact_read`, while producer memory stays bounded.
+
+**The insight:** limits must exist at the producer boundary, not only at presentation time.
+
+---
+
+## 8. Context needs a budget, not optimism
+
+Tool output is the fastest way to destroy an agent context window. One verbose test run, package install, or recursive search can be larger than the useful conversation that preceded it.
+
+Kram ended up using several layers because no single technique solves the whole problem:
+
+- deterministic command-output filtering removes known noise;
+- large individual outputs spill to artifacts;
+- one model turn has an aggregate tool-output budget;
+- old tool material is structurally pruned before expensive compaction;
+- compaction is capped instead of allowed to recurse forever;
+- the final model-call budget has a soft landing rather than an abrupt cutoff;
+- truly empty model answers get one retry and then a visible diagnostic.
+
+**The insight:** context management is runtime resource management. Treating it as “the model has a big context window” eventually fails.
+
+---
+
+## 9. Memory and conversation history solve different problems
+
+Automatically treating every old conversation as “memory” produces an ever-growing pile of stale context. Treating memory only as manual notes makes it too easy to lose useful historical information.
+
+Kram split the concepts:
+
+```text
+conversation history
+    -> what was actually said
+    -> searchable with session_search
+
+persistent memory
+    -> curated durable facts/decisions
+    -> written intentionally with memory_write
+```
+
+Memory has project/global scope, a hard size cap, consolidation operations, and a bounded automatic injection slice.
+
+Session history remains independently searchable through SQLite FTS5.
+
+**The insight:** recall and memory are related, but they are not the same datastore or the same prompt policy.
+
+---
+
+## 10. Foreground and background commands should be different capabilities
+
+Allowing `bash` to quietly launch background processes makes lifecycle ownership ambiguous. The agent can start a dev server and later have no reliable way to know whether it is still running, where its output went, or how to stop its process tree.
+
+So Kram keeps `bash` foreground-only and bounded, while long-running work has explicit tools:
+
+```text
+run_background
+process_list
+process_output
+process_kill
+```
+
+Background processes belong to the daemon lifecycle. The daemon owns their output and kills tracked process trees when it exits.
+
+**The insight:** if the runtime starts a process, the runtime should know that it owns the process.
+
+---
+
+## 11. Cross-platform process cleanup is part of reliability
+
+Killing only the shell process is not enough. Child processes can remain alive after cancellation and create exactly the kind of “ghost dev server” behavior a local agent should avoid.
+
+Kram centralized process execution in `internal/shell`:
+
+- Unix uses process groups so cancellation can target the tree;
+- Windows uses `cmd.exe /S /C` plus a Job Object with kill-on-close behavior;
+- foreground shell, background jobs, and custom manifest tools use the same execution layer.
+
+**The insight:** portability is not “the code compiles on Windows.” Process ownership has to mean the same thing on every supported platform.
+
+---
+
+## 12. Permission checks need one choke point
+
+A growing agent can accumulate built-in tools, custom tools, MCP tools, background processes, and future extension surfaces. Adding one confirmation dialog inside `bash` does not create a security model.
+
+Kram instead routes every registered tool call through one execution boundary:
+
+```text
+model asks for tool
+      │
+      ▼
+Registry.Execute
+      │
+      ▼
+ALLOW / ASK / DENY
+      │
+      ├─ allow -> execute
+      ├─ ask   -> pause for user
+      └─ deny  -> refuse
+```
+
+An `always` approval is persisted for the exact subject that was approved rather than silently broadening into a wildcard.
+
+**The insight:** policy belongs in the dispatch path, not scattered across tool implementations.
+
+---
+
+## 13. Recovery should never borrow the user's Git state
+
+Using the project's real `.git` index/HEAD for agent snapshots would couple Kram's recovery mechanism to the developer's active branch, staging area, and repository state.
+
+Kram instead maintains a separate snapshot repository under `.kram/snapshots` and uses the project directory only as its work tree.
+
+That means snapshot operations do not intentionally move the user's branch, HEAD, index, or staged changes.
+
+**The insight:** a recovery system should not mutate the state it exists to protect.
+
+---
+
+## 14. Optional intelligence should fail locally
+
+A missing language server should not stop the coding agent. A broken MCP server should not stop unrelated tools. An unavailable provider should not prevent healthy providers from receiving traffic.
+
+This led to a repeated architecture pattern:
+
+```text
+optional subsystem fails
+        │
+        └─ lose that capability
+           not the whole runtime
+```
+
+Examples:
+
+- LSP servers start lazily and fail per language;
+- MCP server failures are isolated per server;
+- circuit breakers isolate upstream providers;
+- artifact GC is best-effort;
+- missing local configuration usually contributes no configuration instead of blocking startup.
+
+**The insight:** graceful degradation is easier to achieve when dependencies are narrow and ownership boundaries are explicit.
+
+---
+
+## 15. Progressive disclosure saves context and improves control
+
+Putting every possible instruction and tool body into every prompt is easy, but expensive.
+
+Kram progressively exposes optional capability:
+
+- skills begin as name + description;
+- full `SKILL.md` content is loaded only when needed;
+- disabled tools disappear from model-visible definitions;
+- fully denied tools are also omitted;
+- MCP resources/prompts are exposed through fixed discovery/read tools rather than creating one model tool for every remote item.
+
+**The insight:** capability should be discoverable without permanently becoming prompt baggage.
+
+---
+
+## 16. “Not observed” is not the same as “passed”
+
+The evaluation harness also had to learn a basic testing lesson: a scenario that did not actually exercise the property being tested cannot truthfully be called a pass.
+
+Kram's evals distinguish:
+
+```text
+PASS  property exercised and succeeded
+FAIL  property exercised and violated
+SKIP  scenario could not observe the property
+```
+
+That sounds small, but it prevents green-looking results from hiding missing coverage.
+
+**The insight:** reliability starts with being honest about what was actually verified.
+
+---
+
+## 17. One binary does not require one monolith
+
+The user-facing goal was always low operational friction: one command, no manual daemon startup, no coordinating ports in three terminals.
+
+The implementation still keeps gateway, daemon, and CLI as separate architectural components. `cmd/kram` starts gateway and daemon **in-process** and then launches the TUI.
+
+```text
+one executable
+    │
+    ├─ gateway goroutine
+    ├─ daemon goroutine
+    └─ terminal UI
+```
+
+The same components can still run independently through `cmd/gateway`, `cmd/daemon`, and `cmd/cli`.
+
+**The insight:** deployment simplicity and architectural separation are not opposites.
+
+---
+
+# What Kram is today
 
 At a high level, Kram is four things working together:
 
@@ -66,11 +449,11 @@ filesystem · shell/processes · git · LSP · MCP · snapshots · artifacts
 skills · memory · session search · web fetch · subagents · user approval
 ```
 
-The separation is deliberate. The **agent loop does not contain provider-specific code**, the **TUI owns no durable state**, and the **gateway does not own conversations**. Each layer has one job and can be tested or run independently.
+The separation is deliberate. The **agent loop does not contain provider-specific code**, the **TUI owns no durable conversation state**, and the **gateway does not own sessions**.
 
 ---
 
-## Why Go
+# Why Go
 
 Kram was written from zero in Go because the runtime has unusually strong requirements around lifecycle ownership, long-running processes, concurrency, portability, and failure isolation.
 
@@ -91,9 +474,9 @@ The goal is not “zero dependencies.” The goal is **a small, inspectable appl
 
 ---
 
-## Quick start
+# Quick start
 
-### Requirements
+## Requirements
 
 For building from source:
 
@@ -102,7 +485,7 @@ For building from source:
 - Git is recommended and required for workspace snapshot features;
 - language-server binaries are optional and only needed when using LSP tools.
 
-### 1. Configure a provider
+## Configure a provider
 
 The simplest path is an environment variable:
 
@@ -112,18 +495,19 @@ export ANTHROPIC_API_KEY="..."
 export OPENAI_API_KEY="..."
 # or
 export GEMINI_API_KEY="..."
-# or another provider supported by the catalog/configuration
 ```
+
+Other provider credentials can be configured through the catalog, an explicit gateway config, or the accounts screen.
 
 Environment variables always take precedence over keys stored by Kram.
 
-### 2. Start Kram
+## Start Kram
 
 ```bash
 go run ./cmd/kram -workspace ~/code/my-project
 ```
 
-Or, once using a release binary:
+Or with a release binary:
 
 ```bash
 kram -workspace ~/code/my-project
@@ -134,24 +518,24 @@ Kram will:
 1. resolve the workspace;
 2. create `<workspace>/.kram/` if needed;
 3. load provider credentials/configuration;
-4. start the gateway and daemon on localhost;
+4. start gateway and daemon on localhost;
 5. wait for both health checks;
 6. open the terminal UI;
-7. restore access to durable sessions already stored for that workspace.
+7. expose durable sessions already stored for the workspace.
 
-Gateway and daemon logs are written to:
+Logs:
 
 ```text
 <workspace>/.kram/kram.log
 ```
 
-Conversation state is stored in:
+Conversation state:
 
 ```text
 <workspace>/.kram/kram-daemon.db
 ```
 
-### Useful flags
+## Useful flags
 
 ```text
 -workspace      project root
@@ -166,7 +550,7 @@ Conversation state is stored in:
 -version        print Kram version
 ```
 
-For example:
+Example:
 
 ```bash
 go run ./cmd/kram \
@@ -177,11 +561,11 @@ go run ./cmd/kram \
 
 ---
 
-# Feature overview
+# Feature tour
 
-## 1. A real tool-calling agent loop
+## Agent loop
 
-Kram is not a chat proxy that makes one model request per message. Each user turn can become a complete agent run:
+Kram is not a chat proxy that makes one model request per user message. One user turn can become a complete agent run:
 
 ```text
 user request
@@ -202,37 +586,31 @@ model call
           └──────────────────────────────────────▶ next model call
 ```
 
-The loop persists the user message before work begins, streams visible text to the client, executes completed tool calls, feeds their results back to the model, and continues until a final answer is produced or a safety budget is reached.
+Important properties:
 
-### Important loop behavior
-
-- **Tool calls are executed only after the model response containing them is complete.** Kram never executes half-streamed arguments.
-- **Default run budget: 50 model calls.** Tool round-trips count toward the same budget.
-- **Soft landing at the limit.** On the final allowed call, tools are withdrawn and the model is explicitly asked to provide its best final answer rather than being cut off mid-task.
-- **Empty-answer recovery.** A genuinely empty final model response receives one explicit retry; a second empty response becomes a visible diagnostic instead of silent failure.
-- **Usage is aggregated across the whole run**, not only the last model call.
-- **Routing trace is accumulated across the whole run**, including model calls made before and after tools.
-- **Tool results and assistant tool-call messages are durable**, so the history reflects what actually happened.
+- tool calls execute only after their model response is complete;
+- default run budget is 50 model calls;
+- final-budget behavior uses a soft landing rather than a hard mid-task cutoff;
+- empty final responses receive one recovery retry and then a visible diagnostic;
+- token usage is aggregated across the whole user run;
+- route trace covers every model call in the run;
+- tool calls/results are persisted into durable history.
 
 ---
 
-## 2. Multi-provider gateway and Combos v2
+## Multi-provider gateway and Combos v2
 
-The gateway gives the rest of Kram one normalized OpenAI-style surface while provider adapters handle the actual upstream wire formats.
+The gateway exposes one normalized OpenAI-style surface while adapters translate to/from provider-native protocols.
 
 Current adapter families:
 
 - **Anthropic** — native Messages API translation;
 - **Gemini** — native Gemini content/function-call translation;
-- **OpenAI-compatible** — OpenAI itself plus compatible gateways and endpoints configured by the user.
+- **OpenAI-compatible** — OpenAI plus compatible endpoints configured by the user.
 
-Tool calls are normalized through Kram and translated to/from the provider-specific representation. Provider capability declarations are explicit: tool support and image support are routing constraints, not guesses.
+A **combo** is a named provider pool/fallback chain. The incoming OpenAI `model` field selects a combo, with `default_combo` as fallback.
 
-### Combos
-
-A **combo** is a named pool/fallback chain of providers. The incoming OpenAI `model` field selects a combo, with `default_combo` as fallback.
-
-Combos v2 separates three concerns:
+Combos v2 separates routing, execution, and acceptance:
 
 ```text
 COMBO
@@ -250,157 +628,133 @@ RESPONSE / STREAM GATE
   └─ reject ──▶ next candidate, while fallback is still possible
 ```
 
-Circuit-open and capability-incompatible providers are removed **before** scoring. A strategy cannot “score around” a hard constraint.
+Circuit-open and capability-incompatible providers are removed before strategy scoring.
 
 ### Routing strategies
 
 | Strategy | Purpose |
 |---|---|
-| `priority` | Keep the configured provider order. Predictable and cache-friendly. |
-| `round-robin` | Rotate the leading candidate to distribute calls across peers. |
-| `prefix-affinity` | Deterministically keep a stable prompt prefix on the same healthy provider. |
-| `smart` | Balanced weighted routing across health, reliability, latency, quality hint, cache affinity, and priority. |
-| `quality` | Weighted preset that emphasizes explicit quality hints and reliability. |
-| `fast` | Weighted preset that emphasizes observed latency while still considering health. |
-| `reliable` | Weighted preset that strongly favors observed success and health. |
-| `cheap` | Cost-conscious preset using configured provider priority as the operator's cost preference. Kram does not fabricate price telemetry. |
-| `weighted` | Fully configurable version of the weighted engine. |
+| `priority` | Preserve configured order. Predictable and cache-friendly. |
+| `round-robin` | Rotate peers to distribute calls. |
+| `prefix-affinity` | Keep a stable prompt prefix on the same healthy provider. |
+| `smart` | Balance health, reliability, latency, quality hint, cache affinity, and priority. |
+| `quality` | Emphasize explicit quality hints and reliability. |
+| `fast` | Emphasize observed latency while retaining health constraints. |
+| `reliable` | Strongly favor observed success and health. |
+| `cheap` | Use configured provider priority as the operator's cost preference; Kram does not fabricate price telemetry. |
+| `weighted` | Fully configurable weighted engine. |
 | `lkgp` | Prefer the last known good eligible provider. |
-| `p2c` | Power-of-two-choices style selection for a small, cheap balancing decision. |
+| `p2c` | Power-of-two-choices style selection. |
 
-The weighted family uses one scoring engine rather than separate implementations for each preset. Custom weights are normalized automatically.
+The weighted family shares one scoring engine rather than duplicating strategy logic.
 
-### Smart routing signals
+### Smart-routing signals
 
-The current weighted engine can use:
+The weighted engine can use:
 
-- circuit-breaker/health state;
-- observed provider success rate;
+- breaker/health state;
+- observed success rate;
 - observed average latency;
-- explicit operator `quality_hint`;
+- explicit `quality_hint`;
 - prompt-prefix/cache affinity;
-- declared combo priority;
+- combo priority;
 - last-known-good boost;
-- run stickiness;
-- bounded exploration for gathering telemetry from non-leading candidates.
+- stickiness;
+- bounded exploration.
 
-Kram intentionally does not invent quality, price, quota, or latency data it does not actually have.
+Kram intentionally does not invent quality, price, quota, or latency data it has not measured or been explicitly given.
 
 ### ResponseGate
 
-A transport-level HTTP success is not always a useful model response. Combos may enable deterministic response validation such as:
+A transport-level success is not always a usable model response. Combos can deterministically reject responses based on conditions such as:
 
-- reject empty output;
-- require a terminal completion signal;
-- require a minimum text length;
-- reject configured substrings used by upstreams to disguise technical failures inside HTTP 200 responses.
+- empty output;
+- missing terminal completion;
+- minimum text length;
+- configured substrings used by upstreams to disguise technical errors inside HTTP 200 responses.
 
-This gate is for **technical validity**, not semantic judgment. It is not intended to route around legitimate model refusals or policy behavior.
+The gate judges **technical usability**, not whether Kram agrees with the model's answer. It is not designed for refusal-shopping.
 
 ### Streaming fallback
 
-For streaming requests, Kram performs a small bounded peek before committing downstream SSE output. Empty role-only chunks, keepalives, immediate errors, and streams that fail before meaningful output can still fall through to another provider.
+For streaming requests, Kram performs a bounded peek before committing downstream output. Empty/role-only chunks, keepalives, immediate errors, and failures before meaningful output can still fall through to another provider.
 
-Once meaningful model content has been committed to the downstream client, the same HTTP response cannot safely switch providers. Kram therefore treats **pre-commit fallback** and **post-commit stream handling** as different lifecycle stages.
+After meaningful content has been committed, provider switching is no longer safe inside the same response.
 
 ---
 
-## 3. Circuit breakers and provider isolation
+## Circuit breakers and provider isolation
 
-Every provider has independent breaker state.
+Each provider has independent breaker state.
 
-Current breaker behavior:
+Current behavior:
 
 - 3 consecutive failures open the circuit;
-- open providers are skipped during routing;
-- after a 30-second cooldown, recovery is probed through the half-open state;
-- a successful attempt closes and resets the circuit;
-- a failed half-open attempt reopens it.
+- open providers are skipped;
+- after a 30-second cooldown, a half-open recovery attempt is allowed;
+- success closes/resets the circuit;
+- failure during half-open reopens it.
 
-The purpose is simple: one degraded upstream should not be hammered repeatedly and should not prevent healthy candidates from receiving work.
-
-The gateway also exposes real per-provider telemetry: request count, failure count, token usage, average latency, success rate, capabilities, and breaker state.
+The gateway also exposes real provider telemetry such as request count, failures, token usage, average latency, success rate, capabilities, and breaker state.
 
 ---
 
-## 4. Durable sessions and local-first persistence
+## Durable sessions
 
 The daemon owns conversation durability. The TUI is only a view.
 
-Sessions and messages are written to SQLite before the caller is told the operation succeeded. Closing the terminal does not delete the conversation, and restarting the daemon does not erase history.
+Sessions and messages are persisted to SQLite before success is reported to the caller. Closing the terminal does not delete conversation history, and daemon restart does not erase it.
 
-The store also backs:
+The same store backs:
 
-- persistent cross-session memory;
-- full-text session search;
+- messages and tool-call history;
+- persistent memory;
+- FTS5 session search;
 - compaction summaries;
-- tool-call history;
-- provider attribution on assistant messages.
-
-The database lives inside the workspace, so project history follows the project rather than a remote account.
+- provider attribution.
 
 ---
 
-## 5. Built-in toolset
+## Built-in tools
 
 A normal daemon with persistence available registers **34 core tools** before custom tools and MCP-provided tools are added.
 
-They are grouped by purpose below.
-
-| Area | Tools | What they are for |
+| Area | Tools | Purpose |
 |---|---|---|
-| Files | `read_file`, `write_file`, `edit_file`, `list_dir`, `glob`, `grep`, `move_file`, `delete_file` | Inspect and modify the workspace with deterministic file operations. |
-| Shell & processes | `bash`, `run_background`, `process_list`, `process_output`, `process_kill` | Run bounded foreground commands or explicitly manage daemon-owned background processes. |
-| Git | `git_status`, `git_diff` | Give the model read-only visibility into repository state and changes. |
-| Web | `web_fetch` | Fetch HTTP(S) resources with bounded output for reference material. |
-| Planning | `todo_write`, `todo_read` | Persist a project-level task list for multi-step work. |
-| Human interaction | `ask_question` | Pause the agent run and wait for a real user answer instead of guessing. |
+| Files | `read_file`, `write_file`, `edit_file`, `list_dir`, `glob`, `grep`, `move_file`, `delete_file` | Inspect and modify workspace files deterministically. |
+| Shell/processes | `bash`, `run_background`, `process_list`, `process_output`, `process_kill` | Run bounded commands or manage daemon-owned long-running processes. |
+| Git | `git_status`, `git_diff` | Read repository status and diffs. |
+| Web | `web_fetch` | Fetch bounded HTTP(S) reference content. |
+| Planning | `todo_write`, `todo_read` | Keep a persistent project task list. |
+| Interaction | `ask_question` | Pause the run and ask the user instead of guessing. |
 | Delegation | `delegate_task` | Fan independent work out to isolated subagents. |
-| Skills | `skill_list`, `skill`, `skill_install` | Discover, load, and install reusable instruction packages with progressive disclosure. |
-| Artifacts | `artifact_read` | Read bounded slices of oversized output previously spilled to disk. |
-| Code intelligence | `lsp_diagnostics`, `lsp_definition`, `lsp_references` | Use language-server semantics instead of relying only on text search. |
-| Workspace recovery | `snapshot_create`, `snapshot_list`, `snapshot_diff`, `snapshot_restore` | Capture and restore explicit workspace snapshots. |
-| Memory & history | `memory_write`, `memory_search`, `session_search` | Preserve curated knowledge and search real historical conversations. |
+| Skills | `skill_list`, `skill`, `skill_install` | Discover/load/install reusable instruction packages. |
+| Artifacts | `artifact_read` | Read slices of oversized output stored by Kram. |
+| Code intelligence | `lsp_diagnostics`, `lsp_definition`, `lsp_references` | Use language-server semantics. |
+| Recovery | `snapshot_create`, `snapshot_list`, `snapshot_diff`, `snapshot_restore` | Explicit workspace snapshots and restore. |
+| Memory/history | `memory_write`, `memory_search`, `session_search` | Durable knowledge and historical retrieval. |
 
-### File safety
+### File boundary versus shell boundary
 
-Structured file tools resolve user-supplied paths against the workspace root and reject paths that escape it.
+Structured file tools resolve paths against the workspace root and reject escapes.
 
-The shell is intentionally different: it starts with the workspace as its working directory, but it is a real operating-system shell, **not a filesystem sandbox**. Shell risk is controlled through visibility, timeout/process ownership, and the permission engine. If stronger OS isolation is required, Kram should be run inside an appropriate container/VM/sandbox rather than pretending `cwd` is a security boundary.
-
----
-
-## 6. Cross-platform shell and process-tree ownership
-
-All command-running features share `internal/shell` instead of each inventing its own `exec.Command` behavior.
-
-### Unix
-
-Commands run through `/bin/sh -c` in their own process group. Cancellation/kill targets the process group so children are not silently orphaned; shutdown can escalate from graceful termination to kill when necessary.
-
-### Windows
-
-Commands run through `cmd.exe /S /C` (resolved through `COMSPEC`) and are attached to a Windows Job Object with kill-on-close semantics. Kram does not assume Git Bash, WSL, or a POSIX shell exists on Windows.
-
-This layer is used by foreground shell calls, background processes, and manifest-defined custom tools.
-
-`bash` itself remains foreground-only with a default 30-second timeout and a 120-second maximum. Long-running servers/watchers belong in the explicit background-process tools so Kram can track and terminate them later.
+The shell is intentionally different: it starts in the workspace but is a real operating-system shell, **not a filesystem sandbox**. Stronger host isolation should come from a container, VM, or OS sandbox rather than pretending `cwd` provides security.
 
 ---
 
-## 7. Permission engine: ALLOW / ASK / DENY
+## Permission engine: ALLOW / ASK / DENY
 
-Tool availability and tool permission are separate concepts.
+Tool availability and tool permission are distinct.
 
-A tool may be enabled but still require approval for a particular operation. Every built-in, manifest-defined, and MCP-backed tool call flows through the same permission evaluator before execution.
+Every built-in, manifest-defined, and MCP-backed tool call passes through the same permission evaluator.
 
-Decisions are deterministic:
+```text
+allow -> execute
+ask   -> pause and ask the user
+ deny  -> refuse
+```
 
-- `allow` — execute immediately;
-- `ask` — pause the run and ask the user;
-- `deny` — refuse without executing.
-
-Rules may target exact tool names, MCP prefixes, and operation subjects such as a shell command or file path. More-specific matching wins over broader matching.
+Rules can target exact tool names, MCP prefixes, and operation subjects such as commands or file paths. More-specific matches beat broader ones.
 
 Example project policy:
 
@@ -427,183 +781,167 @@ Global policy:
 ~/.config/kram-gateway/permissions.json
 ```
 
-When the user chooses **always**, Kram persists an allow grant for the exact approved subject rather than silently widening it to a wildcard.
+Choosing **always** persists an exact allow grant for the approved subject instead of silently widening permission.
 
-A fully denied tool is removed from model-visible definitions entirely; a partially denied tool remains visible because some calls are still valid.
+A fully denied tool is removed from model-visible definitions entirely.
 
 ---
 
-## 8. Interactive questions and approvals
+## Interactive questions and approvals
 
-Some decisions should not be guessed by the model.
+`ask_question` lets the model pause a live run for information it genuinely needs.
 
-`ask_question` emits a live SSE event and genuinely parks the current agent run until a separate answer arrives. Permission `ask` decisions use a separate approval channel with `once`, `always`, and `deny` options.
-
-Questions and approvals are intentionally distinct mechanisms:
+Permission `ask` decisions use a separate approval flow with:
 
 ```text
-ask_question  -> the model needs information
-approval      -> policy requires authorization
+once
+always
+deny
 ```
 
-Both waits are bounded. Approval timeout fails closed rather than silently becoming permission.
+These are distinct concepts:
 
-The TUI renders both flows directly inside the active turn.
+```text
+ask_question -> model needs information
+approval     -> policy needs authorization
+```
+
+Both are delivered through the live daemon SSE stream and both are bounded. Approval timeout fails closed.
 
 ---
 
-## 9. Context management and compaction
+## Context management
 
-Coding agents can accumulate context quickly because every tool result becomes part of the next model call. Kram manages this deliberately instead of waiting for an upstream context-window error.
+Kram manages context before the upstream provider has to reject it.
 
-The current compaction path is tiered:
+Current path:
 
 1. build effective history;
-2. structurally prune old/redundant tool output first;
-3. only if still necessary, ask the model for a compact summary;
-4. persist that summary as explicitly non-actionable reference context;
+2. structurally prune old/redundant tool material;
+3. if still necessary, generate a compact summary;
+4. store the summary as explicitly non-actionable reference context;
 5. reload the reduced effective history.
 
-A run is allowed at most three compaction attempts by default. If the context keeps overflowing, Kram returns a real `ErrContextOverflow` instead of entering an unbounded summarize/retry loop.
+Compaction attempts are capped per run. Persistent overflow becomes a real `ErrContextOverflow` rather than an infinite summarize/retry loop.
 
-The TUI's context panel reports the same categories the daemon uses to reason about context, including conversation content, tool definitions, project context, memory/compaction material, and remaining budget.
+The TUI context panel uses the same runtime accounting path instead of maintaining a separate estimate.
 
 ---
 
-## 10. Deterministic tool-output filtering
+## Deterministic output filtering
 
-Raw command output is often mostly progress noise. Sending every line of a compiler, package manager, or test runner back through every later model call wastes tokens and makes signal harder to find.
+Command output can be thousands of lines of progress noise around a few useful diagnostics.
 
-Kram applies deterministic, command-aware filtering to inline shell output:
+Kram applies command-aware deterministic filtering to inline shell output:
 
-- no extra LLM call;
-- no summarization hallucination;
+- no extra model call;
+- no generated summary;
 - preserve/error patterns are evaluated before drop patterns;
-- an all-routine result still returns a small truthful summary rather than becoming empty.
+- routine output can collapse to a small truthful result instead of occupying later context.
 
-The filter can only remove known noise. It does not invent replacement output.
-
----
-
-## 11. Artifact store and bounded command output
-
-Large outputs should not consume unbounded RAM or disappear through truncation.
-
-Foreground shell and custom-tool output use a spill writer directly as process stdout/stderr. Inline output is bounded; once the threshold is crossed, the complete stream is written to the workspace artifact store while memory use stays bounded.
-
-The model receives:
-
-- a short preview;
-- an artifact ID;
-- metadata sufficient to identify the stored result;
-- access through `artifact_read` in bounded slices.
-
-Artifact access accepts Kram-generated IDs, not arbitrary filesystem paths.
-
-Artifacts are local workspace state and old artifacts receive best-effort garbage collection at daemon startup.
-
-The agent loop separately enforces a combined per-turn tool-output budget so many individually reasonable results cannot explode context in one model turn.
+The filter can remove known noise. It does not invent replacement output.
 
 ---
 
-## 12. Persistent memory
+## Artifact store and bounded producer memory
 
-Conversation history and memory are deliberately different.
+Large command/custom-tool output is streamed through a spill writer.
 
-History answers:
+Small output remains inline. Large output is persisted under the workspace artifact store and replaced in the model context by a bounded preview plus an artifact ID.
 
-> What was actually said in this session?
+`artifact_read` can then retrieve the stored data in slices.
 
-Memory answers:
+This protects both context size and the process's real memory footprint.
 
-> What fact or decision is worth carrying into future sessions?
+The agent loop additionally enforces a combined per-turn tool-output budget so several medium outputs cannot collectively explode the next model request.
 
-Kram memory is **agent-curated**, not automatic conversation scraping. The model uses `memory_write` when a fact, preference, or decision is durable enough to keep.
+---
 
-Memory supports:
+## Persistent memory
 
-- **project scope** — tied to the current workspace;
-- **global scope** — available across projects;
+Memory is **agent-curated**, not automatic conversation scraping.
+
+It supports:
+
+- project scope;
+- global scope;
 - FTS5 search through `memory_search`;
-- pinned/recent automatic injection at the beginning of a run;
+- bounded automatic injection of pinned/recent entries;
 - replace/remove operations for consolidation;
-- a hard per-scope size cap to prevent memory from becoming an unbounded prompt prefix.
+- a hard per-scope size cap.
 
-Recent memory is frozen once per user run so tool round-trips keep a stable prompt prefix. Newly written memory becomes available on the next user run.
+Recent memory is frozen once per user run so model/tool round-trips keep a stable prompt prefix.
+
+Newly written memory is available on the next user run.
 
 ---
 
-## 13. Cross-session conversation search
+## Cross-session search
 
-`session_search` searches what users and assistants actually said across durable sessions, even if nobody promoted that information into memory.
+`session_search` retrieves what users and assistants actually said across durable sessions, even if nobody promoted the information into persistent memory.
 
-It uses deterministic SQLite FTS5/BM25 retrieval rather than an LLM query.
+It uses SQLite FTS5/BM25 retrieval rather than another model call.
 
 By design:
 
 - user and assistant text is indexed;
-- system messages and tool output do not become primary search matches;
-- delegated subagent sessions are excluded by default to avoid drowning real conversation history in repeated worker transcripts;
-- callers can opt into the wider scope when needed;
-- matches include surrounding context so the result is useful, not just a disconnected line.
+- tool/system noise is not the primary search surface;
+- delegated subagent sessions are excluded by default;
+- wider scope can be requested explicitly;
+- results carry surrounding context.
 
-This gives Kram both **curated memory** and **historical recall** without conflating the two.
+Kram therefore has both **curated memory** and **historical recall** without conflating them.
 
 ---
 
-## 14. Project context
+## Project context
 
-Kram looks for project-level instructions in the workspace root and injects them into the run preamble.
-
-Supported root files currently include:
+Kram can load root-level project instructions from:
 
 ```text
 AGENTS.md
 CLAUDE.md
 ```
 
-Project context is re-read instead of permanently copied into conversation history, so changing the file affects subsequent work without requiring the session to be recreated.
+Project context is re-read rather than permanently copied into conversation history, so edits affect subsequent work without creating a new session.
 
 The model preamble is assembled roughly as:
 
 ```text
 Kram system rules
-    + project context
-    + persistent memory snapshot
-    + effective conversation history
++ project context
++ persistent memory snapshot
++ effective conversation history
 ```
-
-Keeping this prefix deliberate and stable matters for both model behavior and upstream prompt caching.
 
 ---
 
-## 15. Subagents and parallel delegation
+## Subagents
 
-`delegate_task` lets the main agent split independent work into parallel subtasks.
+`delegate_task` splits independent work into parallel subtasks.
 
-A delegated task starts in a fresh session with **zero inherited conversation history**. It only sees the explicit goal and context supplied by the parent. This keeps the worker's context budget independent from a potentially long parent conversation and forces delegation to carry a clear brief.
+A delegated worker starts in a fresh session with **zero inherited conversation history**. It receives only the explicit goal/context supplied by the parent.
 
 Current safeguards:
 
-- up to 3 concurrent subagents by default;
-- delegation depth capped at 1;
-- subagents cannot recursively build an unbounded agent tree;
-- each delegated task may select a different gateway combo/model;
-- the parent tool call waits for workers and receives their consolidated results.
+- up to 3 concurrent workers by default;
+- nesting depth capped at 1;
+- each task may use a different gateway combo/model;
+- parent waits for the batch and receives consolidated results.
 
-Subagents currently share the same workspace. They are context-isolated, not filesystem-isolated.
+Subagents currently share the same workspace. They are conversationally isolated, not filesystem-isolated.
 
 ---
 
-## 16. Skills with progressive disclosure
+## Skills
 
-Skills are reusable instruction packages stored as a directory containing `SKILL.md`.
+Skills are reusable instruction packages containing `SKILL.md`.
 
-Kram discovers project and global skills, but does not inject every skill body into every prompt. Instead:
+Kram uses progressive disclosure:
 
-1. `skill_list` exposes cheap metadata — name and description;
+1. `skill_list` exposes names/descriptions;
 2. `skill` loads full instructions only when needed;
-3. `skill_install` can discover/install skills from a public Git repository and reports source/license information.
+3. `skill_install` can discover/install skills from a public Git repository while reporting source/license information.
 
 Project skills:
 
@@ -617,15 +955,13 @@ Global skills:
 ~/.config/kram-gateway/skills/<skill>/SKILL.md
 ```
 
-This progressive-disclosure model keeps specialized knowledge available without permanently taxing the context window.
-
-Skills can also be disabled from the same settings system used for tools.
+Skills can be disabled through the same settings system used for tools.
 
 ---
 
-## 17. Custom tools without recompiling Kram
+## Custom tools without rebuilding Kram
 
-Project and global JSON manifests can add tools without writing Go or rebuilding the binary.
+Project and global JSON manifests can expose process-backed tools without adding Go code.
 
 Locations:
 
@@ -651,41 +987,41 @@ Example:
 }
 ```
 
-The tool-call JSON is sent to the command on stdin; stdout becomes the result. Manifest tools share Kram's shell runner, output limits/artifact handling, tool settings, and permission path.
+Arguments are sent as JSON on stdin and stdout becomes the result.
 
-A manifest cannot override a built-in tool name. Project manifests take precedence over global manifests with the same custom name.
+Custom tools share Kram's shell runner, output limits/artifact handling, tool settings, and permission path.
 
-This keeps extension simple and preserves the static Go binary instead of loading fragile in-process native plugins.
+A manifest cannot override a built-in tool name. Project custom tools take precedence over global custom tools with the same custom name.
 
 ---
 
-## 18. MCP client
+## MCP client
 
-Kram includes its own MCP client implementation in Go. It does not require an MCP SDK inside the runtime.
+Kram includes its own MCP JSON-RPC client implementation in Go rather than requiring an MCP SDK inside the runtime.
 
 Supported capabilities include:
 
-- stdio servers;
+- stdio transport;
 - Streamable HTTP transport;
 - initialization/lifecycle handling;
-- dynamic `tools/list` and `tools/call`;
+- `tools/list` / `tools/call`;
 - resources list/read;
 - prompts list/get;
-- project and global MCP configuration;
-- server isolation — one broken server does not prevent Kram from starting;
-- transport reconnect supervision with bounded exponential backoff;
+- project and global configuration;
+- server isolation;
+- reconnect supervision with bounded exponential backoff;
 - `tools/list_changed` refresh;
 - on-disk schema snapshots keyed by connection-config fingerprint.
 
-Remote tools are namespaced as:
+Remote tools are namespaced:
 
 ```text
 mcp__<server>__<tool>
 ```
 
-so a remote server cannot silently replace a built-in name such as `bash` or `read_file`.
+so an external server cannot silently shadow `bash`, `read_file`, or another built-in.
 
-When MCP servers are connected, Kram also exposes generic tools for server resources and prompts:
+When MCP servers are available, Kram also exposes:
 
 ```text
 mcp_resource_list
@@ -694,37 +1030,31 @@ mcp_prompt_list
 mcp_prompt_get
 ```
 
-MCP connections are external trust boundaries. Their tools still pass through Kram's common tool registry and permission evaluator before execution.
+MCP is an external trust boundary; remote tools still pass through Kram's common permission path.
 
 ---
 
-## 19. LSP code intelligence
+## LSP code intelligence
 
-Text search is useful, but a coding agent also benefits from semantic code navigation.
+Kram contains a small LSP client over `Content-Length` framed JSON-RPC.
 
-Kram contains a small LSP client implementation over the protocol's `Content-Length` framed JSON-RPC transport. Language servers start **lazily** — not at daemon startup — and one server is reused per language.
+Language servers start lazily and one process is reused per language.
 
-Current agent-facing capabilities:
+Agent-facing capabilities:
 
 - diagnostics;
-- go-to-definition;
+- definition;
 - references.
 
-The manager has defaults for common Go, TypeScript/JavaScript, and Python language servers and can be extended through project configuration.
+Built-in mappings cover Go, TypeScript/JavaScript, and Python, while project/global `lsp.json` can override commands or add new extensions/languages.
 
-If a language server is missing or fails to initialize, Kram keeps running. Only that language's LSP capability is unavailable; the agent can fall back to regular file/search tools.
-
-Language servers started by Kram are closed on daemon shutdown.
+If an LSP server is missing, only that semantic capability is lost. Kram continues running with normal file/search tools.
 
 ---
 
-## 20. Workspace snapshots and restore
+## Workspace snapshots
 
-Kram can explicitly snapshot the workspace before risky work and later inspect or restore that state.
-
-The snapshot engine uses a **separate, isolated Git repository** under Kram state, with the real workspace as its work tree. It never points snapshot commands at the user's own `.git` directory, index, branch, or HEAD.
-
-Available operations:
+Snapshot operations:
 
 ```text
 snapshot_create
@@ -733,140 +1063,145 @@ snapshot_diff
 snapshot_restore
 ```
 
-The snapshot store:
+Snapshots use a **separate Git repository** under Kram state instead of the workspace's real `.git` metadata.
 
-- respects the project's `.gitignore`;
-- always excludes `.git` and `.kram` from snapshot history;
-- reports files affected by restore;
-- leaves files that were never captured by the snapshot system alone;
-- degrades cleanly when the system `git` executable is unavailable.
+The snapshot layer:
 
-Snapshots are currently **explicit**, not automatically created before every mutation. `snapshot_restore` is a destructive operation and can be permission-gated like any other tool.
+- respects `.gitignore`;
+- excludes `.git` and `.kram` from captured history;
+- reports affected paths on restore;
+- leaves files that were never captured alone;
+- degrades cleanly if Git is unavailable.
+
+Snapshots are explicit, not automatically created before every mutation.
 
 ---
 
-## 21. Background processes
+## Cross-platform shell and background processes
 
-Long-running work is deliberately separate from foreground shell execution.
+All process-backed capabilities share `internal/shell`.
 
-`run_background` starts a tracked daemon-owned process. The agent can later inspect or stop it through:
+### Unix
+
+Commands use `/bin/sh -c` and their own process group so cancellation can target the process tree.
+
+### Windows
+
+Commands use `cmd.exe /S /C` and Windows Job Objects with kill-on-close behavior.
+
+`bash` remains foreground-only, with a default 30-second timeout and 120-second maximum.
+
+Long-running work uses:
 
 ```text
+run_background
 process_list
 process_output
 process_kill
 ```
 
-Background processes are daemon-lifetime rather than session-lifetime. That allows a server started in one conversation to be inspected from another session in the same workspace/runtime.
-
-The daemon kills tracked process trees on shutdown so a dev server does not silently outlive the process that owns it.
+Tracked background process trees are terminated on daemon shutdown.
 
 ---
 
-## 22. Terminal UI designed around real runtime state
+# Terminal UI
 
-The TUI is implemented with Bubble Tea/Lip Gloss and talks to the daemon/gateway over their real APIs. It does not persist conversations itself and does not call providers directly.
+The TUI is implemented with Bubble Tea/Lip Gloss and communicates with the real daemon/gateway APIs.
 
-### Transcript
+It does not persist conversations itself and does not call providers directly.
 
-- Kram responses remain left-aligned and render completed Markdown.
-- Submitted user messages are shown as a compact right-aligned **prompt block** with a slim accent, not a messaging-app bubble.
-- The active composer is a 3-row word-wrapping textarea, so long prompts remain visible instead of scrolling horizontally off-screen.
-- Responses stream incrementally.
-- Tool calls appear while they are running and settle into success/failure state when their result arrives.
-- Notices, questions, and approval prompts are integrated into the turn.
-- Mouse-wheel transcript scrolling is supported.
+## Transcript and composer
 
-### Route bar
+- Kram responses remain left-aligned and completed responses render Markdown;
+- user messages render as a compact right-aligned prompt block;
+- the composer is a 3-row word-wrapping textarea;
+- assistant text streams incrementally;
+- tool calls appear while running and settle to result state;
+- notices, questions, and approval prompts appear inside the active turn;
+- mouse-wheel transcript scrolling is supported.
 
-A one-line route bar sits above the transcript and reports the active strategy and the real routing trail once a model call completes.
+## Route bar
 
-On wide terminals it can show provider names, outcome glyphs, and latency. It degrades to more compact forms on narrower terminals without allowing long provider IDs to wrap the layout.
+A one-line bar above the transcript reports the active routing strategy and, once available, the real attempt trail.
 
-While a model call is in flight, the bar shows a generic routing state rather than fabricating which internal fallback attempt is currently active.
+Wide terminals can show provider names, outcome glyphs, and latency. Narrower layouts progressively reduce detail without letting long provider IDs wrap the UI.
 
-### `Ctrl+R` — full route trace
+While a model call is in flight, Kram shows a generic routing state because the daemon does not yet receive true per-attempt live progress from inside the gateway fallback loop.
 
-Shows the routing story for the most recently completed user run:
+## `Ctrl+R` — full RouteTrace
+
+Shows the most recently completed user run:
 
 - every model call;
 - every upstream attempt;
 - provider;
 - latency;
 - outcome;
-- technical rejection/error reason;
-- selected winner;
-- aggregate counts and provider time.
+- rejection/error reason;
+- winner;
+- aggregate call/attempt/fallback/provider-time counts.
 
-This is important because a real agent turn may make several model calls around tools; showing only the last call would hide most of the routing behavior.
+## `Ctrl+P` — strategy explainability
 
-### `Ctrl+P` — strategy explainability
+For scoring strategies, the panel renders the router's own factor data:
 
-For scoring strategies, the panel renders the **router's actual ranking data**, including factor weight, value, contribution, total score, and reasons such as sticky/LKGP/cache affinity/exploration.
+```text
+weight × value = contribution
+```
 
-The TUI does not recalculate the score independently, so display logic cannot drift into a second implementation of routing.
+plus total score and reasons such as sticky, LKGP, cache affinity, or exploration.
 
-### `Ctrl+T` — context panel
+The TUI never recomputes the routing score.
 
-Shows context usage and budget information sourced from the daemon. The context indicator is also clickable in mouse mode.
+## `Ctrl+T` — context panel
 
-### Session picker and settings
+Shows context usage and remaining budget sourced from the daemon's own accounting path.
 
-Launching without `-session` opens the durable session picker.
+## Session picker and settings
+
+Launching without `-session` opens durable session selection.
 
 From the picker:
 
 - `a` opens provider/account management;
-- `f` opens tool/skill enable-disable settings;
+- `f` opens tool/skill settings;
 - arrow keys navigate;
 - `Enter` resumes or creates a session;
 - `Ctrl+C` exits.
 
-The accounts screen can store provider keys locally, use supported OAuth flows, and run real lightweight connectivity/auth checks. Status dots reflect actual ping results rather than decorative state.
+The accounts screen can store credentials, use supported OAuth flows, and run real lightweight connectivity/auth checks. Status dots come from actual pings rather than decorative state.
 
 ---
 
-## 23. Provider credentials
+# Provider credentials
 
-Provider keys may come from environment variables or Kram's local credential store.
+Keys may come from environment variables or Kram's local credential store.
 
-Environment variables **always win**. Stored credentials only fill variables that are otherwise unset.
+Environment variables **always win**. Stored credentials only fill values that are otherwise unset.
 
-The local store is:
+Store location:
 
 ```text
 ~/.config/kram-gateway/credentials.json
 ```
 
-It is written with `0600` permissions and the containing directory with restrictive permissions.
+The file is written with `0600` permissions.
 
-Credentials are **not encrypted at rest**. This is intentional: Kram has no separate local key-management system that would make application-level encryption with a bundled decryption secret meaningfully stronger. Treat the file like other local CLI credential files and protect the user account/filesystem accordingly.
-
----
-
-## 24. Provider health checks
-
-The accounts UI can perform lightweight provider connectivity/auth checks without making a full agent request.
-
-Checks run when entering the accounts screen and can be refreshed manually. They are designed to answer questions such as:
-
-- is the endpoint reachable?
-- is this credential accepted?
-- is provider setup obviously broken before an agent run starts?
-
-This status is separate from gateway runtime telemetry and circuit-breaker history.
+Credentials are not application-encrypted at rest. Kram relies on local filesystem/user-account protection rather than pretending bundled reversible encryption is a separate security boundary.
 
 ---
 
 # Routing configuration
 
-For normal use, Kram can auto-detect configured provider credentials and build a default combo automatically.
+For normal use, Kram can detect configured provider credentials and build a default combo automatically.
 
-When only free-tier peers are available, the auto path favors distribution. When a paid provider is present, it favors stable priority to preserve prompt-prefix/cache economics. `-strategy` can override the auto choice without requiring a full YAML file.
+When only free-tier peers are present, the auto path favors distribution. When a paid provider is present, it favors stable priority for prompt-cache economics.
+
+`-strategy` can override the auto choice without requiring a full YAML file.
 
 For complete control, pass `-config`.
 
-## Example modern config
+## Example
 
 ```yaml
 host: 127.0.0.1
@@ -923,23 +1258,21 @@ combos:
 default_combo: default
 ```
 
-`quality_hint` is an explicit operator signal. Kram does not infer model quality by pretending it has a benchmark result it never measured.
+`quality_hint` is an explicit operator signal. Kram does not pretend it has benchmark data it never measured.
 
-An absent `response` block preserves the permissive compatibility behavior. An absent `strategy_options` block uses strategy defaults.
+An absent `response` block preserves permissive compatibility behavior. An absent `strategy_options` block uses strategy defaults.
 
-See [`config.example.yaml`](config.example.yaml) for the repository example configuration.
+See [`config.example.yaml`](config.example.yaml) for the repository example.
 
 ---
 
-# Gateway HTTP API
+# HTTP surfaces
 
-The gateway can be used independently of the built-in agent runtime.
+## Gateway
 
 ### `POST /v1/chat/completions`
 
-OpenAI-compatible chat-completions surface with streaming and non-streaming support plus Kram routing extensions on completed responses/chunks.
-
-Example:
+OpenAI-compatible chat-completions surface with streaming/non-streaming support and Kram routing metadata on completed responses/chunks.
 
 ```bash
 curl http://127.0.0.1:20128/v1/chat/completions \
@@ -955,28 +1288,13 @@ curl http://127.0.0.1:20128/v1/chat/completions \
 
 ### `GET /admin/status`
 
-Returns real gateway state including:
-
-- provider IDs/kinds;
-- capabilities;
-- circuit-breaker state;
-- request/failure counts;
-- prompt/completion token totals;
-- average latency;
-- success rate;
-- configured combos and strategies.
+Returns provider IDs/kinds, capabilities, breaker state, request/failure counts, token totals, average latency, success rate, and configured combos/strategies.
 
 ### `GET /health`
 
-Liveness endpoint used by the all-in-one launcher and external supervision.
+Gateway liveness.
 
----
-
-# Daemon HTTP API
-
-The daemon is Kram's durable local control surface.
-
-Current endpoints:
+## Daemon
 
 ```text
 GET  /health
@@ -990,7 +1308,7 @@ POST /sessions/{id}/approve
 GET  /tools
 ```
 
-`POST /sessions/{id}/messages` responds over SSE and emits the live agent lifecycle:
+`POST /sessions/{id}/messages` responds over SSE with events such as:
 
 ```text
 delta
@@ -1004,13 +1322,13 @@ approval
 done / error
 ```
 
-The final `done` event carries the persisted assistant message, usage, tool activity, compaction count, routing trace, and image capability notice.
+The final `done` event carries the persisted assistant message, usage, tool activity, compaction count, RouteTrace, and image-capability notice.
 
 ---
 
 # Running components separately
 
-The all-in-one `cmd/kram` path is the recommended user experience, but each layer remains independently runnable.
+The all-in-one path is recommended for normal use, but every major layer remains independently runnable.
 
 ### Gateway
 
@@ -1035,13 +1353,9 @@ go run ./cmd/cli \
   -gateway http://127.0.0.1:20128
 ```
 
-This separation is useful for development, debugging, or setups where gateway and agent runtime should live on different machines/processes.
-
 ---
 
 # Local state layout
-
-Kram intentionally keeps project state visible rather than hiding it in a remote service.
 
 Typical workspace state:
 
@@ -1050,14 +1364,14 @@ Typical workspace state:
 ├── kram.log
 ├── kram-daemon.db
 ├── todos.json
-├── permissions.json             # optional project policy
-├── permission_grants.json       # exact persistent approvals
-├── mcp.json                     # optional project MCP config
-├── lsp.json                     # optional project LSP config
-├── artifacts/                   # spilled large output
-├── snapshots/                   # isolated snapshot repository/state
-├── skills/                      # project skills
-└── tools/                       # custom tool manifests
+├── permissions.json
+├── permission_grants.json
+├── mcp.json
+├── lsp.json
+├── artifacts/
+├── snapshots/
+├── skills/
+└── tools/
 ```
 
 Global/user configuration lives under:
@@ -1072,74 +1386,74 @@ falling back to:
 ~/.config/kram-gateway/
 ```
 
-This includes credentials, global tool settings, global policy/configuration, skills, tool manifests, MCP configuration, and MCP schema cache where applicable.
+This area contains credentials, global settings/policy, skills, custom tools, MCP configuration, LSP configuration, and related caches where applicable.
 
 ---
 
 # Reliability model
 
-Kram treats “never crash” as an engineering direction, not a magic promise. The code tries to reduce the blast radius of failures and make failure states explicit.
+Kram treats “never crash” as an engineering direction, not a magic promise.
+
+The goal is to reduce blast radius and make failure explicit.
 
 Examples:
 
-- gateway and daemon HTTP handlers recover panics instead of taking the whole process down;
+- gateway and daemon handlers recover panics rather than killing the whole process;
 - providers have independent circuit breakers;
-- routing can fall through candidates before response commitment;
-- MCP server failure is isolated to that server;
-- missing LSP server disables only that semantic capability;
-- background processes and LSP servers are cleaned up during daemon shutdown;
-- command timeouts kill process trees rather than only the immediate shell where supported;
-- output growth is bounded and oversized results spill to artifacts;
+- fallback happens before response commitment when possible;
+- MCP failures stay isolated to their server;
+- LSP failure stays isolated to its language capability;
+- background processes and LSP servers are cleaned up on daemon shutdown;
+- process-tree cancellation is centralized;
+- output memory/context growth is bounded;
 - agent turns have iteration and compaction budgets;
-- empty model output cannot silently complete a turn twice;
-- disabled/fully-denied tools are hidden from the model;
-- approval timeout denies rather than allowing;
-- durable messages are persisted by the daemon instead of trusting terminal state;
-- snapshots provide an explicit recovery mechanism for workspace changes.
+- empty model output cannot silently complete twice;
+- disabled/fully denied tools are hidden;
+- approval timeout denies rather than allows;
+- durable state belongs to the daemon, not the terminal;
+- explicit snapshots provide a recovery path for workspace mutations.
 
-The result is not that failures disappear. It is that Kram attempts to make them **contained, observable, and recoverable**.
+The objective is not that failures disappear. It is that they become **contained, observable, and recoverable**.
 
 ---
 
 # Security and trust boundaries
 
-Kram is an agent that can execute developer tools. That means its security model should be explicit.
+Kram is an agent that can execute developer tools. Its trust boundaries are therefore explicit.
 
 ### Structured file tools
 
-Kram rejects file-tool paths that escape the configured workspace.
+Path resolution is workspace-bound and rejects escapes.
 
 ### Shell
 
-The shell is a real host shell started in the workspace directory. It is not an OS sandbox and can do whatever the host user and configured permission policy allow. Use containers/VMs/OS sandboxing when untrusted code requires stronger isolation.
+The shell is a real host shell. It is not an OS sandbox. Use containers/VMs/OS sandboxing when running untrusted code that requires a stronger boundary.
 
 ### Tool permissions
 
-ALLOW/ASK/DENY policy is evaluated before all registered tool execution paths, including custom tools and MCP tools.
+ALLOW/ASK/DENY policy runs before all registered tool execution paths, including custom and MCP tools.
 
 ### MCP
 
-MCP servers are external code/services. Namespacing prevents tool-name shadowing, but an enabled and approved remote tool still acts with whatever capabilities its server has.
+MCP servers are external code/services. Namespacing prevents tool-name shadowing, but an approved remote tool still has whatever capabilities its server exposes.
 
-### Skills and fetched content
+### Skills, project files, web content, and tool output
 
-Skills, project files, command output, web content, and external resources are data/instructions supplied to an agent. Their provenance matters. Kram does not make untrusted external content magically safe.
+These can all contain untrusted instructions or data. Provenance still matters; Kram does not make external content inherently safe.
 
 ### Credentials
 
-Stored API keys rely on local filesystem permissions, not application-managed encryption.
+Stored keys rely on local filesystem permissions.
 
 ### Snapshots
 
-Snapshots use an isolated Git directory and do not intentionally mutate the user's own repository metadata. Snapshot creation/restoration is explicit; it is not a full filesystem backup system.
+Snapshots use isolated Git metadata, but they are not a complete host filesystem backup.
 
 ---
 
 # Testing
 
-The repository uses regular Go tests plus higher-level model evals.
-
-## Unit/integration suite
+## Go suite
 
 ```bash
 go test ./... -race
@@ -1149,21 +1463,21 @@ go build ./...
 
 CI also checks `gofmt` cleanliness.
 
-The test suite includes coverage for areas such as:
+Coverage includes areas such as:
 
-- routing strategies and weighted scoring;
-- response and stream gates;
+- routing and weighted scoring;
+- response/stream gates;
 - route traces and TUI rendering;
-- circuit-breaker interaction;
+- circuit breakers;
 - permission policy/grants;
-- artifacts/spill behavior;
-- workspace snapshots;
-- shell process-tree cleanup;
-- LSP transport/client/manager behavior;
-- MCP JSON-RPC, lifecycle, caching, and reconnect behavior;
-- session/memory FTS5 search;
+- artifact spill behavior;
+- snapshots;
+- cross-platform process control;
+- LSP transport/client/manager;
+- MCP lifecycle/cache/reconnect;
+- FTS5 memory/session retrieval;
 - tool boundaries and output filtering;
-- eval-harness correctness.
+- eval harness behavior.
 
 ## Model evals
 
@@ -1171,15 +1485,15 @@ The test suite includes coverage for areas such as:
 go run ./evals
 ```
 
-Evals run through the real in-process gateway + daemon stack using an actual configured model. They are for behavior that ordinary unit tests cannot prove — for example whether a real model actually uses the capabilities exposed by Kram's prompt/tool contract.
+Evals run through the real gateway + daemon stack with an actual configured model.
 
 The harness distinguishes:
 
-- **PASS** — behavior was exercised and succeeded;
-- **FAIL** — behavior was exercised and violated the scenario;
-- **SKIP** — the scenario could not observe the property it was meant to test.
+- **PASS** — the behavior was exercised and succeeded;
+- **FAIL** — the behavior was exercised and violated the scenario;
+- **SKIP** — the scenario could not observe the property it was supposed to test.
 
-Hard scenarios represent runtime invariants; model-dependent soft scenarios remain diagnostic rather than pretending every model has identical agent behavior.
+Hard scenarios represent runtime invariants. Model-dependent soft scenarios remain diagnostic rather than pretending every model behaves identically.
 
 ---
 
@@ -1189,7 +1503,7 @@ Hard scenarios represent runtime invariants; model-dependent soft scenarios rema
 ./scripts/build-release.sh v1.2.3
 ```
 
-Current release targets:
+Current targets:
 
 ```text
 linux/amd64
@@ -1205,84 +1519,93 @@ Release builds use:
 CGO_ENABLED=0
 ```
 
-and embed the version through linker flags.
+The build script produces `.tar.gz` archives on Unix-like targets and `.zip` on Windows, with version information embedded through linker flags.
 
-The build script creates `.tar.gz` archives for Unix-like targets and `.zip` for Windows. GitHub Actions contains separate CI and tagged-release workflows; CI builds, vets, checks formatting, and runs the test suite with the race detector.
+GitHub Actions contains CI and tagged-release workflows.
 
 ---
 
 # Repository map
 
-For readers who want to open the hood:
-
 | Path | Responsibility |
 |---|---|
 | `cmd/kram` | Recommended all-in-one launcher. |
-| `cmd/gateway` | Standalone gateway entry point. |
-| `cmd/daemon` | Standalone durable daemon entry point. |
+| `cmd/gateway` | Standalone gateway. |
+| `cmd/daemon` | Standalone durable daemon. |
 | `cmd/cli` | Standalone terminal client. |
-| `internal/daemon/agent` | Tool-calling loop, run lifecycle, questions/approvals, route accumulation. |
-| `internal/daemon/store` | SQLite sessions, messages, memory, FTS5 history search. |
-| `internal/daemon/tools` | Core tool registry and concrete agent capabilities. |
-| `internal/daemon/compaction` | Context pruning and summarization. |
-| `internal/router` | Combos v2 strategies, factors, sticky/LKGP state, response/stream gating. |
-| `internal/server` | OpenAI-compatible gateway HTTP surface. |
-| `internal/provider` | Anthropic, Gemini, and OpenAI-compatible adapters. |
+| `internal/daemon/agent` | Tool-calling loop and run lifecycle. |
+| `internal/daemon/store` | SQLite sessions/messages/memory/FTS5 search. |
+| `internal/daemon/tools` | Tool registry and concrete capabilities. |
+| `internal/daemon/compaction` | Context pruning/summarization. |
+| `internal/router` | Combos v2 strategies, factors, affinity, gates, trace data. |
+| `internal/server` | Gateway HTTP surface. |
+| `internal/provider` | Provider adapters. |
 | `internal/breaker` | Per-provider circuit breaker. |
-| `internal/telemetry` | Lightweight provider runtime counters. |
-| `internal/permission` | ALLOW/ASK/DENY policy and exact grants. |
-| `internal/artifact` | Bounded-output spill writer and artifact store. |
-| `internal/shell` | Cross-platform shell/process-tree control. |
-| `internal/snapshot` | Isolated workspace snapshot engine. |
-| `internal/lsp` | Hand-written LSP transport/client/manager. |
-| `internal/mcp` | Hand-written MCP JSON-RPC client, transports, reconnect/cache lifecycle. |
-| `internal/cli/app` | Bubble Tea terminal UI, route/context panels, accounts, approvals. |
+| `internal/telemetry` | Provider runtime counters. |
+| `internal/permission` | ALLOW/ASK/DENY policy and grants. |
+| `internal/artifact` | Spill writer and artifact store. |
+| `internal/shell` | Cross-platform process execution/cleanup. |
+| `internal/snapshot` | Isolated workspace snapshots. |
+| `internal/lsp` | LSP protocol/client/manager. |
+| `internal/mcp` | MCP JSON-RPC client/transports/lifecycle/cache. |
+| `internal/cli/app` | Terminal UI and live panels/settings. |
 | `internal/credentials` | Local provider-key store. |
-| `internal/providercatalog` | Auto-configuration/account catalog. |
-| `internal/providerping` | Lightweight account connectivity/auth checks. |
+| `internal/providercatalog` | Provider auto-configuration catalog. |
+| `internal/providerping` | Lightweight provider connectivity/auth checks. |
 | `internal/toolsettings` | Tool/skill enable-disable persistence. |
-| `evals` | End-to-end behavioral evaluation harness. |
-| `scripts` | Release/build automation. |
-| `DECISIONS.md` | Architectural rationale and known boundaries. |
+| `evals` | End-to-end behavioral eval harness. |
+| `scripts` | Build/release automation. |
+| `DECISIONS.md` | Architectural rationale, reversals, and known gaps. |
 
 ---
 
 # Current boundaries
 
-Kram deliberately does not pretend to solve every agent-runtime problem today.
+Kram deliberately does not pretend every agent-runtime problem is already solved.
 
-A few important boundaries are worth stating clearly:
+Important current boundaries include:
 
 - shell execution is not a host sandbox;
-- subagents share the workspace even though their conversational context is isolated;
-- snapshots are explicit rather than automatically taken before every mutation;
-- MCP schema caching currently improves persisted knowledge/refresh behavior but does not replace every startup connection with lazy discovery;
-- streaming fallback is only possible before downstream response commitment;
-- route-bar in-flight state is currently per model call rather than fake per-attempt progress;
+- subagents share the workspace;
+- snapshots are explicit rather than automatic before every mutation;
+- MCP schema caching does not yet replace every startup connection with fully lazy discovery;
+- streaming fallback is only possible before downstream commitment;
+- live route progress is currently per model call rather than true per-provider-attempt streaming;
 - scheduling/cron-style autonomous runs are not part of the current core;
-- the context policy layer continues to evolve as output/artifact behavior matures.
+- the context policy layer continues to evolve;
+- aggregate per-turn output budgeting can still truncate with an explicit notice even though individual oversized producers are artifact-backed.
 
-These are explicit engineering boundaries, not hidden claims in the UI.
+These are documented engineering boundaries, not hidden limitations behind optimistic UI.
 
 ---
 
 # Development philosophy
 
-Kram favors mechanisms that are easy to reason about under failure:
+Many of Kram's current principles are consequences of the failure modes above:
 
-- deterministic filtering before another LLM summarizer;
+- hard capability constraints before smart scoring;
+- stable prompt prefixes before unnecessary provider rotation;
+- real trace data before simulated observability;
+- one score calculation in the router, not one in the router and another in the UI;
+- bounded producer memory before post-hoc truncation;
+- deterministic filtering before model-generated compression;
 - explicit process ownership before background shell magic;
-- a permission engine before scattered confirmation dialogs;
-- one durable owner before multiple clients writing state;
-- hard capability constraints before “smart” scoring;
-- real trace data before simulated dashboards;
-- bounded state before “we'll clean it up later”;
+- one permission choke point before scattered confirmation dialogs;
+- curated memory plus searchable history instead of one unbounded memory bucket;
+- isolated recovery state instead of borrowing the user's `.git` metadata;
 - graceful degradation when optional integrations fail;
-- small protocol implementations where owning the wire behavior improves predictability.
+- PASS/FAIL/SKIP instead of pretending unobserved behavior passed;
+- a single distributable binary without collapsing all responsibilities into one package.
 
-When a behavior is important enough to show in the TUI, the preferred architecture is for the runtime to compute it once and the UI to render that truth — not implement another version of the same logic for display.
+When a behavior is important enough to show in the TUI, the preferred design is for the runtime to compute it once and the UI to render that truth.
 
-For the detailed rationale behind those decisions, see [`DECISIONS.md`](DECISIONS.md).
+When a limit matters for reliability, the preferred design is to enforce it where the resource is produced, not after damage has already happened.
+
+When a capability can mutate the developer's machine, the preferred design is to make ownership and permission explicit rather than depend on convention.
+
+That is the direction Kram continues to follow.
+
+For the detailed decision log, see [`DECISIONS.md`](DECISIONS.md).
 
 ---
 
