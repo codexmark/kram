@@ -35,6 +35,16 @@ type Registry struct {
 	byName    map[string]Tool
 	delegator Delegator
 	disabled  map[string]bool
+	processes *processManager
+}
+
+// StopBackgroundProcesses kills every process started by run_background —
+// called on daemon shutdown so a background dev server doesn't outlive
+// the daemon that started it as an orphan.
+func (r *Registry) StopBackgroundProcesses() {
+	if r.processes != nil {
+		r.processes.killAll()
+	}
 }
 
 // SetDelegator wires the concrete subagent runner into the registry's
@@ -61,7 +71,8 @@ func NewRegistry(workspace string, st *store.Store, disabled map[string]bool) *R
 	if disabled == nil {
 		disabled = map[string]bool{}
 	}
-	r := &Registry{workspace: workspace, byName: make(map[string]Tool), disabled: disabled}
+	processes := newProcessManager(workspace)
+	r := &Registry{workspace: workspace, byName: make(map[string]Tool), disabled: disabled, processes: processes}
 	todos := newTodoStore(workspace)
 	toolList := []Tool{
 		newReadFile(workspace),
@@ -83,6 +94,10 @@ func NewRegistry(workspace string, st *store.Store, disabled map[string]bool) *R
 		newSkillList(r),
 		newSkillLoad(r),
 		newSkillInstall(),
+		newRunBackground(processes),
+		newProcessList(processes),
+		newProcessOutput(processes),
+		newProcessKill(processes),
 	}
 	if st != nil {
 		toolList = append(toolList, newMemoryWrite(st, workspace), newMemorySearch(st, workspace))

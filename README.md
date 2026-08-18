@@ -626,3 +626,24 @@ Agent's design:
   on every tool round-trip. Kram freezes per run rather than per session
   (as Hermes does), so a fact written mid-conversation still appears on
   the user's very next message instead of only in a new session.
+
+## Background processes
+
+`bash` stays foreground-only and timeout-bounded by design (see
+DECISIONS.md) — but a coding agent legitimately needs to start a dev
+server and keep working, so that's a separate, explicit capability:
+`run_background`, `process_list`, `process_output`, `process_kill`
+(`internal/daemon/tools/background.go`).
+
+Processes are daemon-lifetime, not session-lifetime — a dev server
+started from one session is still checkable and killable from a
+different one, same pattern as the project-wide todo list. Output is
+captured into a capped ring buffer (500KB, keeps the tail) per process.
+The daemon kills every tracked process on its own shutdown, so nothing
+outlives it as an orphan.
+
+Verified end to end with the mock-provider devtool: started a background
+loop, confirmed the turn returned immediately rather than blocking for
+the loop's full duration, then — from a completely separate session —
+confirmed the process had kept running and its output was fully captured
+after it exited on its own.

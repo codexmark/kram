@@ -90,14 +90,32 @@ executes it, overflows again, and loops forever. The summary is also
 stored wrapped as explicitly non-actionable reference material for the
 same reason.
 
-### bash is foreground-only
+### bash is foreground-only — background processes are a separate, explicit tool
 
-No background processes, no servers, no watchers. Timeout-bounded.
+No background processes, no servers, no watchers *in `bash` itself*.
+Timeout-bounded. Hermes Agent makes the same call for the same reason:
+a background process outlives the turn that started it, and nothing in
+the loop owns cleaning it up if it's just a stray flag on a generic
+shell tool.
 
-**Why:** a background process outlives the turn that started it, and
-nothing in the loop owns cleaning it up. Hermes Agent makes the same
-call. This is a real capability gap versus opencode/Hermes (which have
-`process`/`cronjob` tools) and it is deliberate rather than unfinished.
+**Why not fix this by adding a `background: true` flag to `bash`
+instead:** ownership. A flag makes "does this outlive the turn" an
+implicit property of arbitrary command text the model wrote, invisible
+until something goes looking for it. A separate tool
+(`run_background`/`process_list`/`process_output`/`process_kill`,
+`internal/daemon/tools/background.go`) makes the decision to start
+something long-lived explicit and the resulting process trackable and
+killable by id — every process a `processManager` owns, not something
+`bash` quietly left running.
+
+Two consequences that follow from making it explicit rather than
+implicit: processes are daemon-lifetime, not session-lifetime — a dev
+server started from one session is still checkable and killable from a
+different one, matching `todoStore`'s pattern rather than being scoped to
+whichever conversation happened to start it. And the daemon kills every
+tracked process on its own shutdown (`Registry.StopBackgroundProcesses`),
+so nothing outlives the daemon as an orphan the way a flag-based approach
+would have no natural place to clean up from.
 
 ### Images are gated by capability, never assumed
 
@@ -471,16 +489,18 @@ free-tier model happens to misbehave.
 
 Honest list of what Kram still doesn't have, as of this writing:
 
-- **Background/async tasks and scheduling.** opencode lacks this too;
-  Hermes has both (`process`, `cronjob`).
+- ~~Background/async tasks.~~ Closed: `run_background`/`process_list`/
+  `process_output`/`process_kill`. Scheduling (Hermes's `cronjob`) is
+  still open — nothing triggers a run on a timer.
 - **Plugins.** opencode has TS/JS custom tools; Hermes has pluggable
   memory providers and terminal backends. Kram is fixed to what's in the
   binary, plus MCP.
 - **MCP beyond tools.** Resources, prompts, and elicitation are all
   deferred. Only `tools/*` is implemented.
-- **Test coverage.** `outputfilter_test.go` is the only test suite. Every
-  other component is verified by manual smoke tests against a mock
-  provider, which works but catches nothing automatically.
+- ~~Test coverage.~~ Closed for now: 7 packages covered beyond the
+  agent-loop smoke tests (credentials, toolsettings, providercatalog,
+  router, memory store + tool, skills parser, mcp). Still nothing for
+  `internal/gateway`, `internal/provider`, or the CLI itself.
 - **Evals.** No harness that can answer "did this prompt change make the
   agent better or worse".
 - **Distribution.** No prebuilt binaries, no docs site.

@@ -64,6 +64,10 @@ func Run(ctx context.Context, cfg Config, logger *slog.Logger) error {
 		disabled = ts.Disabled()
 	}
 	toolRegistry := tools.NewRegistry(absWorkspace, st, disabled)
+	// run_background processes are daemon-lifetime, not request-lifetime —
+	// they must be killed on shutdown or they'd outlive the daemon that
+	// started them as untracked orphans.
+	defer toolRegistry.StopBackgroundProcesses()
 
 	// MCP servers are third-party processes: connecting is I/O that can
 	// hang or fail, so it happens after the registry exists and never
