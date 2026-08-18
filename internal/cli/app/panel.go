@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/codexmark/kram-gateway/internal/cli/statusclient"
+	"github.com/codexmark/kram-gateway/internal/openai"
 )
 
 // renderStrategyPanel draws the end-to-end strategy panel: every provider
@@ -40,6 +41,26 @@ func (m Model) renderStrategyPanel() string {
 		focus = len(combo.Providers) - 1
 	}
 
+	// Real scoring data for the focused provider (the most recent turn's
+	// actual ranking — see agent.RouteTrace via m.routeCall) replaces the
+	// plain badge/telemetry view with a focused breakdown, matching
+	// section 19's shape: this provider's factors, then a compact list of
+	// every other candidate's score for context. Never recomputed here —
+	// the TUI only ever renders what the router already decided (see
+	// DECISIONS.md). Non-scoring strategies (priority, round-robin,
+	// prefix-affinity) leave Ranking empty, so the plain view below is
+	// what those always show.
+	if focus >= 0 && focus < len(combo.Providers) {
+		if info, ok := m.focusedRanking(combo.Providers[focus]); ok {
+			lines = append(lines, renderScoreBreakdown(info)...)
+			lines = append(lines, "")
+			lines = append(lines, otherScores(m.routeCall.Ranking, info.Provider)...)
+			lines = append(lines, "")
+			lines = append(lines, styleHint.Render("↑↓ trocar candidato"))
+			return padLines(lines, h, m.width)
+		}
+	}
+
 	for i, pid := range combo.Providers {
 		indent := strings.Repeat("  ", i)
 		connector := ""
@@ -62,6 +83,67 @@ func (m Model) renderStrategyPanel() string {
 	lines = append(lines, styleMeta.Render(explainProvider(combo, statsByID, focus)))
 
 	return padLines(lines, h, m.width)
+}
+
+// otherScores lists every other ranked candidate's score, compactly —
+// the "gemini .842, openai .816" context section 19 asks for, so a
+// candidate that was never even attempted (fallback stopped before
+// reaching it) is still visible.
+func otherScores(ranking []openai.RankedProviderInfo, exclude string) []string {
+	var lines []string
+	for _, r := range ranking {
+		if r.Provider == exclude {
+			continue
+		}
+		lines = append(lines, styleMeta.Render(fmt.Sprintf("%-20s %.3f", r.Provider, r.Score)))
+	}
+	return lines
+}
+
+// focusedRanking looks up providerID's entry in the most recently
+// completed model call's full ranking, if any scoring strategy produced
+// one.
+func (m Model) focusedRanking(providerID string) (openai.RankedProviderInfo, bool) {
+	if m.routeCall == nil {
+		return openai.RankedProviderInfo{}, false
+	}
+	for _, r := range m.routeCall.Ranking {
+		if r.Provider == providerID {
+			return r, true
+		}
+	}
+	return openai.RankedProviderInfo{}, false
+}
+
+// renderScoreBreakdown formats one candidate's factor-by-factor score —
+// weight × value = contribution, per factor — plus any reasons (sticky,
+// last-known-good, cache-affinity, explore) tagged on top of the base
+// score. Deliberately compact (one line per factor, reasons combined onto
+// a single line): the panel's height is shared with every other section
+// above it, and this is real content, not a full-screen view.
+func renderScoreBreakdown(info openai.RankedProviderInfo) []string {
+	lines := []string{
+		styleBadgeAccent.Render(info.Provider) + "  " + styleMeta.Render(fmt.Sprintf("score %.3f", info.Score)),
+	}
+	longest := 0
+	for _, f := range info.Factors {
+		if len(f.Name) > longest {
+			longest = len(f.Name)
+		}
+	}
+	for _, f := range info.Factors {
+		lines = append(lines, styleMeta.Render(fmt.Sprintf(
+			"%-*s %5.0f%% x %.2f = %.3f", longest, f.Name, f.Value*100, f.Weight, f.Contribution,
+		)))
+	}
+	if len(info.Reasons) > 0 {
+		upper := make([]string, len(info.Reasons))
+		for i, r := range info.Reasons {
+			upper[i] = strings.ToUpper(r)
+		}
+		lines = append(lines, styleBadgeOK.Render(strings.Join(upper, " · ")))
+	}
+	return lines
 }
 
 func badgeForProvider(p statusclient.Provider, id string) string {

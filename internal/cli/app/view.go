@@ -119,6 +119,8 @@ func (m Model) View() string {
 		b.WriteString(m.renderStrategyPanel())
 	case panelContext:
 		b.WriteString(m.renderContextPanel())
+	case panelRoute:
+		b.WriteString(m.renderRoutePanel())
 	}
 	b.WriteString(m.renderFooter())
 

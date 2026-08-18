@@ -49,6 +49,7 @@ const (
 	panelNone panel = iota
 	panelStrategy
 	panelContext
+	panelRoute
 )
 
 type chatMessage struct {
@@ -92,6 +93,11 @@ type Model struct {
 	// a generic pulse until the real trail lands.
 	routeRunning bool
 	routeCall    *daemonclient.RouteCall
+	// routeTrace is the full routing story for the most recently
+	// completed turn — every model call, not just the last one (see
+	// agent.RouteTrace) — populated from the "done" event, rendered by
+	// the Ctrl+R panel (routepanel.go).
+	routeTrace daemonclient.RouteTrace
 
 	active panel
 
@@ -397,6 +403,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "ctrl+t":
 		return m.togglePanel(panelContext)
 
+	case "ctrl+r":
+		return m.togglePanel(panelRoute)
+
 	case "esc":
 		if m.active != panelNone {
 			m.active = panelNone
@@ -664,6 +673,7 @@ func (m Model) handleStreamEvent(msg streamEventMsg) (tea.Model, tea.Cmd) {
 		m.waiting = false
 		m.err = nil
 		m.routeRunning = false
+		m.routeTrace = msg.event.RouteTrace
 		m.lastUsage = msg.event.Usage
 		if lm := last(); lm != nil {
 			lm.Content = msg.event.Message.Content // authoritative final text, in case deltas ever diverge
@@ -738,9 +748,16 @@ func (m *Model) syncViewportSize() {
 }
 
 func (m *Model) panelHeight() int {
-	h := m.height / 4
-	if h < 6 {
-		h = 6
+	// 1/3 with a floor of 9 (not 1/4 with a floor of 6) — the strategy
+	// panel's score-breakdown view (six factor lines plus header, other-
+	// candidate scores, and a hint line) needs more room than the plain
+	// provider-list view did; the route panel can also run several lines
+	// per model call. A too-short panel truncates content rather than
+	// wrapping or corrupting layout, so this is a real (if imperfect)
+	// tradeoff against leaving less room for the transcript.
+	h := m.height / 3
+	if h < 9 {
+		h = 9
 	}
 	return h
 }

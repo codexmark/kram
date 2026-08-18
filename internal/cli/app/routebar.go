@@ -51,8 +51,15 @@ func (m Model) renderRouteBar() string {
 	// still overflow on its own — this is the final safety net so the
 	// route bar never wraps to a second line or bleeds past the
 	// terminal's edge, ANSI-color-code aware so a truncated line doesn't
-	// leave a dangling escape sequence.
-	return truncate.StringWithTail(padBetween(m.width, left, right), uint(max(m.width, 0)), "…")
+	// leave a dangling escape sequence. Only actually truncates when the
+	// line really is too long: reflow's truncate unconditionally reserves
+	// room for the tail, so calling it on a line already exactly at width
+	// would clip its last character and add "…" for no reason.
+	result := padBetween(m.width, left, right)
+	if m.width > 0 && lipgloss.Width(result) > m.width {
+		return truncate.StringWithTail(result, uint(m.width), "…")
+	}
+	return result
 }
 
 // routeBarStrategyLabel prefers the strategy the most recent real
