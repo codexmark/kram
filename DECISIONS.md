@@ -1444,6 +1444,46 @@ free-tier model happens to misbehave.
 
 ---
 
+## Continuous integration
+
+### Check Runs and Commit Statuses are two different APIs, not two names for the same thing
+
+**Found as a real observability gap.** `.github/workflows/ci.yml` had run since the workflow was first added, and GitHub's own Actions UI showed it green — but `GET /repos/{owner}/{repo}/commits/{sha}/status` (the classic Commit Status API) returned `statuses: []` for every commit, even ones CI had clearly checked.
+
+This is not a bug in that endpoint. GitHub Actions jobs automatically create **Check Runs** (grouped into a Check Suite owned by the "github-actions" App) — that's what populates the PR "Checks" tab and the green check mark next to a commit in the GitHub UI. The classic **Commit Status API** (`POST/GET .../statuses/{sha}`) is a separate, older mechanism predating Actions, originally built for external CI services (Travis, CircleCI, Jenkins) that had no other way to report into GitHub. Actions never populates it on its own. A repo that only uses Actions will always show `statuses: []` to anything querying that specific endpoint — regardless of whether CI is passing, failing, or has never run — because nothing ever calls it.
+
+Since external tooling and scripted audits commonly assume the classic API is authoritative (it's the older, simpler, more widely-integrated one), the fix publishes **both**: native Check Runs (automatic, zero extra code, the richer/native GitHub UX) and explicit classic Commit Statuses (`.github/actions/report-status`, a small composite action calling `POST .../statuses/{sha}` once per job) with matching `kram/*` contexts. Neither replaces the other; they're kept in sync by construction, not by best effort.
+
+### A second, unrelated, worse problem was already there: `startup_failure` on every run
+
+Diagnosing the above surfaced something more serious: every CI run since the workflow existed had `conclusion: "startup_failure"` — `jobs: []`, zero check runs created, nothing ever actually executed. Both `.github/workflows/ci.yml` and `.github/workflows/release.yml` parse as valid YAML (verified with `actionlint`, which reported zero issues against the rewritten workflow), which ruled out a workflow-file syntax problem as the cause. The conclusive signal: GitHub's own internal Dependabot dependency-graph-update workflow — which has no YAML file in this repo and nothing to do with `ci.yml`'s content — failed identically on the same pushes. A workflow the repo owner has zero authorship over cannot fail because of a mistake in `ci.yml`; whatever is blocking execution is scoped above the repository, most consistent with a GitHub Actions billing/spending-limit condition on the account (the most common cause of *every* workflow failing to schedule at once) rather than anything this task can fix by editing YAML. This is called out explicitly in the report to the user rather than declared "fixed" — the workflow is now correct, but has not yet been *proven* to execute, and won't be provable until whatever is blocking scheduling at the account level is resolved.
+
+### Jobs, not steps — parallel, independently named, individually queryable
+
+`build`, `vet`, `format`, and `test-race` are four separate jobs (their own runner, their own logs, their own Check Run/commit status), not four steps inside one `test` job. A single job collapses everything into one pass/fail signal — `go vet` failing looks identical to `gofmt` failing looks identical to a real test failure until someone opens the log and reads it. Separate jobs run in parallel (no reason `go vet` should wait for `go test -race` to finish) and let an external consumer ask "did the race detector pass?" without parsing log text.
+
+An aggregate `ci` job (`needs: [build, vet, format, test-race]`, `if: always()`) is not a fifth job re-running everything — it's three lines of bash checking `needs.*.result` for `failure`/`cancelled`. `if: always()` is required so it still runs (and reports its own failure) when a dependency fails; without it, a broken `build` would leave `Kram / CI` stuck at `pending` forever instead of turning red.
+
+The workflow is literally named `Kram` (not `ci`) because GitHub names each Check Run `<workflow name> / <job name>` — this is what produces the stable, human-readable `Kram / Build`, `Kram / Vet`, `Kram / Format`, `Kram / Test Race`, `Kram / CI` names, which is also exactly what a future `required status checks` branch-protection rule would reference. Classic commit-status contexts (`kram/build`, `kram/vet`, `kram/format`, `kram/test-race`, `kram/ci`) are named separately since that API has its own flat namespace with no workflow/job grouping concept.
+
+### Status lifecycle has to actually terminate
+
+Each job reports `pending` as its second step (right after checkout — checkout has to come first since the status-reporting step is a local composite action, `uses: ./.github/actions/report-status`, which only exists once the repo is checked out), then exactly one of `success`/`failure`/`error` at the end via three mutually exclusive step conditions: `if: success()`, `if: failure()`, `if: cancelled()`. The classic Commit Status API has no `cancelled` state, so a cancelled job reports `error` — the closest fit, and the important part is that *something* always fires. Without the `cancelled()` branch, a job cancelled mid-run (e.g. by `concurrency.cancel-in-progress` superseding it) would leave its status stuck at `pending` indefinitely, which is worse than not reporting anything at all.
+
+### SHA correctness: `github.sha` is not always the SHA that matters
+
+On a `pull_request` event, `github.sha` is GitHub's ephemeral, synthetic merge commit — it never exists as a real commit in the repo's permanent history and disappears once the PR closes. Reporting a commit status against it would make that status permanently unqueryable by the actual SHA anyone cares about. `env.SHA` is computed once at the workflow level as `github.event.pull_request.head.sha || github.sha` — the real PR branch tip on `pull_request`, falling through to the real pushed commit on `push` (where no `pull_request` context exists at all). Native Check Runs don't need this handling; GitHub's Actions/Checks integration already associates them with the correct head SHA for `pull_request` events on its own — this correction is specific to the classic Statuses API, which has no equivalent built-in awareness.
+
+### `pull_request`, not `pull_request_target` — and least-privilege token permissions
+
+`pull_request_target` runs workflow code with the base repository's token permissions and secrets even for a PR from a fork, which is a well-known privilege-escalation vector when combined with checking out and running PR-authored code — exactly the shape of this workflow (it runs `go build`/`go test` on the PR's own code). Plain `pull_request` was kept instead, at the cost of slightly more limited `GITHUB_TOKEN` permissions for fork PRs, which is the correct tradeoff here. Workflow-level `permissions: contents: read, statuses: write` is the actual minimum this workflow needs — nothing writes repository contents, comments on PRs, or triggers other workflows, so nothing broader was granted.
+
+### Caching: `actions/setup-go`'s built-in cache, not a hand-rolled one
+
+`cache: true` on `actions/setup-go@v5` (keyed from `go.sum`, covering both the module download cache and the build cache) is what the task asked to prefer over inventing manual `actions/cache` wiring — it already solves this correctly and is one line per job.
+
+---
+
 ## Known gaps
 
 Honest list of what Kram still doesn't have, as of this writing:
@@ -1540,6 +1580,21 @@ safety, and reliability rather than raw feature count:
   bar / Ctrl+R / Ctrl+P explainability UI reading that data directly with
   nothing recomputed. See the expanded "Routing" and "Interface"
   sections above for the full rationale.
+
+Also currently open, outside this file's usual "narrower than what it
+would extend" category: **CI has not actually run since the workflow was
+added.** Every push since `.github/workflows/ci.yml` was introduced shows
+`conclusion: "startup_failure"` — including GitHub's own internal
+Dependabot dependency-graph-update workflow, which has no user-authored
+YAML at all, on the same pushes. This rules out a syntax/content problem
+in `ci.yml` (also independently confirmed with `actionlint`, zero
+findings) and points at something blocking Actions scheduling above the
+repository — most consistent with an account-level Actions
+billing/spending-limit condition, which only the account owner can
+inspect or change (GitHub Settings → Billing and plans). The rewritten CI
+workflow (see "Continuous integration" above) is believed correct and
+ready, but has not been *proven* to execute end to end, and this file
+will not claim otherwise until that proof exists.
 
 Still open, in rough priority order: a **context policy engine** (deferred
 until artifact spill, above, had proven stable, which it now has — this

@@ -1526,7 +1526,7 @@ go vet ./...
 go build ./...
 ```
 
-CI also checks `gofmt` cleanliness.
+CI validates every commit (push to `main`/`master` and every pull request) with five independently named checks — `Kram / Build`, `Kram / Vet`, `Kram / Format`, `Kram / Test Race`, and an aggregate `Kram / CI` that only succeeds if all four do. Each is also published as a classic commit status (`kram/build`, `kram/vet`, `kram/format`, `kram/test-race`, `kram/ci`) for tooling that queries the commit-status API instead of Check Runs. See `.github/workflows/ci.yml` and DECISIONS.md.
 
 Coverage includes areas such as:
 

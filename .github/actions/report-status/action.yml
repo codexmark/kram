@@ -1,0 +1,32 @@
+name: Report commit status
+description: >
+  Publishes a classic commit status (the /repos/{owner}/{repo}/statuses/{sha}
+  API) for the current job, in addition to the Check Run GitHub Actions
+  already creates automatically. Kept as one small composite action instead
+  of duplicating the same gh api call in every job.
+inputs:
+  context:
+    description: Status context, e.g. kram/build
+    required: true
+  state:
+    description: One of pending, success, failure, error
+    required: true
+  description:
+    description: Short human-readable description (GitHub truncates past ~140 chars)
+    required: false
+    default: ""
+  sha:
+    description: Commit SHA to report against (the real one, not a PR merge SHA)
+    required: true
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        gh api "repos/${{ github.repository }}/statuses/${{ inputs.sha }}" \
+          -f state="${{ inputs.state }}" \
+          -f context="${{ inputs.context }}" \
+          -f description="${{ inputs.description }}" \
+          -f target_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
