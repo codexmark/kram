@@ -15,6 +15,10 @@ delegation, skills, and an MCP client.
 rest of this doc mostly describes the individual components for
 development. The gateway, daemon and CLI all still work standalone too.
 
+**[DECISIONS.md](DECISIONS.md)** records why Kram is built the way it is —
+including the decisions that were wrong at first and got reversed, the
+capabilities deliberately not built, and the known gaps.
+
 ## Inspirations
 
 Kram is a clean-room build, not a fork — but its design borrows ideas from
