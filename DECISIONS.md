@@ -609,6 +609,141 @@ the same outcome as if it had never spilled.
 
 ---
 
+## Workspace snapshots
+
+### A second, isolated git repository as the storage engine
+
+`internal/snapshot` gives Kram a way back if an agent breaks something:
+`Store.Create` captures the workspace's current files, `Store.Restore`
+brings them back. The engine is git — but a completely separate
+repository, `--git-dir` pointed at `<workspace>/.kram/snapshots/.git`,
+operating against the real workspace as its `--work-tree`. Every
+operation (`add`, `commit`, `diff`, `reset --hard`) targets that isolated
+`--git-dir` exclusively, via `os/exec` calling the system `git` binary —
+same philosophy as `internal/daemon/tools/git.go`'s read-only
+`git_status`/`git_diff`, and the same "external capability, explicit
+subprocess" pattern MCP/LSP/custom tools already use.
+
+**Alternative considered:** a pure-Go git implementation (e.g. `go-git`)
+instead of shelling out. **Rejected:** it would be a new, fairly heavy
+dependency for functionality the system `git` binary already provides
+correctly, and this project already treats "shell out to a real binary"
+as the default posture for external capabilities (shell, LSP servers, MCP
+servers) rather than reimplementing protocols in Go where a battle-tested
+binary exists. `go-git`'s `reset --hard`-equivalent semantics are also
+less battle-tested than actual git's for this exact operation — being
+this careful about "never touch the user's real repo" is not where you
+want the least mature implementation of the mechanics doing the work.
+This mirrors the MCP decision ("No SDK... it preserves the pure-Go,
+static-binary, no-surprise-dependencies property") in spirit, but lands
+on the opposite side, because here git the binary — not a Go
+implementation of git — is genuinely the more reliable, better-tested
+tool for the job, and the project already depends on git being present
+for `git_status`/`git_diff`.
+
+**Why this never violates "never touch the user's real git":** the
+isolated repository shares a filesystem with the user's repo but nothing
+else — different `--git-dir`, different index, different HEAD, different
+branch, different identity (`user.email`/`user.name` set locally to this
+hidden repo's own config only), different history. `git reset --hard`
+against *this* `--git-dir` is not the dangerous command the invariant
+bans — that ban is specifically about the user's own `.git`, which this
+package never points at for any command. Verified directly, not just
+argued: `snapshot_test.go`'s `TestSnapshotNeverTouchesUserGitState`
+stages a real change in the user's real repo, takes a snapshot, restores
+it, and asserts the user's branch, HEAD, staged blob, and `git status
+--short` output are byte-identical before and after.
+
+### The .gitignore question: respected, on purpose
+
+Deciding what "the current state of the workspace" means for `Create`
+had two options: capture literally everything (minus `.git`/`.kram`), or
+respect the user's own `.gitignore`. **Chosen: respect it.** Concretely,
+this falls out of the isolated-repo design for free — git discovers
+`.gitignore` files by walking the `--work-tree`, which is the same
+directory the user's own `.gitignore` files live in, regardless of which
+`--git-dir` is doing the walking. `node_modules`, build output, `.env`,
+and anything else the user already excludes from their own history stays
+excluded from snapshots too.
+
+**Why this is the right default:** it matches what `git status` already
+tells the user is "their" content worth tracking, keeps snapshots small
+and fast even in JS-shaped repositories, and means a `.env` with real
+secrets doesn't get duplicated into a second, less-obviously-guarded
+git history under `.kram/`. The tradeoff is real and worth naming: a
+gitignored file (a local override config, a generated file the user
+actually cares about recovering) is not protected by this mechanism at
+all. `.git` and `.kram` are excluded unconditionally regardless of
+`.gitignore` content, via the isolated repo's own `info/exclude` — not
+delegated to the user's `.gitignore`, since a workspace that happens not
+to ignore `.kram` must still never snapshot its own snapshot history.
+
+### Restore over a stale snapshot: overwrite and report, never silent, never refuse
+
+Between taking a snapshot and restoring it, the workspace can keep
+changing — including via further snapshots. Two honest options existed:
+refuse to restore if anything changed since, or apply it anyway.
+**Chosen: apply it anyway, but never silently.** `Store.Restore` always
+returns a `RestoreResult` naming every path it touched and how (`will be
+overwritten` / `will be restored` / `will be removed`), computed via
+`git diff --name-status` *before* the mutating `reset --hard` runs, and
+the `snapshot_restore` tool's result text lists every one of them.
+
+**Why not refuse on staleness:** detecting "has anything changed" well
+enough to be trustworthy is closer to a three-way merge problem than a
+timestamp check, and a refusal still needs a way to proceed — which just
+becomes a second code path to get right. Reporting what changed, always,
+does the actual job: nothing about a restore's effect is hidden from
+whoever asked for it. This is consistent with the project's existing
+"never silently drop or truncate" discipline (see Tools, "Deterministic
+output filtering" and Artifacts, "Spilled output becomes an artifact").
+Consistent too with the Permissions section's default posture
+(compatibility default is Allow, not a blocking gate) — the mutating gate
+for `snapshot_restore` is the permission engine every tool already goes
+through by being registered normally, not a bespoke confirmation step
+reimplemented here.
+
+**A deliberate, narrower boundary, also tested:** `Restore` only ever
+undoes what some snapshot *actually captured*. A file created in the
+workspace after the most recent `Create` call, never captured by any
+snapshot, is left completely alone by `Restore` — this falls directly out
+of using `git reset --hard` against the isolated repo (it only touches
+paths that differ between the isolated index and the target commit;
+a file the isolated repo has no index entry for at all is invisible to
+it, by git's own design). This is a feature, not a gap: Kram will never
+delete a file it has no record of, the same conservative instinct behind
+`delete_file` refusing directories. See
+`TestRestoreLeavesNeverSnapshottedFileAlone`.
+
+### Registered as normal tools, not a special-cased mechanism
+
+`snapshot_create`/`snapshot_list`/`snapshot_diff`/`snapshot_restore` are
+ordinary entries in `internal/daemon/tools`'s `Registry`, exactly like
+every other tool — they inherit `permission.Evaluator`/`Approver` gating
+automatically by virtue of being registered, same as the Permissions
+section's "a policy layer is a different thing from enabled/disabled"
+already guarantees for everything in the registry. No bespoke plumbing
+was needed or added. `snapshot_restore`'s description states plainly
+that it is destructive and requires an explicit id (never "restore the
+latest") — the tool-level protection against acting on stale information
+is that explicitness plus the always-reported change list, not a second
+confirmation mechanism duplicating what the permission engine's `ask`
+policy already exists to provide for exactly this kind of call.
+
+### Known gap: no automatic snapshotting
+
+This round implements the capability only — `snapshot_create` must be
+called explicitly (by the model or the user), never automatically before
+a mutating tool call. Auto-snapshotting before every `write_file`/
+`edit_file`/`delete_file`/`bash` call was explicitly out of scope for this
+round, to keep it small and let the primitive prove itself first. A
+natural next step, not built: a policy-driven "snapshot before this
+category of call" hook, likely living in `internal/permission` or the
+agent loop rather than this package, so `internal/snapshot` itself stays
+a pure capability with no opinion about when it's used.
+
+---
+
 ## Local state
 
 ### The config directory is `kram-gateway`, not `kram`
