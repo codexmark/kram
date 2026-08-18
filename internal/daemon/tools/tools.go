@@ -17,6 +17,7 @@ import (
 	"github.com/codexmark/kram-gateway/internal/lsp"
 	"github.com/codexmark/kram-gateway/internal/openai"
 	"github.com/codexmark/kram-gateway/internal/permission"
+	"github.com/codexmark/kram-gateway/internal/snapshot"
 )
 
 // Tool is one callable capability the agent loop can offer the model.
@@ -116,6 +117,10 @@ func NewRegistry(workspace string, st *store.Store, disabled map[string]bool) *R
 	// rather than on a timer (see artifact.Store.GC).
 	artifacts := artifact.Open(workspace)
 	artifacts.GC(artifactMaxAge)
+	// snapshot.NewStore is side-effect free — the isolated .kram/snapshots
+	// git repository isn't created on disk until snapshot_create actually
+	// runs, same pattern as artifact.Open above.
+	snapshots := snapshot.NewStore(workspace)
 	r := &Registry{
 		workspace: workspace, byName: make(map[string]Tool), disabled: disabled,
 		processes: processes, permEval: permEval, grants: grants, lspManager: lspManager,
@@ -150,6 +155,10 @@ func NewRegistry(workspace string, st *store.Store, disabled map[string]bool) *R
 		newLSPDiagnostics(workspace, lspManager),
 		newLSPDefinition(workspace, lspManager),
 		newLSPReferences(workspace, lspManager),
+		newSnapshotCreate(snapshots),
+		newSnapshotList(snapshots),
+		newSnapshotDiff(snapshots),
+		newSnapshotRestore(snapshots),
 	}
 	if st != nil {
 		toolList = append(toolList, newMemoryWrite(st, workspace), newMemorySearch(st, workspace), newSessionSearch(st))
