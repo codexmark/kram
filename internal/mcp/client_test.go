@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -62,7 +63,7 @@ func (f *fakeTransport) Close() error         { f.closed = true; close(f.in); re
 // process or dial a URL).
 func newTestClient(handle func(method string, id *int64, params json.RawMessage) (any, bool)) (*Client, *fakeTransport) {
 	tr := newFakeTransport(handle)
-	c := &Client{name: "test", transport: tr, pending: make(map[int64]chan message)}
+	c := &Client{name: "test", transport: tr, pending: make(map[int64]chan message), done: make(chan struct{})}
 	go c.dispatch()
 	return c, tr
 }
@@ -184,7 +185,7 @@ func (s *silentTransport) Close() error                       { return nil }
 
 func TestClientCallReturnsPromptlyOnCanceledContext(t *testing.T) {
 	tr := &silentTransport{in: make(chan message)}
-	c := &Client{name: "silent", transport: tr, pending: make(map[int64]chan message)}
+	c := &Client{name: "silent", transport: tr, pending: make(map[int64]chan message), done: make(chan struct{})}
 	go c.dispatch()
 
 	// Nothing ever arrives on tr.in, so the only way call() can return is
@@ -299,9 +300,77 @@ func TestClientListPromptsAndGetPrompt(t *testing.T) {
 	}
 }
 
+// TestClientToolsListChangedRefreshesSnapshotWithoutRetroactiveEffect
+// covers the tools/list_changed path: the notification triggers a real
+// tools/list re-fetch, the client's snapshot updates to reflect it, and —
+// the important part — a slice obtained from Tools() *before* the
+// notification arrived keeps showing the old data, since loadTools
+// replaces the snapshot (a fresh slice, swapped in under lock) rather
+// than mutating the one callers may still be holding. That's what makes
+// "the change lands on the next turn, never mid-call" true in practice:
+// whoever captured toolDefs before this point already has their own
+// independent copy.
+func TestClientToolsListChangedRefreshesSnapshotWithoutRetroactiveEffect(t *testing.T) {
+	var toolsListCalls int32
+	c, tr := newTestClient(func(method string, id *int64, params json.RawMessage) (any, bool) {
+		switch method {
+		case "tools/list":
+			atomic.AddInt32(&toolsListCalls, 1)
+			return listToolsResult{Tools: []Tool{{Name: "v2"}}}, false
+		}
+		t.Fatalf("unexpected method %q", method)
+		return nil, false
+	})
+	defer c.Close()
+
+	// Seed the client with an initial snapshot the way Connect would,
+	// without going through the full handshake — loadTools alone is
+	// enough for this test's purposes, but we want a *different* handler
+	// answer than the refresh below to prove the swap actually happened.
+	c.toolsMu.Lock()
+	c.tools = []Tool{{Name: "v1"}}
+	c.toolsMu.Unlock()
+
+	before := c.Tools() // a caller that already grabbed toolDefs for this turn
+
+	// Simulate the server pushing a bare notification (no id) — exactly
+	// what dispatch() must route to handleNotification instead of
+	// silently dropping now that it recognizes this one method.
+	tr.in <- message{Method: "notifications/tools/list_changed"}
+
+	// refreshTools runs asynchronously (it issues a real call() over the
+	// transport), so poll briefly for it to land instead of assuming
+	// synchronous completion.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && atomic.LoadInt32(&toolsListCalls) == 0 {
+		time.Sleep(time.Millisecond)
+	}
+	if atomic.LoadInt32(&toolsListCalls) == 0 {
+		t.Fatal("tools/list_changed notification should have triggered a tools/list re-fetch")
+	}
+	// Give the goroutine a moment past the call completing to finish the
+	// snapshot swap under toolsMu.
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		after := c.Tools()
+		if len(after) == 1 && after[0].Name == "v2" {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	after := c.Tools()
+	if len(after) != 1 || after[0].Name != "v2" {
+		t.Fatalf("expected the snapshot to refresh to [v2] after tools/list_changed, got %+v", after)
+	}
+	if len(before) != 1 || before[0].Name != "v1" {
+		t.Errorf("the slice captured before the notification should still read [v1], got %+v — a retroactive mutation would break the 'applies next turn only' contract", before)
+	}
+}
+
 func TestClientDisconnectUnblocksPendingCalls(t *testing.T) {
 	tr := &fakeTransport{in: make(chan message, 1)}
-	c := &Client{name: "x", transport: tr, pending: make(map[int64]chan message)}
+	c := &Client{name: "x", transport: tr, pending: make(map[int64]chan message), done: make(chan struct{})}
 	go c.dispatch()
 
 	done := make(chan error, 1)
