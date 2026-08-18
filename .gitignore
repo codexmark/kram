@@ -14,3 +14,6 @@
 # Code from the workspace root, but not meant to be published to the repo.
 /AGENTS.md
 /CLAUDE.md
+
+# scripts/build-release.sh output.
+/dist/

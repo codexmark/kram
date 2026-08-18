@@ -718,3 +718,23 @@ traced directly to bugs found by hand during development:
 
 Needs a real provider configured (env var or a key from the accounts
 screen) — there's no way to eval actual model behavior against the mock.
+
+## Releases
+
+```bash
+./scripts/build-release.sh v1.2.3   # or omit the version to use `git describe`
+```
+
+Cross-compiles `cmd/kram` for linux/darwin × amd64/arm64 plus
+windows/amd64 into `dist/`, each archived (`.tar.gz`, or `.zip` for
+Windows). `CGO_ENABLED=0` — no cross-compiler toolchain, no
+platform-specific build image needed, because the SQLite driver
+(`modernc.org/sqlite`) was chosen pure-Go from the start specifically so
+the daemon's storage layer never needs cgo. Every target in the matrix
+was hand-verified to actually build *and run*, not just compile without
+error.
+
+`.github/workflows/release.yml` runs this same script on every `v*.*.*`
+tag push and attaches the archives plus a `checksums.txt` to a GitHub
+release. `.github/workflows/ci.yml` runs build/vet/format-check/test on
+every push and PR.

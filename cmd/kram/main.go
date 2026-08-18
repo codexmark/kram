@@ -29,6 +29,13 @@ import (
 	"github.com/codexmark/kram-gateway/internal/gateway"
 )
 
+// version is set at build time via -ldflags "-X main.version=..."
+// (see scripts/build-release.sh and .github/workflows/release.yml). A
+// go build/go run with no ldflags — the everyday development path —
+// leaves it at "dev", which is the honest answer for a binary that
+// wasn't built through the release process.
+var version = "dev"
+
 func main() {
 	workspace := flag.String("workspace", ".", "project root")
 	gatewayConfigPath := flag.String("config", "", "path to a gateway config.yaml (auto-detected from known API-key env vars if omitted)")
@@ -38,7 +45,13 @@ func main() {
 	maxTurns := flag.Int("max-turns", 50, "iteration budget per agent run, tool round-trips included")
 	gatewayPort := flag.Int("gateway-port", 0, "gateway port (0 = pick a free port)")
 	daemonPort := flag.Int("daemon-port", 0, "daemon port (0 = pick a free port)")
+	showVersion := flag.Bool("version", false, "print the version and exit")
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Println("kram", version)
+		return
+	}
 
 	if err := run(runOptions{
 		workspace: *workspace, gatewayConfigPath: *gatewayConfigPath, combo: *combo,

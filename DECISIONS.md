@@ -519,10 +519,21 @@ Honest list of what Kram still doesn't have, as of this writing:
   not just Kram's own code being correct. First real run against an
   actual provider found a genuine soft-fail: an unmistakable skill
   trigger phrase didn't get the model to call `skill_list`.
-- **Distribution.** No prebuilt binaries, no docs site.
+- ~~Distribution.~~ Closed for prebuilt binaries: `scripts/build-release.sh`
+  cross-compiles `cmd/kram` for linux/darwin × amd64/arm64 plus
+  windows/amd64, `.github/workflows/release.yml` runs it on a version tag
+  and attaches the archives (plus checksums) to a GitHub release. This
+  works with no cross-compiler toolchain and no per-platform build image
+  — `CGO_ENABLED=0` — for the same reason cross-compiling has been free
+  this whole project: the SQLite driver was chosen pure-Go specifically
+  so the daemon's storage layer never needs cgo. Every target in the
+  matrix was hand-verified to actually build *and run* before being added
+  (not just "cross-compiles without error" — modernc.org/sqlite is large
+  enough that a target compiling cleanly isn't a given). A docs site is
+  still open — narrower, and README + DECISIONS.md cover the same ground
+  for now.
 
 Scheduling, memory-provider/terminal-backend plugins, and MCP elicitation
-are deliberate omissions for now — narrower than what they'd extend.
-Distribution is what's left of the original list.
+remain deliberate omissions — narrower than what they'd extend.
 Distribution is what remains from
 matter most for Kram being trustworthy rather than merely capable.
