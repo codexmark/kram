@@ -34,7 +34,7 @@ func loadStoredCredentials() {
 // by loadStoredCredentials in main.go before this runs). Order is
 // deterministic (the catalog's order), which also becomes the round-robin
 // combo order.
-func detectGatewayConfig() (*config.Config, error) {
+func detectGatewayConfig(strategyOverride string) (*config.Config, error) {
 	var providers []config.ProviderConfig
 	var ids []string
 
@@ -58,9 +58,14 @@ func detectGatewayConfig() (*config.Config, error) {
 		return nil, fmt.Errorf("no LLM provider configured: export one of %v, pass -config with a gateway config.yaml, or add a key from the accounts screen (press \"a\" on the session picker)", providercatalog.EnvVars())
 	}
 
+	strategy := autoStrategy(havePaid)
+	if strategyOverride != "" {
+		strategy = strategyOverride
+	}
+
 	return &config.Config{
 		Providers:    providers,
-		Combos:       []config.ComboConfig{{ID: "default", Strategy: autoStrategy(havePaid), Providers: ids}},
+		Combos:       []config.ComboConfig{{ID: "default", Strategy: strategy, Providers: ids}},
 		DefaultCombo: "default",
 	}, nil
 }

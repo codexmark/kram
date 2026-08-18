@@ -39,6 +39,7 @@ var version = "dev"
 func main() {
 	workspace := flag.String("workspace", ".", "project root")
 	gatewayConfigPath := flag.String("config", "", "path to a gateway config.yaml (auto-detected from known API-key env vars if omitted)")
+	strategy := flag.String("strategy", "", "routing strategy for the auto-detected combo (priority, round-robin, prefix-affinity, smart, quality, fast, cheap, reliable, lkgp, p2c) — empty keeps the old default (priority order with a paid provider present, round-robin for free-tier-only). Ignored when -config points at a full gateway config.yaml, which sets strategy per combo instead.")
 	combo := flag.String("model", "default", "gateway combo used for messages in this session")
 	sessionID := flag.String("session", "", "resume an existing session ID instead of starting a new one")
 	title := flag.String("title", "", "title for a newly created session")
@@ -56,7 +57,7 @@ func main() {
 	if err := run(runOptions{
 		workspace: *workspace, gatewayConfigPath: *gatewayConfigPath, combo: *combo,
 		sessionID: *sessionID, title: *title, maxTurns: *maxTurns,
-		gatewayPort: *gatewayPort, daemonPort: *daemonPort,
+		gatewayPort: *gatewayPort, daemonPort: *daemonPort, strategy: *strategy,
 	}); err != nil {
 		fmt.Fprintln(os.Stderr, "kram:", err)
 		os.Exit(1)
@@ -72,6 +73,7 @@ type runOptions struct {
 	maxTurns          int
 	gatewayPort       int
 	daemonPort        int
+	strategy          string
 }
 
 func run(opts runOptions) error {
@@ -101,7 +103,7 @@ func run(opts runOptions) error {
 	// the user explicitly set in their shell.
 	loadStoredCredentials()
 
-	gwCfg, err := loadOrDetectGatewayConfig(opts.gatewayConfigPath, opts.gatewayPort)
+	gwCfg, err := loadOrDetectGatewayConfig(opts.gatewayConfigPath, opts.gatewayPort, opts.strategy)
 	if err != nil {
 		return err
 	}
@@ -217,8 +219,11 @@ func freePort() (int, error) {
 // otherwise builds a minimal one from whichever well-known provider
 // API-key env vars are actually set — so `kram` with no flags at all
 // works the moment you've exported one key, and errors clearly if you
-// haven't rather than silently doing nothing.
-func loadOrDetectGatewayConfig(path string, port int) (*config.Config, error) {
+// haven't rather than silently doing nothing. strategyOverride, if set,
+// replaces the auto-detected combo's strategy (see -strategy); ignored
+// when an explicit -config file is given, since that file already picks
+// its own strategy per combo.
+func loadOrDetectGatewayConfig(path string, port int, strategyOverride string) (*config.Config, error) {
 	if path != "" {
 		cfg, err := config.Load(path)
 		if err != nil {
@@ -230,7 +235,7 @@ func loadOrDetectGatewayConfig(path string, port int) (*config.Config, error) {
 		return cfg, nil
 	}
 
-	cfg, err := detectGatewayConfig()
+	cfg, err := detectGatewayConfig(strategyOverride)
 	if err != nil {
 		return nil, err
 	}
