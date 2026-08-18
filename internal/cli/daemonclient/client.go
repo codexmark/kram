@@ -90,8 +90,9 @@ type ToolActivity struct {
 // StreamEvent is one event from a message stream. Type selects which
 // other fields are meaningful: "delta" (Content), "tool_start" (Name,
 // Args), "tool_result" (Name, Result, OK), "notice" (Text), "question"
-// (QuestionID, Question, Options), "done" (Message, Attempts, Usage,
-// ToolActivity, Compactions, ImageNotice), or "error" (Error).
+// (QuestionID, Question, Options), "approval" (ApprovalID, Tool, Subject,
+// Options), "done" (Message, Attempts, Usage, ToolActivity, Compactions,
+// ImageNotice), or "error" (Error).
 type StreamEvent struct {
 	Type         string               `json:"type"`
 	Content      string               `json:"content,omitempty"`
@@ -103,6 +104,9 @@ type StreamEvent struct {
 	QuestionID   string               `json:"question_id,omitempty"`
 	Question     string               `json:"question,omitempty"`
 	Options      []string             `json:"options,omitempty"`
+	ApprovalID   string               `json:"approval_id,omitempty"`
+	Tool         string               `json:"tool,omitempty"`
+	Subject      string               `json:"subject,omitempty"`
 	Message      Message              `json:"message,omitempty"`
 	Attempts     []openai.AttemptInfo `json:"attempts,omitempty"`
 	Usage        openai.Usage         `json:"usage,omitempty"`
@@ -201,6 +205,14 @@ func (c *Client) SendMessageStream(ctx context.Context, sessionID, content strin
 func (c *Client) AnswerQuestion(ctx context.Context, sessionID, questionID, answer string) error {
 	body := map[string]string{"question_id": questionID, "answer": answer}
 	return c.doJSON(ctx, http.MethodPost, "/sessions/"+sessionID+"/answer", body, nil)
+}
+
+// AnswerApproval delivers a decision ("once", "always", or "deny") to a
+// pending permission-policy approval — same blocking shape as
+// AnswerQuestion, but a distinct endpoint/id space (see server.go).
+func (c *Client) AnswerApproval(ctx context.Context, sessionID, approvalID, decision string) error {
+	body := map[string]string{"approval_id": approvalID, "decision": decision}
+	return c.doJSON(ctx, http.MethodPost, "/sessions/"+sessionID+"/approve", body, nil)
 }
 
 // ToolInfo mirrors the daemon's tools.ToolInfo — one registered tool,

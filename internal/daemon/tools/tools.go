@@ -14,6 +14,7 @@ import (
 
 	"github.com/codexmark/kram-gateway/internal/daemon/store"
 	"github.com/codexmark/kram-gateway/internal/openai"
+	"github.com/codexmark/kram-gateway/internal/permission"
 )
 
 // Tool is one callable capability the agent loop can offer the model.
@@ -36,6 +37,8 @@ type Registry struct {
 	delegator Delegator
 	disabled  map[string]bool
 	processes *processManager
+	permEval  *permission.Evaluator
+	grants    *permission.GrantStore
 }
 
 // StopBackgroundProcesses kills every process started by run_background —
@@ -72,7 +75,19 @@ func NewRegistry(workspace string, st *store.Store, disabled map[string]bool) *R
 		disabled = map[string]bool{}
 	}
 	processes := newProcessManager(workspace)
-	r := &Registry{workspace: workspace, byName: make(map[string]Tool), disabled: disabled, processes: processes}
+	// Best-effort like every other local-state loader here: a missing or
+	// malformed permissions.json/permission_grants.json just means nothing
+	// is gated beyond the compatibility default (Allow), never a reason to
+	// fail startup.
+	grants, err := permission.LoadGrants(workspace)
+	if err != nil {
+		grants = nil
+	}
+	permEval := permission.NewEvaluator(permission.LoadConfig(workspace), grants.Rules())
+	r := &Registry{
+		workspace: workspace, byName: make(map[string]Tool), disabled: disabled,
+		processes: processes, permEval: permEval, grants: grants,
+	}
 	todos := newTodoStore(workspace)
 	toolList := []Tool{
 		newReadFile(workspace),
@@ -120,11 +135,16 @@ func NewRegistry(workspace string, st *store.Store, disabled map[string]bool) *R
 
 // Definitions returns every *enabled* tool's definition in the gateway's
 // wire format, ready to attach to a ChatCompletionRequest — a disabled
-// tool is invisible to the model entirely, not just refused if called.
+// tool is invisible to the model entirely, not just refused if called. A
+// tool the permission policy denies unconditionally (see
+// permission.Evaluator.FullyDenied) is hidden the same way: a capability
+// the model can never successfully use shouldn't cost tokens in the tool
+// schema. A tool denied only for *some* patterns stays visible, since it's
+// still sometimes usable — the policy is enforced at call time either way.
 func (r *Registry) Definitions() []openai.Tool {
 	out := make([]openai.Tool, 0, len(r.byName))
 	for _, t := range r.byName {
-		if r.disabled[t.Name()] {
+		if r.disabled[t.Name()] || r.permEval.FullyDenied(t.Name()) {
 			continue
 		}
 		out = append(out, openai.Tool{
@@ -140,12 +160,18 @@ func (r *Registry) Definitions() []openai.Tool {
 }
 
 // Execute runs a named tool, or returns an error result (not a Go error)
-// if the name is unknown or disabled — the agent loop feeds this text
-// straight back to the model as the tool's result either way, so the
-// model can see and recover from a bad or unavailable tool name itself.
-// The disabled check here is defense in depth: Definitions() already
-// keeps a disabled tool out of what's offered, but a model can still try
-// to call a tool name it saw in an earlier turn before it was disabled.
+// if the name is unknown, disabled, or blocked by permission policy — the
+// agent loop feeds this text straight back to the model as the tool's
+// result either way, so the model can see and recover from a bad or
+// unavailable tool name itself. The disabled check here is defense in
+// depth: Definitions() already keeps a disabled tool out of what's
+// offered, but a model can still try to call a tool name it saw in an
+// earlier turn before it was disabled.
+//
+// Every tool call — built-in, custom (manifest), and MCP-backed alike —
+// funnels through this one method, which is what makes them all subject to
+// the same permission policy without each tool implementation needing to
+// know policy exists.
 func (r *Registry) Execute(ctx context.Context, name string, args json.RawMessage) (string, error) {
 	if r.disabled[name] {
 		return fmt.Sprintf("error: tool %q is disabled", name), nil
@@ -154,7 +180,66 @@ func (r *Registry) Execute(ctx context.Context, name string, args json.RawMessag
 	if !ok {
 		return fmt.Sprintf("error: unknown tool %q", name), nil
 	}
+
+	subject := policySubject(name, args)
+	switch r.permEval.Evaluate(name, subject) {
+	case permission.Deny:
+		return fmt.Sprintf("error: %q is blocked by permission policy", name), nil
+	case permission.Ask:
+		approver := approverFromContext(ctx)
+		if approver == nil {
+			return fmt.Sprintf("error: %q requires approval, but approval isn't available in this context", name), nil
+		}
+		decision, err := approver.Approve(ctx, name, subject)
+		if err != nil {
+			return fmt.Sprintf("error: approval failed: %v", err), nil
+		}
+		switch decision {
+		case ApprovalDeny:
+			return fmt.Sprintf("denied by user: %q was not approved to run", name), nil
+		case ApprovalAlways:
+			// Best-effort: a failed write here just means the user gets
+			// asked again next time, never a reason to block a call the
+			// user just explicitly approved.
+			_ = r.grants.Add(name, subject)
+		}
+		// ApprovalOnce and ApprovalAlways both fall through to execute.
+	}
+
 	return t.Execute(ctx, args)
+}
+
+// policySubject extracts the text a permission Rule's Pattern is matched
+// against for one tool call — bash's command, a file tool's path, the
+// move-file tool's "old -> new" pair. Everything else (custom manifest
+// tools, MCP tools, delegate_task, and any other tool without a single
+// obvious subject field) falls back to the raw argument JSON: enough for a
+// tool-wide rule ("mcp__github__*: ask") to work, though per-argument
+// pattern matching for those is a known simplification — see DECISIONS.md.
+func policySubject(name string, args json.RawMessage) string {
+	switch name {
+	case "bash":
+		var a struct {
+			Command string `json:"command"`
+		}
+		_ = json.Unmarshal(args, &a)
+		return a.Command
+	case "read_file", "write_file", "edit_file", "delete_file":
+		var a struct {
+			Path string `json:"path"`
+		}
+		_ = json.Unmarshal(args, &a)
+		return a.Path
+	case "move_file":
+		var a struct {
+			OldPath string `json:"old_path"`
+			NewPath string `json:"new_path"`
+		}
+		_ = json.Unmarshal(args, &a)
+		return a.OldPath + " -> " + a.NewPath
+	default:
+		return string(args)
+	}
 }
 
 // ToolInfo is one entry in the registry's full listing (AllTools) — every

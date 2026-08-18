@@ -112,11 +112,22 @@ type Service struct {
 	// removes its own entry once done either way.
 	pendingMu sync.Mutex
 	pending   map[string]chan string
+
+	// pendingApprovals backs the permission engine's Ask outcome — kept
+	// separate from pending (ask_question) even though the shape is
+	// identical, since the two are semantically different pauses (see
+	// tools.Approver's doc comment) and conflating their id spaces would
+	// let an answer meant for one satisfy the other.
+	pendingApprovalsMu sync.Mutex
+	pendingApprovals   map[string]chan tools.ApprovalDecision
 }
 
 // New builds an agent Service.
 func New(st *store.Store, gw *gatewayclient.Client, tr *tools.Registry, cfg Config) *Service {
-	return &Service{store: st, gateway: gw, tools: tr, cfg: cfg.withDefaults(), pending: make(map[string]chan string)}
+	return &Service{
+		store: st, gateway: gw, tools: tr, cfg: cfg.withDefaults(),
+		pending: make(map[string]chan string), pendingApprovals: make(map[string]chan tools.ApprovalDecision),
+	}
 }
 
 // Tools passes through the registry's full tool listing (enabled or not)
@@ -149,6 +160,70 @@ func (s *Service) AnswerQuestion(id, ans string) bool {
 // to answer an ask_question call — generous (it's a human, not a retry),
 // but bounded so a session can't hang forever if they never respond.
 const askQuestionTimeout = 10 * time.Minute
+
+// approvalTimeout bounds how long a turn blocks waiting for the user to
+// approve a policy-gated tool call. Same duration as askQuestionTimeout
+// for the same reason (a human, not a retry), but on expiry it fails
+// *closed* (ApprovalDeny), not open — an unanswered permission prompt must
+// never silently become a yes.
+const approvalTimeout = 10 * time.Minute
+
+// AnswerApproval delivers the user's decision ("once", "always", or
+// "deny") to the pending approval waiting on id, if any is still pending.
+// Returns false if id is unknown (already answered, timed out, or never
+// existed) or decision isn't one of the three valid values, so the caller
+// (the daemon's HTTP handler) can report a clear error instead of silently
+// no-opping.
+func (s *Service) AnswerApproval(id, decision string) bool {
+	d := tools.ApprovalDecision(decision)
+	if d != tools.ApprovalOnce && d != tools.ApprovalAlways && d != tools.ApprovalDeny {
+		return false
+	}
+	s.pendingApprovalsMu.Lock()
+	ch, ok := s.pendingApprovals[id]
+	s.pendingApprovalsMu.Unlock()
+	if !ok {
+		return false
+	}
+	select {
+	case ch <- d:
+	default:
+	}
+	return true
+}
+
+// sessionApprover implements tools.Approver for one turn, mirroring
+// sessionAsker — constructed fresh per runLoop call since it closes over
+// that turn's live onEvent callback.
+type sessionApprover struct {
+	svc     *Service
+	onEvent EventFunc
+}
+
+func (a *sessionApprover) Approve(ctx context.Context, toolName, subject string) (tools.ApprovalDecision, error) {
+	id := session.NewID()
+	ch := make(chan tools.ApprovalDecision, 1)
+
+	a.svc.pendingApprovalsMu.Lock()
+	a.svc.pendingApprovals[id] = ch
+	a.svc.pendingApprovalsMu.Unlock()
+	defer func() {
+		a.svc.pendingApprovalsMu.Lock()
+		delete(a.svc.pendingApprovals, id)
+		a.svc.pendingApprovalsMu.Unlock()
+	}()
+
+	emit(a.onEvent, Event{Kind: EventApproval, ApprovalID: id, ApprovalTool: toolName, ApprovalSubject: subject})
+
+	select {
+	case dec := <-ch:
+		return dec, nil
+	case <-ctx.Done():
+		return tools.ApprovalDeny, ctx.Err()
+	case <-time.After(approvalTimeout):
+		return tools.ApprovalDeny, fmt.Errorf("timed out waiting for approval")
+	}
+}
 
 // sessionAsker implements tools.Asker for one turn — constructed fresh
 // per runLoop call (not stored on Service) since it closes over that
@@ -260,6 +335,7 @@ func (s *Service) RunTask(ctx context.Context, goal, taskContext, model string, 
 func (s *Service) runLoop(ctx context.Context, sessionID, model string, depth int, imageNotice string, onEvent EventFunc) (RunResult, error) {
 	ctx = tools.WithDepth(ctx, depth)
 	ctx = tools.WithAsker(ctx, &sessionAsker{svc: s, onEvent: onEvent})
+	ctx = tools.WithApprover(ctx, &sessionApprover{svc: s, onEvent: onEvent})
 
 	// Memory is snapshotted once per run rather than re-read every turn,
 	// borrowing Hermes Agent's "frozen at session start" idea for the

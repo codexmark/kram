@@ -331,6 +331,91 @@ config must cost you that server's tools and nothing else.
 
 ---
 
+## Permissions
+
+### A policy layer is a different thing from enabled/disabled
+
+`toolsettings` (enabled/disabled) removes a tool entirely. The new
+`internal/permission` package sits *inside* "enabled": a tool can be on in
+general but still ALLOW/ASK/DENY per specific call, based on its actual
+arguments (`bash: allow "go test *", ask "git push*", deny "rm -rf *"`).
+
+**Why not just extend disabled to be argument-aware:** enabled/disabled
+answers "does the model ever see this tool"; policy answers "given this
+specific call, does it run, get confirmed, or get refused". Conflating them
+would mean a tool that's mostly fine but has one dangerous invocation shape
+has to be all-or-nothing.
+
+### Approval is not `ask_question`
+
+`ask_question` means "I don't know enough to proceed." A policy-gated
+approval means "I know exactly what I want to do, but policy requires
+sign-off first." These are told apart deliberately —
+`tools.Asker`/`tools.Approver` are separate interfaces, `EventQuestion`/
+`EventApproval` are separate SSE event kinds, `/sessions/{id}/answer` and
+`/sessions/{id}/approve` are separate endpoints, with separate pending-id
+maps on `agent.Service`. Reusing one mechanism for both would make a
+policy pause look, to the model and the user, like the agent being unsure —
+which it isn't.
+
+### Compatibility default is Allow, always
+
+An install with no `permissions.json` anywhere (global or project) behaves
+exactly as Kram did before this feature existed — every rule evaluates
+against a default of `Allow` unless a policy file explicitly sets
+`"default": "..."`. Shipping a permission engine must never make existing
+users start getting asked about things they were never asked about before.
+
+### Precedence: most-specific-match, not first-match
+
+Rules are scored (exact tool + exact pattern > exact tool + wildcard >
+glob tool name), and the highest-scoring matching rule wins, ties broken by
+declaration order (later wins). "First rule in the file wins" was rejected
+because it makes behavior silently depend on file layout — reordering two
+unrelated-looking lines could flip what a specific command does.
+
+### A grant persists the exact approved subject, never a widened pattern
+
+Choosing "always" on `bash: git push origin feature/foo` persists exactly
+that literal command string as a new Allow rule
+(`.kram/permission_grants.json`, project-scoped — an approval in one
+project has no business applying to another) — never `bash: allow "*"`. A
+policy engine that silently widens what it remembers approving is more
+dangerous than one that keeps asking. Grants are evaluated at the same
+specificity as an equivalent hand-authored rule and appended after the
+configured policy, so at equal specificity they win the tie against a
+same-shaped `ask` rule — which is the point: approving something "always"
+should stop it asking again for that *exact* case, nothing broader.
+
+A grant earned mid-run takes effect on the *next* run, not immediately —
+the `Evaluator` a run is using was already built for that run. This is the
+same tradeoff memory snapshotting already made (see Memory, "Snapshotted
+per run"): rebuilding policy state mid-turn was rejected for the same
+reason rebuilding the tool registry mid-turn was never on the table.
+
+### A fully-denied tool is hidden; a partially-denied one stays visible
+
+If every rule mentioning a tool says Deny (or the global default is Deny
+and nothing else mentions it), the tool is dropped from `Definitions()` —
+same treatment `toolsettings`-disabled tools get, since a capability the
+model can never successfully use shouldn't cost tokens in the schema. A
+tool denied only for some patterns (`rm -rf *` denied, everything else
+allowed) stays visible: it's still sometimes usable, and the policy is
+enforced at call time regardless.
+
+### The policy "subject" is a per-tool best-effort extraction, not a generic mechanism
+
+`bash`'s subject is its `command`; file tools' is `path` (`move_file`'s is
+`"old -> new"`); everything else (custom manifest tools, MCP tools,
+`delegate_task`) falls back to the raw argument JSON. This is a known
+simplification, not a general "tools declare their own policy subject"
+interface — building that felt like speculative generality for a v1 where
+only bash and the file tools have an obvious single field worth pattern-
+matching on. Revisit if a real policy needs fine-grained matching on a
+custom or MCP tool's arguments.
+
+---
+
 ## Local state
 
 ### The config directory is `kram-gateway`, not `kram`

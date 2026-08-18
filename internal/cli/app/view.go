@@ -105,9 +105,12 @@ func (m Model) View() string {
 	var b strings.Builder
 	b.WriteString(m.viewport.View())
 	b.WriteString("\n")
-	if m.question != nil {
+	switch {
+	case m.question != nil:
 		b.WriteString(m.renderQuestion())
-	} else {
+	case m.approval != nil:
+		b.WriteString(m.renderApproval())
+	default:
 		b.WriteString(m.input.View())
 	}
 	b.WriteString("\n")

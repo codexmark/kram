@@ -142,6 +142,13 @@ type Model struct {
 	question      *pendingQuestion
 	questionInput textinput.Model
 
+	// approval is set while a permission-policy Ask decision is pausing
+	// the current turn — see approval.go. Nil the rest of the time.
+	// Mutually exclusive with question in practice (a turn only ever
+	// blocks on one thing at once), but tracked separately since they're
+	// semantically different pauses.
+	approval *pendingApproval
+
 	err error
 }
 
@@ -363,6 +370,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	if m.question != nil {
 		return m.handleQuestionKey(msg)
+	}
+	if m.approval != nil {
+		return m.handleApprovalKey(msg)
 	}
 
 	switch msg.String() {
@@ -615,6 +625,11 @@ func (m Model) handleStreamEvent(msg streamEventMsg) (tea.Model, tea.Cmd) {
 		m.question = &pendingQuestion{id: msg.event.QuestionID, question: msg.event.Question, options: msg.event.Options}
 		m.questionInput.SetValue("")
 		m.questionInput.Focus()
+		m.refreshTranscript()
+
+	case "approval":
+		// Same "still blocked server-side" shape as question above.
+		m.approval = &pendingApproval{id: msg.event.ApprovalID, tool: msg.event.Tool, subject: msg.event.Subject, options: msg.event.Options}
 		m.refreshTranscript()
 
 	case "done":

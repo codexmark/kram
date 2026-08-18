@@ -22,6 +22,14 @@ const (
 	// Service.AnswerQuestion(QuestionID, ...) on a separate call, since the
 	// turn (and this SSE stream) stays blocked until it does.
 	EventQuestion EventKind = "question"
+	// EventApproval fires when the permission policy marks a tool call
+	// Ask — distinct from EventQuestion: the model isn't uncertain here,
+	// it knows exactly what it wants to do, but policy requires the
+	// user's sign-off first. The caller shows ApprovalTool/ApprovalSubject
+	// and is expected to answer via Service.AnswerApproval(ApprovalID,
+	// "once"|"always"|"deny") on a separate call, same blocking shape as
+	// EventQuestion.
+	EventApproval EventKind = "approval"
 )
 
 // Event is one thing that happened during Run, emitted live via the
@@ -39,6 +47,10 @@ type Event struct {
 	QuestionID string   // EventQuestion
 	Question   string   // EventQuestion
 	Options    []string // EventQuestion
+
+	ApprovalID      string // EventApproval
+	ApprovalTool    string // EventApproval
+	ApprovalSubject string // EventApproval
 }
 
 // EventFunc receives live events during Run. A nil EventFunc is valid —

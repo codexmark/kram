@@ -41,6 +41,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /sessions/{id}/context", s.handleGetContext)
 	mux.HandleFunc("POST /sessions/{id}/messages", s.handleSendMessage)
 	mux.HandleFunc("POST /sessions/{id}/answer", s.handleAnswerQuestion)
+	mux.HandleFunc("POST /sessions/{id}/approve", s.handleAnswerApproval)
 	mux.HandleFunc("GET /tools", s.handleListTools)
 	return s.recoverMiddleware(s.logMiddleware(mux))
 }
@@ -194,6 +195,11 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 			writeEvent(map[string]any{"type": "notice", "text": evt.Notice})
 		case agent.EventQuestion:
 			writeEvent(map[string]any{"type": "question", "question_id": evt.QuestionID, "question": evt.Question, "options": evt.Options})
+		case agent.EventApproval:
+			writeEvent(map[string]any{
+				"type": "approval", "approval_id": evt.ApprovalID, "tool": evt.ApprovalTool,
+				"subject": evt.ApprovalSubject, "options": []string{"once", "always", "deny"},
+			})
 		}
 	}
 
@@ -239,6 +245,33 @@ func (s *Server) handleAnswerQuestion(w http.ResponseWriter, r *http.Request) {
 	}
 	if !s.agent.AnswerQuestion(req.QuestionID, req.Answer) {
 		writeError(w, http.StatusNotFound, "no pending question with that id")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+type answerApprovalRequest struct {
+	ApprovalID string `json:"approval_id"`
+	Decision   string `json:"decision"` // "once", "always", or "deny"
+}
+
+// handleAnswerApproval delivers a pending permission-policy approval's
+// decision — same shape as handleAnswerQuestion, but a distinct endpoint
+// and a distinct pending-id space (see agent.Service.pendingApprovals):
+// an approval is a different kind of pause than ask_question, and mixing
+// their id spaces would let an answer meant for one satisfy the other.
+func (s *Server) handleAnswerApproval(w http.ResponseWriter, r *http.Request) {
+	var req answerApprovalRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
+		return
+	}
+	if req.ApprovalID == "" {
+		writeError(w, http.StatusBadRequest, "approval_id must not be empty")
+		return
+	}
+	if !s.agent.AnswerApproval(req.ApprovalID, req.Decision) {
+		writeError(w, http.StatusNotFound, "no pending approval with that id, or decision was not one of once/always/deny")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
