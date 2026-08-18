@@ -492,9 +492,11 @@ Honest list of what Kram still doesn't have, as of this writing:
 - ~~Background/async tasks.~~ Closed: `run_background`/`process_list`/
   `process_output`/`process_kill`. Scheduling (Hermes's `cronjob`) is
   still open — nothing triggers a run on a timer.
-- **Plugins.** opencode has TS/JS custom tools; Hermes has pluggable
-  memory providers and terminal backends. Kram is fixed to what's in the
-  binary, plus MCP.
+- ~~Plugins.~~ Closed for the tool-authoring half: `.kram/tools/*.json` /
+  `kramhome/tools/*.json` manifests (`{name, description, command,
+  schema}`, stdin-in/stdout-out) let anyone add a tool without touching
+  Go. Pluggable memory providers or terminal backends (Hermes has both)
+  are still open — narrower, lower priority.
 - **MCP beyond tools.** Resources, prompts, and elicitation are all
   deferred. Only `tools/*` is implemented.
 - ~~Test coverage.~~ Closed for now: 7 packages covered beyond the

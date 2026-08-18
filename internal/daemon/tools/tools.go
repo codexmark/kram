@@ -105,6 +105,16 @@ func NewRegistry(workspace string, st *store.Store, disabled map[string]bool) *R
 	for _, t := range toolList {
 		r.byName[t.Name()] = t
 	}
+	// Custom (manifest-defined) tools register last and never override a
+	// built-in — a user-authored tool named "bash" or "grep" would
+	// otherwise silently change what those names do for every other
+	// project's worth of muscle memory.
+	for _, ct := range discoverCustomTools(workspace) {
+		if _, exists := r.byName[ct.Name()]; exists {
+			continue
+		}
+		r.byName[ct.Name()] = ct
+	}
 	return r
 }
 

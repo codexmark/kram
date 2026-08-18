@@ -647,3 +647,30 @@ loop, confirmed the turn returned immediately rather than blocking for
 the loop's full duration, then — from a completely separate session —
 confirmed the process had kept running and its output was fully captured
 after it exited on its own.
+
+## Custom tools (plugins)
+
+`.kram/tools/*.json` (project) and `~/.config/kram-gateway/tools/*.json`
+(global) each define one tool with no Go code at all:
+
+```json
+{
+  "name": "uppercase",
+  "description": "Uppercases the given text.",
+  "command": "python3 -c \"import sys,json; d=json.load(sys.stdin); print(d['text'].upper())\"",
+  "schema": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}
+}
+```
+
+The tool call's raw JSON arguments are piped to `command`'s stdin;
+whatever it writes to stdout becomes the result — same trust boundary as
+`bash` (confined to the workspace, `sh -c`, timeout-bounded, non-zero
+exit reported as a fact rather than editorialized as an error). A
+manifest can never override a built-in tool name — `bash`, `grep`, or
+anything else already registered wins silently, so a stray manifest can't
+change what those names do. A project manifest wins over a global one
+with the same name, same merge rule MCP's config uses.
+
+Deliberately not a Go plugin (`.so` files are fragile and break the
+static-binary goal) and not an embedded scripting language — just a
+manifest and a process.
