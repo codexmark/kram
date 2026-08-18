@@ -1526,7 +1526,7 @@ go vet ./...
 go build ./...
 ```
 
-CI validates every commit (push to `main`/`master` and every pull request) with five independently named checks — `Kram / Build`, `Kram / Vet`, `Kram / Format`, `Kram / Test Race`, and an aggregate `Kram / CI` that only succeeds if all four do. Each is also published as a classic commit status (`kram/build`, `kram/vet`, `kram/format`, `kram/test-race`, `kram/ci`) for tooling that queries the commit-status API instead of Check Runs. See `.github/workflows/ci.yml` and DECISIONS.md.
+No automated CI runs these yet — GitHub Actions on this account currently requires a paid spending limit, so `go build ./...`, `go vet ./...`, `gofmt -l .`, and `go test ./... -race` are run locally before every push instead. See "Continuous integration" in [`DECISIONS.md`](DECISIONS.md).
 
 Coverage includes areas such as:
 
@@ -1586,7 +1586,15 @@ CGO_ENABLED=0
 
 The build script produces `.tar.gz` archives on Unix-like targets and `.zip` on Windows, with version information embedded through linker flags.
 
-GitHub Actions contains CI and tagged-release workflows.
+Releases are currently built and published manually rather than through GitHub Actions — see "Continuous integration" in [`DECISIONS.md`](DECISIONS.md) for why. To cut one:
+
+```bash
+git tag v1.2.3
+git push origin v1.2.3
+./scripts/build-release.sh v1.2.3
+(cd dist && sha256sum * > checksums.txt)
+gh release create v1.2.3 dist/* --generate-notes
+```
 
 ---
 

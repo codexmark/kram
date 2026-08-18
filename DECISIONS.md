@@ -1444,7 +1444,30 @@ free-tier model happens to misbehave.
 
 ---
 
-## Continuous integration
+## Continuous integration — *deferred*
+
+`.github/workflows/` was built out in full (see the design below — kept
+verbatim, not deleted, since it's exactly what gets restored if this
+comes back) and then removed. Diagnosing the original observability
+complaint (see below) surfaced that GitHub Actions could not execute at
+all on this account — every run, including GitHub's own internal
+Dependabot dependency-graph workflow with no user-authored YAML, failed
+instantly with `startup_failure`, which points at an Actions
+billing/spending-limit condition rather than anything fixable by editing
+workflow files. Rather than ship CI infrastructure that cannot prove it
+runs, the workflows were removed and releases/local validation went
+manual instead:
+
+- `go build ./...`, `go vet ./...`, `gofmt -l .`, `go test ./... -race`
+  run locally before every push (same commands the removed workflow
+  would have run);
+- releases are cut with `scripts/build-release.sh` plus `gh release
+  create` directly — see the README's "Building releases".
+
+This is a cost decision, not a technical one — GitHub Actions on a free
+personal plan comes with a limited included-minutes quota, and this
+account is past whatever threshold requires a paid spending limit. The
+design below is ready to restore as-is the moment that's revisited.
 
 ### Check Runs and Commit Statuses are two different APIs, not two names for the same thing
 
@@ -1581,20 +1604,12 @@ safety, and reliability rather than raw feature count:
   nothing recomputed. See the expanded "Routing" and "Interface"
   sections above for the full rationale.
 
-Also currently open, outside this file's usual "narrower than what it
-would extend" category: **CI has not actually run since the workflow was
-added.** Every push since `.github/workflows/ci.yml` was introduced shows
-`conclusion: "startup_failure"` — including GitHub's own internal
-Dependabot dependency-graph-update workflow, which has no user-authored
-YAML at all, on the same pushes. This rules out a syntax/content problem
-in `ci.yml` (also independently confirmed with `actionlint`, zero
-findings) and points at something blocking Actions scheduling above the
-repository — most consistent with an account-level Actions
-billing/spending-limit condition, which only the account owner can
-inspect or change (GitHub Settings → Billing and plans). The rewritten CI
-workflow (see "Continuous integration" above) is believed correct and
-ready, but has not been *proven* to execute end to end, and this file
-will not claim otherwise until that proof exists.
+- ~~Automated CI.~~ *Reversed* — see "Continuous integration" above.
+  Built out in full (five granular jobs plus classic commit-status
+  publishing), then removed once diagnosis showed GitHub Actions
+  couldn't execute at all on this account (billing/spending-limit, not a
+  workflow-content problem). Validation is manual (`go build`/`vet`/
+  `gofmt`/`test -race` locally before every push) until that's revisited.
 
 Still open, in rough priority order: a **context policy engine** (deferred
 until artifact spill, above, had proven stable, which it now has — this
