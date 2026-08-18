@@ -691,3 +691,30 @@ Beyond `tools/*`, the MCP client now also supports:
 Elicitation is still deferred — it needs the same kind of turn-pausing
 plumbing `ask_question` required (a live event channel, a way to resume a
 blocked call), and no server in real use yet has forced building it.
+
+## Evals
+
+`evals/` (`go run ./evals`) runs scripted scenarios against the real
+configured provider — same in-process gateway+daemon wiring `cmd/kram`
+uses, same autodetection. This is what unit tests structurally can't do:
+check what a real model actually does when handed Kram's system prompt
+and tools, not just that Kram's own code is internally correct.
+
+Each scenario is a regression test for a specific behavior, several
+traced directly to bugs found by hand during development:
+
+- **Hard** scenarios must pass regardless of which model is configured —
+  a turn never returns a truly empty final answer, grep never leaks
+  binary garbage into a response, the core tool set is actually
+  registered.
+- **Soft** scenarios are informational, not blocking — whether a model
+  proactively calls `skill_list` for an unmistakable trigger phrase, or
+  `memory_write` for a volunteered fact, depends on that model's
+  capability level, not on whether Kram's own code is correct. A soft
+  scenario failing is a real, useful signal (the first real run already
+  found one — an explicit skill trigger phrase didn't get a free-tier
+  model to check `skill_list`) — it just shouldn't fail the whole harness
+  the moment someone runs it against a weaker model.
+
+Needs a real provider configured (env var or a key from the accounts
+screen) — there's no way to eval actual model behavior against the mock.

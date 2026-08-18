@@ -508,9 +508,21 @@ Honest list of what Kram still doesn't have, as of this writing:
   agent-loop smoke tests (credentials, toolsettings, providercatalog,
   router, memory store + tool, skills parser, mcp). Still nothing for
   `internal/gateway`, `internal/provider`, or the CLI itself.
-- **Evals.** No harness that can answer "did this prompt change make the
-  agent better or worse".
+- ~~Evals.~~ Closed: `evals/` runs scripted scenarios against the real
+  configured provider (same in-process gateway+daemon wiring as
+  `cmd/kram`), each a regression test for a specific behavior — several
+  traced directly to bugs found by hand earlier in this project. Hard
+  scenarios (does a turn ever return truly empty, does grep ever leak
+  binary garbage, are core tools registered) must pass regardless of
+  model; soft ones (does the model proactively use a skill/memory) are
+  informational, since that depends on the configured model's capability,
+  not just Kram's own code being correct. First real run against an
+  actual provider found a genuine soft-fail: an unmistakable skill
+  trigger phrase didn't get the model to call `skill_list`.
 - **Distribution.** No prebuilt binaries, no docs site.
 
-The first two are deliberate for now. The last three are the ones that
+Scheduling, memory-provider/terminal-backend plugins, and MCP elicitation
+are deliberate omissions for now — narrower than what they'd extend.
+Distribution is what's left of the original list.
+Distribution is what remains from
 matter most for Kram being trustworthy rather than merely capable.
