@@ -17,6 +17,11 @@ const (
 	// fallback, a compaction just happened) as soon as it's known, rather
 	// than only at the very end.
 	EventNotice EventKind = "notice"
+	// EventQuestion fires when the ask_question tool pauses the turn —
+	// the caller shows Question/Options and is expected to answer via
+	// Service.AnswerQuestion(QuestionID, ...) on a separate call, since the
+	// turn (and this SSE stream) stays blocked until it does.
+	EventQuestion EventKind = "question"
 )
 
 // Event is one thing that happened during Run, emitted live via the
@@ -25,12 +30,15 @@ const (
 // completes.
 type Event struct {
 	Kind       EventKind
-	Content    string // EventDelta
-	ToolName   string // EventToolStart, EventToolResult
-	ToolArgs   string // EventToolStart
-	ToolResult string // EventToolResult
-	ToolOK     bool   // EventToolResult
-	Notice     string // EventNotice
+	Content    string   // EventDelta
+	ToolName   string   // EventToolStart, EventToolResult
+	ToolArgs   string   // EventToolStart
+	ToolResult string   // EventToolResult
+	ToolOK     bool     // EventToolResult
+	Notice     string   // EventNotice
+	QuestionID string   // EventQuestion
+	Question   string   // EventQuestion
+	Options    []string // EventQuestion
 }
 
 // EventFunc receives live events during Run. A nil EventFunc is valid —

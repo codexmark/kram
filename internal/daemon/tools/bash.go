@@ -82,7 +82,11 @@ func (t *bash) Execute(ctx context.Context, raw json.RawMessage) (string, error)
 		truncated = true
 	}
 
-	result := output
+	// Deterministic noise filtering, keyed on the command that produced
+	// this output (see outputfilter.go). Applied before the byte cap
+	// below is reported, so what survives the filter is signal rather
+	// than whichever bytes happened to come first.
+	result := filterCommandOutput(args.Command, output)
 	if truncated {
 		result += "\n\n[output truncated]"
 	}

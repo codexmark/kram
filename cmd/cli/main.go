@@ -25,15 +25,16 @@ func main() {
 	sessionID := flag.String("session", "", "resume an existing session ID, skipping the picker")
 	title := flag.String("title", "", "create a session with this title, skipping the picker")
 	combo := flag.String("model", "default", "gateway combo used for messages in this session")
+	workspace := flag.String("workspace", "", "project root shown on the picker banner (informational only — the daemon, not this process, enforces it)")
 	flag.Parse()
 
-	if err := run(*daemonURL, *gatewayURL, *sessionID, *title, *combo); err != nil {
+	if err := run(*daemonURL, *gatewayURL, *sessionID, *title, *combo, *workspace); err != nil {
 		fmt.Fprintln(os.Stderr, "kram:", err)
 		os.Exit(1)
 	}
 }
 
-func run(daemonURL, gatewayURL, sessionID, title, combo string) error {
+func run(daemonURL, gatewayURL, sessionID, title, combo, workspace string) error {
 	daemon := daemonclient.New(daemonURL)
 	gateway := statusclient.New(gatewayURL)
 
@@ -49,7 +50,7 @@ func run(daemonURL, gatewayURL, sessionID, title, combo string) error {
 		sessionID = sess.ID
 	}
 
-	m := app.New(daemon, gateway, sessionID, combo)
+	m := app.New(daemon, gateway, sessionID, combo, workspace)
 	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
 	_, err := p.Run()
 	return err

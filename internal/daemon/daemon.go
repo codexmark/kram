@@ -20,6 +20,8 @@ import (
 	"github.com/codexmark/kram-gateway/internal/daemon/session"
 	"github.com/codexmark/kram-gateway/internal/daemon/store"
 	"github.com/codexmark/kram-gateway/internal/daemon/tools"
+	"github.com/codexmark/kram-gateway/internal/mcp"
+	"github.com/codexmark/kram-gateway/internal/toolsettings"
 )
 
 // Config configures one daemon instance.
@@ -54,8 +56,28 @@ func Run(ctx context.Context, cfg Config, logger *slog.Logger) error {
 
 	gw := gatewayclient.New(cfg.GatewayURL)
 	sessions := session.New(st)
-	toolRegistry := tools.NewRegistry(absWorkspace, st)
+
+	// Best-effort: a missing/unreadable settings file just means nothing's
+	// disabled, same as a fresh install — never worth failing startup over.
+	var disabled map[string]bool
+	if ts, err := toolsettings.Load(); err == nil {
+		disabled = ts.Disabled()
+	}
+	toolRegistry := tools.NewRegistry(absWorkspace, st, disabled)
+
+	// MCP servers are third-party processes: connecting is I/O that can
+	// hang or fail, so it happens after the registry exists and never
+	// blocks startup — an unavailable server costs its own tools, nothing
+	// more (see mcp.ConnectAll).
+	mcpManager := mcp.ConnectAll(ctx, mcp.LoadConfig(absWorkspace), logger)
+	defer mcpManager.Close()
+	toolRegistry.RegisterMCP(mcpManager)
+
 	agentSvc := agent.New(st, gw, toolRegistry, agent.Config{Model: cfg.Model, MaxTurns: cfg.MaxTurns, Workspace: absWorkspace})
+	// agentSvc implements tools.Delegator (RunTask) for the delegate_task
+	// tool — wired after construction since Registry can't import agent
+	// (agent already imports tools) without a cycle.
+	toolRegistry.SetDelegator(agentSvc)
 	srv := server.New(sessions, agentSvc, logger)
 
 	addr := fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)

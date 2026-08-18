@@ -30,7 +30,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	candidates, err := s.router.Attempts(comboID)
+	candidates, err := s.router.Attempts(comboID, affinityKey(req))
 	if err != nil {
 		writeError(w, http.StatusServiceUnavailable, err.Error())
 		return
@@ -252,4 +252,27 @@ func newID() string {
 	buf := make([]byte, 12)
 	_, _ = rand.Read(buf)
 	return "chatcmpl-" + hex.EncodeToString(buf)
+}
+
+// affinityKey identifies a request's stable prompt prefix, for combos
+// using the prefix-affinity strategy (see router.StrategyPrefixAffinity).
+//
+// It's built from the leading system messages plus the first user
+// message, which is precisely the part that does not change across an
+// agent turn's tool round-trips — the growing tail of tool calls and
+// results is deliberately excluded, since including it would produce a
+// different key on every round-trip and defeat the entire purpose.
+func affinityKey(req openai.ChatCompletionRequest) string {
+	var b strings.Builder
+	for _, m := range req.Messages {
+		if m.Role == "system" {
+			b.WriteString(m.Content)
+			continue
+		}
+		if m.Role == "user" {
+			b.WriteString(m.Content)
+			break
+		}
+	}
+	return b.String()
 }

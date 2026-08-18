@@ -2,12 +2,14 @@
 
 An OpenAI-compatible LLM gateway: load balancing, circuit-breaker fallback
 and per-provider telemetry across multiple upstream providers, in a single
-static Go binary. v0 scope only — no compression pipeline, no persistence,
-one routing strategy (round-robin).
+static Go binary. Three routing strategies (declared-priority,
+round-robin, prefix-affinity) — see "Routing and prompt caching".
 
-This is the first component of **Kram**, a coding-agent platform being
+This started as the first component of **Kram**, a coding-agent platform
 built from scratch in Go, aimed at performance, reliability ("never
-crash") and token economy.
+crash") and token economy. The gateway is now one piece of four: gateway,
+daemon, CLI, and the agent loop — plus cross-session memory, subagent
+delegation, skills, and an MCP client.
 
 **To actually use Kram, run `cmd/kram`** (see "All-in-one" below) — the
 rest of this doc mostly describes the individual components for
@@ -16,7 +18,7 @@ development. The gateway, daemon and CLI all still work standalone too.
 ## Inspirations
 
 Kram is a clean-room build, not a fork — but its design borrows ideas from
-three existing projects:
+several existing projects:
 
 - **[opencode](https://github.com/sst/opencode)** — the agent/UX layer
   model: session, tools, LSP integration, plugins, MCP client. Kram's
@@ -363,3 +365,260 @@ memory written in one session was independently confirmed in the SQLite
 `/sessions/{id}/context` response showed a non-zero `memory` category
 before any message was sent in it — proving the injection is automatic,
 not dependent on the model deciding to search.
+
+## Subagents (delegation)
+
+Orchestration and memory are Kram's two flagship bets — this is the
+orchestration half. `delegate_task` (`internal/daemon/tools/delegate.go`)
+lets the agent fan out independent work to fresh subagents, modeled on
+[Hermes Agent](https://github.com/NousResearch/hermes-agent)'s
+`delegate_task` design rather than opencode's shared-session `task` tool,
+specifically for its stricter isolation defaults:
+
+- **Zero context inheritance.** A subagent starts in a brand-new session
+  with no knowledge of the parent conversation — it sees only the `goal`
+  and `context` strings the parent passes it (closer to briefing a junior
+  engineer than calling a function). This is a deliberate default, not a
+  missing feature: it keeps a delegated task's context budget independent
+  of however long the parent conversation has run.
+- **Real parallelism.** One `delegate_task` call takes a `tasks` array;
+  every task runs concurrently (bounded by `defaultMaxConcurrentSubagents`,
+  3 by default, matching Hermes) and the tool blocks until all finish,
+  then returns a consolidated result — fits Kram's existing
+  synchronous-tool-call model instead of introducing a whole async/polling
+  subsystem for v0.
+- **Depth-capped, not infinitely recursive.** `defaultMaxSpawnDepth` (1 by
+  default, also matching Hermes) means a subagent can't itself delegate
+  further — attempting to hits a clean, immediate error instead of an
+  unbounded agent tree. Depth travels through `context.Context`
+  (`tools.WithDepth`/`depthFromContext`), not a parameter threaded through
+  every tool's `Execute` signature, since only `delegate_task` needs it.
+- **Per-task model override.** Each task in the batch can optionally name
+  a different gateway combo than the parent's — a cheap subagent for
+  grunt work, the parent's own model for anything that needs it.
+- **No workspace/filesystem isolation yet.** Hermes's optional git-
+  worktree-per-subagent mode isn't ported — every subagent shares the
+  same workspace as its parent, same as Kram's regular file tools.
+
+Wiring note: `agent.Service` (which owns the full tool-calling loop)
+implements a `tools.Delegator` interface that `delegate_task` calls
+through — declared in the `tools` package rather than importing
+`agent` directly, since `agent` already imports `tools` for its own tool
+calls and the reverse import would be a cycle.
+`Registry.SetDelegator` wires the concrete implementation in after both
+are constructed (see `daemon.go`).
+
+Verified with the mock-provider devtool, forced to call `delegate_task`
+with two parallel tasks: two isolated child sessions were created (titled
+from each task's `goal`), both ran concurrently, and — since the mock
+always tries to call a tool on a fresh conversation — each child
+immediately attempted to delegate further and was correctly blocked by
+the depth cap (`error: max subagent nesting depth reached`), recovered on
+its next turn, and returned a normal answer that the parent's
+`delegate_task` call consolidated.
+
+## Skills, clarifying questions, and the tools/skills toggle
+
+Closing the remaining gap against opencode/OpenClaude/Hermes: all three
+offer a skills system and a way for the agent to pause and ask the user
+something instead of guessing. Kram now has both, plus a way to turn any
+individual tool or skill off.
+
+- **Skills** (`internal/daemon/tools/skills.go`): the same open shape
+  opencode's Agent Skills, Hermes's agentskills.io-based skills, and
+  OpenClaude's `DiscoverSkillsTool` all converge on — a folder per skill
+  containing `SKILL.md` (a small `name`/`description` frontmatter block,
+  then markdown instructions as the body), discovered from
+  `<workspace>/.kram/skills/*/SKILL.md` (project) and
+  `~/.config/kram-gateway/skills/*/SKILL.md` (global). Progressive
+  disclosure, matching Hermes's pattern: `skill_list` returns only names
+  and one-line descriptions (cheap), `skill` loads one skill's full body
+  by name (only when actually needed) — the model never pays full
+  skill-body tokens for skills it isn't using.
+- **`ask_question`** (`internal/daemon/tools/ask.go`): lets the agent
+  genuinely pause a turn for a real answer instead of guessing — matching
+  opencode's `question` tool, OpenClaude's `AskUserQuestionTool`, and
+  Hermes's `clarify`. Mechanically this is the first tool that can't just
+  return text synchronously: it emits a new `EventQuestion` over the SSE
+  stream (carrying the question and any options) and then genuinely
+  blocks — the daemon's HTTP handler for that turn stays open and
+  parked — until a *separate* HTTP call, `POST
+  /sessions/{id}/answer`, delivers an answer and unblocks it. The `Asker`
+  interface behind this is injected into `context.Context` per turn (same
+  pattern `Delegator`/depth use), since unlike delegation it needs that
+  turn's live event channel and session ID, not a fixed dependency wired
+  in once at startup.
+- **Tools/skills toggle**: `internal/toolsettings` is a local on/off list
+  (same shape and guarantees as `internal/credentials` — plain JSON under
+  `kramhome`, `0600`) that `Registry.Definitions()`/`Execute()` both
+  respect — a disabled tool is invisible to the model, not just refused
+  if called (though it's refused too, as defense in depth against a model
+  that saw the tool name in an earlier turn). The CLI's `f` screen (from
+  the session picker) lists every registered tool and discovered skill,
+  fetched live from the daemon's `GET /tools` endpoint rather than a
+  hardcoded duplicate list, with a checkbox per row. Same pattern as the
+  accounts screen: toggling writes locally and takes effect on the
+  daemon's next restart, not live.
+
+Verified with the mock-provider devtool: a real `SKILL.md` was placed in
+a test workspace and `skill_list` found it; `ask_question` was forced,
+confirmed to emit the `question` event and genuinely block the stream,
+then `POST /sessions/{id}/answer` was called independently and the exact
+chosen answer flowed back as the tool's result; and `bash` was disabled
+via a tool-settings file, confirmed to disappear from a fresh daemon's
+`GET /tools` listing and to be refused with a clear error when the model
+tried calling it anyway.
+
+## The agent's own prompt
+
+Every capability added to Kram had to be told to use itself. `memory_write`
+existed and never fired until a rule said "save durable facts unprompted";
+`skill_list` existed and was never called until a rule said "check skills
+before specialized work". A tool being in the schema is not an instruction
+to use it — a tool-calling model's default is to stay reactive.
+
+`internal/daemon/agent/systemprompt.go` is where that lives now: identity,
+an explicit trigger for every proactive capability, verification
+discipline ("never claim something works because it should"), output
+rules for a terminal, and a standing instruction to treat file contents
+and command output as data rather than instructions. It is written from
+scratch against public agent-prompting practice — no proprietary prompt
+is reproduced.
+
+Style is deliberate: short imperative rules with literal trigger words,
+not paragraphs of nuanced prose. Kram's realistic default is a *small*
+model (its zero-cost chain is free-tier 20-30B-class models), and a large
+model loses nothing reading terse rules while a small one falls apart
+reading subtle ones.
+
+The preamble assembles, most general first: system prompt → `AGENTS.md` →
+remembered facts → conversation. None of it is persisted into history;
+each is rebuilt from its current source every turn, so editing `AGENTS.md`
+takes effect on the very next message.
+
+## MCP (Model Context Protocol)
+
+`internal/mcp` is a from-scratch MCP client — how Kram reaches
+third-party tool servers instead of only what's compiled into its binary.
+No SDK: MCP is JSON-RPC 2.0 over stdio or HTTP, and hand-rolling it keeps
+the pure-Go static-binary property.
+
+- **Both transports.** stdio (newline-delimited JSON over a child
+  process — no framing headers; this is genuinely the wire format, it is
+  not LSP-style) and Streamable HTTP (POST per message, answered with
+  either JSON or a request-scoped SSE stream, echoing `Mcp-Session-Id`).
+- **Protocol era.** Implements the stateful lifecycle (`initialize` →
+  `notifications/initialized` → `tools/list`/`tools/call`) used through
+  revision 2025-11-25. The 2026-07-28 revision drops the handshake for
+  stateless per-request metadata; that's deliberately deferred, because
+  essentially every MCP server deployed today still speaks the older
+  lifecycle. `client.go`'s `handshake` marks where a modern probe slots in.
+- **Config.** `mcpServers` in `~/.config/kram-gateway/mcp.json` (global)
+  and `<workspace>/.kram/mcp.json` (project, wins on name collision) —
+  the same shape Claude Desktop, Claude Code and opencode use, so an
+  existing config works unchanged.
+- **Namespacing.** Server tools register as `mcp__<server>__<tool>`, so a
+  server publishing `bash` or `read_file` can't silently shadow Kram's own.
+- **Isolation.** Connecting happens after the registry exists and never
+  blocks startup: an unavailable server costs its own tools and nothing
+  else.
+
+## Deterministic output filtering
+
+Tool output is where a coding agent's context budget actually goes — one
+`npm install` or `go test ./...` is thousands of lines of progress noise
+around maybe five lines of signal, and it stays in history for the rest
+of the session.
+
+`internal/daemon/tools/outputfilter.go` is a deterministic filter pass
+over that output, adapted from OmniRoute's RTK compression engine. The
+idea worth stealing is that it keys on *the command that produced the
+output* and uses plain regex rules — no LLM call, no latency, nothing to
+hallucinate.
+
+The load-bearing invariant is that it must never eat an error: preserve
+patterns are checked before any drop rule, so a line that looks like a
+failure survives whatever else matches. `outputfilter_test.go` exists to
+make that failure mode impossible to ship quietly — it asserts that a Go
+test failure, an npm ERESOLVE, a jest failure and a compiler diagnostic
+each survive their own filter. These are also the repo's first Go tests.
+Writing them immediately paid: they caught the all-lines-dropped case
+returning the full original output, which added no signal and saved no
+tokens.
+
+## Routing and prompt caching
+
+Round-robin has a non-obvious cost. Every major provider caches prompt
+prefixes server-side and bills cached input at a fraction of the rate,
+and that cache is per-provider. An agent turn resends a large,
+near-identical prefix on every tool round-trip — so rotating providers
+between those calls throws the cache away each time.
+
+So the auto-built combo now picks its strategy from what's actually
+configured (`cmd/kram/autodetect.go`):
+
+- **A paid provider is present** → no rotation. The catalog order is a
+  priority order, the paid provider leads, and the cheapest thing to do
+  is keep using it so its cache stays warm.
+- **Only free tiers** → round-robin. These are interchangeable peers and
+  the binding constraint is rate limits, not cost; you can't benefit from
+  a warm cache on a provider answering 429.
+
+`router.StrategyPrefixAffinity` is a third option for chains of
+equivalent peers where stability matters more than spreading: it hashes
+the request's stable prefix (leading system messages plus the first user
+message — deliberately excluding the growing tool-call tail, which would
+otherwise produce a different key every round-trip) and pins accordingly,
+reshuffling only when the healthy set changes.
+
+## Skills, installed
+
+`skill_install` clones a public git repo, finds every folder with a
+`SKILL.md`, and installs the ones named — reporting the repo's license
+and warning when there isn't one. It reports; it never judges whether
+copying is permitted, because that's the user's call.
+
+The bundled set was chosen by checking each repository's LICENSE file
+directly rather than trusting GitHub's detected label, which matters more
+than it sounds: `anthropics/claude-code` is "© Anthropic PBC, all rights
+reserved" despite being a public repo, and `anthropics/skills` is
+per-skill mixed (Apache-2.0 for most, proprietary for the document ones).
+Public is not the same as permissively licensed. Installed, all verified
+MIT first-hand:
+
+- **[obra/superpowers](https://github.com/obra/superpowers)** —
+  `systematic-debugging`, `verification-before-completion`,
+  `test-driven-development`, `receiving-code-review`
+- **[addyosmani/agent-skills](https://github.com/addyosmani/agent-skills)** —
+  `frontend-ui-engineering`, `code-review-and-quality`,
+  `planning-and-task-breakdown`, `security-and-hardening`,
+  `code-simplification`
+- **[mattpocock/skills](https://github.com/mattpocock/skills)** —
+  `codebase-design`, `domain-modeling`, `diagnosing-bugs`
+- **[JuliusBrussee/caveman](https://github.com/JuliusBrussee/caveman)**
+  (its `skills/` dir is MIT per `LICENSING.md`; the engine dirs are BSL) —
+  `caveman`, `surgical-patch`, `investigate-first`, `verify-and-stop`,
+  `safe-refactor`
+- **[DietrichGebert/ponytail](https://github.com/DietrichGebert/ponytail)** —
+  `ponytail`
+
+Each installed copy keeps a `SOURCE` file recording where it came from.
+Cross-repo references (`superpowers:test-driven-development`) were
+rewritten to Kram's bare naming.
+
+## Memory, revisited
+
+The first version had no size limit, which meant memory silently became
+an unbounded prompt prefix on every turn. Two changes, both from Hermes
+Agent's design:
+
+- **A hard per-scope cap** (2,400 chars). Overflowing doesn't truncate or
+  fail — it returns every current entry with its id and tells the model
+  to consolidate first. `memory_write` grew `replace` and `remove` to make
+  that possible. The cap *is* the design: "summarize when it gets long"
+  only ever happens if something forces it.
+- **Snapshotted per run**, not re-read per turn. The preamble is a prompt
+  prefix; changing it between calls discards the provider's prefix cache
+  on every tool round-trip. Kram freezes per run rather than per session
+  (as Hermes does), so a fact written mid-conversation still appears on
+  the user's very next message instead of only in a new session.

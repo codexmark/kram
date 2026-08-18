@@ -89,9 +89,9 @@ type ToolActivity struct {
 
 // StreamEvent is one event from a message stream. Type selects which
 // other fields are meaningful: "delta" (Content), "tool_start" (Name,
-// Args), "tool_result" (Name, Result, OK), "notice" (Text), "done"
-// (Message, Attempts, Usage, ToolActivity, Compactions, ImageNotice), or
-// "error" (Error).
+// Args), "tool_result" (Name, Result, OK), "notice" (Text), "question"
+// (QuestionID, Question, Options), "done" (Message, Attempts, Usage,
+// ToolActivity, Compactions, ImageNotice), or "error" (Error).
 type StreamEvent struct {
 	Type         string               `json:"type"`
 	Content      string               `json:"content,omitempty"`
@@ -100,6 +100,9 @@ type StreamEvent struct {
 	Result       string               `json:"result,omitempty"`
 	OK           bool                 `json:"ok,omitempty"`
 	Text         string               `json:"text,omitempty"`
+	QuestionID   string               `json:"question_id,omitempty"`
+	Question     string               `json:"question,omitempty"`
+	Options      []string             `json:"options,omitempty"`
 	Message      Message              `json:"message,omitempty"`
 	Attempts     []openai.AttemptInfo `json:"attempts,omitempty"`
 	Usage        openai.Usage         `json:"usage,omitempty"`
@@ -189,6 +192,43 @@ func (c *Client) SendMessageStream(ctx context.Context, sessionID, content strin
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 	return &MessageStream{resp: resp, scanner: scanner}, nil
+}
+
+// AnswerQuestion delivers an answer to a pending ask_question call — the
+// SSE stream that produced the "question" event stays open and blocked
+// server-side the whole time; this is a separate HTTP request that
+// unblocks it, not a message sent over the stream itself.
+func (c *Client) AnswerQuestion(ctx context.Context, sessionID, questionID, answer string) error {
+	body := map[string]string{"question_id": questionID, "answer": answer}
+	return c.doJSON(ctx, http.MethodPost, "/sessions/"+sessionID+"/answer", body, nil)
+}
+
+// ToolInfo mirrors the daemon's tools.ToolInfo — one registered tool,
+// enabled or not, for the tools/skills toggle screen.
+type ToolInfo struct {
+	Name        string `json:"Name"`
+	Description string `json:"Description"`
+	Disabled    bool   `json:"Disabled"`
+}
+
+// Skill mirrors the daemon's tools.Skill.
+type Skill struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Scope       string `json:"scope"`
+	Disabled    bool   `json:"disabled"`
+}
+
+// ListTools fetches every registered tool and discovered skill from the
+// daemon, enabled or not — the source of truth the toggle screen renders
+// from, rather than a hardcoded duplicate list in the CLI.
+func (c *Client) ListTools(ctx context.Context) ([]ToolInfo, []Skill, error) {
+	var out struct {
+		Tools  []ToolInfo `json:"tools"`
+		Skills []Skill    `json:"skills"`
+	}
+	err := c.doJSON(ctx, http.MethodGet, "/tools", nil, &out)
+	return out.Tools, out.Skills, err
 }
 
 // ContextCategory is one real contributor to a session's context-window usage.

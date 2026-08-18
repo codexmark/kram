@@ -23,9 +23,12 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/codexmark/kram-gateway/internal/daemon/compaction"
 	"github.com/codexmark/kram-gateway/internal/daemon/gatewayclient"
+	"github.com/codexmark/kram-gateway/internal/daemon/session"
 	"github.com/codexmark/kram-gateway/internal/daemon/store"
 	"github.com/codexmark/kram-gateway/internal/daemon/tools"
 	"github.com/codexmark/kram-gateway/internal/openai"
@@ -102,11 +105,83 @@ type Service struct {
 	gateway *gatewayclient.Client
 	tools   *tools.Registry
 	cfg     Config
+
+	// pending backs ask_question: one entry per in-flight question,
+	// keyed by a generated ID. AnswerQuestion looks the channel up and
+	// sends the answer; sessionAsker.Ask (below) is the only reader, and
+	// removes its own entry once done either way.
+	pendingMu sync.Mutex
+	pending   map[string]chan string
 }
 
 // New builds an agent Service.
 func New(st *store.Store, gw *gatewayclient.Client, tr *tools.Registry, cfg Config) *Service {
-	return &Service{store: st, gateway: gw, tools: tr, cfg: cfg.withDefaults()}
+	return &Service{store: st, gateway: gw, tools: tr, cfg: cfg.withDefaults(), pending: make(map[string]chan string)}
+}
+
+// Tools passes through the registry's full tool listing (enabled or not)
+// for the daemon's GET /tools endpoint.
+func (s *Service) Tools() []tools.ToolInfo { return s.tools.AllTools() }
+
+// Skills passes through the registry's discovered-skills listing for the
+// same endpoint.
+func (s *Service) Skills() []tools.Skill { return s.tools.Skills() }
+
+// AnswerQuestion delivers ans to the ask_question call waiting on id, if
+// any is still pending. Returns false if id is unknown — already
+// answered, timed out, or never existed — so the caller (the daemon's
+// HTTP handler) can report a clear 404 instead of silently no-opping.
+func (s *Service) AnswerQuestion(id, ans string) bool {
+	s.pendingMu.Lock()
+	ch, ok := s.pending[id]
+	s.pendingMu.Unlock()
+	if !ok {
+		return false
+	}
+	select {
+	case ch <- ans:
+	default:
+	}
+	return true
+}
+
+// askQuestionTimeout bounds how long a turn blocks waiting for the user
+// to answer an ask_question call — generous (it's a human, not a retry),
+// but bounded so a session can't hang forever if they never respond.
+const askQuestionTimeout = 10 * time.Minute
+
+// sessionAsker implements tools.Asker for one turn — constructed fresh
+// per runLoop call (not stored on Service) since it closes over that
+// turn's live onEvent callback and session ID, which vary per call unlike
+// the fixed dependencies Delegator needs.
+type sessionAsker struct {
+	svc     *Service
+	onEvent EventFunc
+}
+
+func (a *sessionAsker) Ask(ctx context.Context, question string, options []string) (string, error) {
+	id := session.NewID()
+	ch := make(chan string, 1)
+
+	a.svc.pendingMu.Lock()
+	a.svc.pending[id] = ch
+	a.svc.pendingMu.Unlock()
+	defer func() {
+		a.svc.pendingMu.Lock()
+		delete(a.svc.pending, id)
+		a.svc.pendingMu.Unlock()
+	}()
+
+	emit(a.onEvent, Event{Kind: EventQuestion, QuestionID: id, Question: question, Options: options})
+
+	select {
+	case ans := <-ch:
+		return ans, nil
+	case <-ctx.Done():
+		return "", ctx.Err()
+	case <-time.After(askQuestionTimeout):
+		return "", fmt.Errorf("timed out waiting for an answer")
+	}
 }
 
 // Run handles one user message end to end: persist it, run the tool loop
@@ -140,6 +215,63 @@ func (s *Service) Run(ctx context.Context, sessionID, userContent string, images
 		return RunResult{}, fmt.Errorf("persisting user message: %w", err)
 	}
 
+	return s.runLoop(ctx, sessionID, s.cfg.Model, 0, imageNotice, onEvent)
+}
+
+// RunTask implements tools.Delegator: runs goal (plus optional context) to
+// completion in a brand-new session, isolated from every other
+// conversation — the subagent sees only what's passed here, not the
+// parent's history, matching Hermes Agent's "spawn a junior engineer"
+// model rather than a shared-context delegation. model, if empty, falls
+// back to the parent's own combo. depth is the nesting level the *child*
+// will run at (the caller — delegate_task — passes its own depth+1); it's
+// threaded through runLoop so a grandchild's own delegate_task call sees
+// the right depth and gets blocked once maxSpawnDepth is reached.
+func (s *Service) RunTask(ctx context.Context, goal, taskContext, model string, depth int) (string, error) {
+	id := session.NewID()
+	if _, err := s.store.CreateSession(id, fmt.Sprintf("subagent: %.60s", goal)); err != nil {
+		return "", fmt.Errorf("creating subagent session: %w", err)
+	}
+
+	prompt := goal
+	if taskContext != "" {
+		prompt = goal + "\n\nContext:\n" + taskContext
+	}
+	if _, err := s.store.AppendMessage(id, store.Message{Role: "user", Content: prompt}); err != nil {
+		return "", fmt.Errorf("seeding subagent task: %w", err)
+	}
+
+	useModel := model
+	if useModel == "" {
+		useModel = s.cfg.Model
+	}
+
+	result, err := s.runLoop(ctx, id, useModel, depth, "", nil)
+	if err != nil {
+		return "", fmt.Errorf("subagent run failed: %w", err)
+	}
+	return result.Message.Content, nil
+}
+
+// runLoop is the tool-calling loop shared by Run (the top-level
+// conversation, depth 0) and RunTask (a delegated subagent, depth >= 1) —
+// everything below was originally Run's body, parameterized on model and
+// depth instead of always reading s.cfg.Model and assuming depth 0.
+func (s *Service) runLoop(ctx context.Context, sessionID, model string, depth int, imageNotice string, onEvent EventFunc) (RunResult, error) {
+	ctx = tools.WithDepth(ctx, depth)
+	ctx = tools.WithAsker(ctx, &sessionAsker{svc: s, onEvent: onEvent})
+
+	// Memory is snapshotted once per run rather than re-read every turn,
+	// borrowing Hermes Agent's "frozen at session start" idea for the
+	// reason behind it: the preamble is a prompt *prefix*, and a prefix
+	// that changes between calls throws away the provider's prefix cache
+	// on every tool round-trip — which is exactly where a tool-calling
+	// loop makes most of its calls. Kram freezes per run (one user
+	// message and all its tool round-trips) rather than per session, so a
+	// fact written mid-conversation still shows up on the user's very
+	// next message instead of only in a new session.
+	memoryMsg, haveMemory := s.recentMemoryMessage()
+
 	result := RunResult{ImageNotice: imageNotice}
 	compactions := 0
 	graceUsed := false
@@ -157,7 +289,7 @@ func (s *Service) Run(ctx context.Context, sessionID, userContent string, images
 			}
 			pruned := compaction.PruneForModel(effective)
 			if compaction.NeedsCompaction(pruned, s.cfg.MaxContextTokens) {
-				marker, err := compaction.Compact(ctx, s.gateway, s.cfg.Model, pruned)
+				marker, err := compaction.Compact(ctx, s.gateway, model, pruned)
 				if err != nil {
 					return RunResult{}, fmt.Errorf("compacting session: %w", err)
 				}
@@ -172,21 +304,25 @@ func (s *Service) Run(ctx context.Context, sessionID, userContent string, images
 			effective = pruned
 		}
 
-		modelMessages := toModelMessages(effective)
-		if memoryMsg, ok := s.recentMemoryMessage(); ok {
-			// Prepended fresh each turn (not persisted into history) so
-			// memory written mid-conversation is visible on the very next
-			// turn, same as project context below.
-			modelMessages = append([]openai.ChatMessage{memoryMsg}, modelMessages...)
-		}
+		// Preamble order, most general first: who you are and how to work
+		// (systemPrompt) → this project's own rules (AGENTS.md) → facts
+		// remembered about this user/project (memory) → the conversation.
+		// None of it is persisted into history: each is rebuilt every turn
+		// from its current source, so editing AGENTS.md or writing a memory
+		// mid-conversation takes effect on the very next message instead of
+		// requiring a restart.
+		var preamble []openai.ChatMessage
+		preamble = append(preamble, openai.ChatMessage{Role: "system", Content: systemPrompt(s.cfg.Workspace)})
 		if projectContext, found := loadProjectContext(s.cfg.Workspace); found {
-			// Prepended, not persisted: this reflects the file's current
-			// contents on every turn, so an edit takes effect on the very
-			// next message rather than requiring a daemon restart.
-			modelMessages = append([]openai.ChatMessage{
-				{Role: "system", Content: "Project context (from AGENTS.md/CLAUDE.md):\n\n" + projectContext},
-			}, modelMessages...)
+			preamble = append(preamble, openai.ChatMessage{
+				Role:    "system",
+				Content: "Project context (from AGENTS.md/CLAUDE.md):\n\n" + projectContext,
+			})
 		}
+		if haveMemory {
+			preamble = append(preamble, memoryMsg)
+		}
+		modelMessages := append(preamble, toModelMessages(effective)...)
 
 		nearBudget := turn == s.cfg.MaxTurns-1
 		toolDefs := s.tools.Definitions()
@@ -201,7 +337,7 @@ func (s *Service) Run(ctx context.Context, sessionID, userContent string, images
 			})
 		}
 
-		callResult, err := s.streamCall(ctx, modelMessages, toolDefs, onEvent)
+		callResult, err := s.streamCall(ctx, model, modelMessages, toolDefs, onEvent)
 		if err != nil {
 			return RunResult{}, fmt.Errorf("gateway call failed: %w", err)
 		}
@@ -261,8 +397,8 @@ func (s *Service) Run(ctx context.Context, sessionID, userContent string, images
 // turn goes through here now, including tool-calling turns — those just
 // happen to never emit a delta, since the model isn't producing visible
 // text when it's deciding what to call.
-func (s *Service) streamCall(ctx context.Context, messages []openai.ChatMessage, toolDefs []openai.Tool, onEvent EventFunc) (gatewayclient.Result, error) {
-	deltas, err := s.gateway.ChatCompletionStream(ctx, s.cfg.Model, messages, toolDefs)
+func (s *Service) streamCall(ctx context.Context, model string, messages []openai.ChatMessage, toolDefs []openai.Tool, onEvent EventFunc) (gatewayclient.Result, error) {
+	deltas, err := s.gateway.ChatCompletionStream(ctx, model, messages, toolDefs)
 	if err != nil {
 		return gatewayclient.Result{}, err
 	}
@@ -327,11 +463,15 @@ func (s *Service) recentMemoryMessage() (openai.ChatMessage, bool) {
 		if e.Scope == store.GlobalScope {
 			scope = "global"
 		}
-		fmt.Fprintf(&b, "- [%s] %s\n", scope, e.Content)
+		// Ids are included so memory_write's replace/remove operations
+		// have something to target without a memory_search round-trip
+		// first — consolidation is only realistic if the model can see
+		// what it's consolidating.
+		fmt.Fprintf(&b, "- #%d [%s] %s\n", e.ID, scope, e.Content)
 	}
 	return openai.ChatMessage{
 		Role:    "system",
-		Content: "Persistent memory from previous sessions (search memory_search for anything not listed here):\n\n" + b.String(),
+		Content: "Persistent memory from previous sessions (use memory_search for anything not listed here):\n\n" + b.String(),
 	}, true
 }
 

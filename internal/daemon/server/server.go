@@ -40,6 +40,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /sessions/{id}", s.handleGetSession)
 	mux.HandleFunc("GET /sessions/{id}/context", s.handleGetContext)
 	mux.HandleFunc("POST /sessions/{id}/messages", s.handleSendMessage)
+	mux.HandleFunc("POST /sessions/{id}/answer", s.handleAnswerQuestion)
+	mux.HandleFunc("GET /tools", s.handleListTools)
 	return s.recoverMiddleware(s.logMiddleware(mux))
 }
 
@@ -190,6 +192,8 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 			writeEvent(map[string]any{"type": "tool_result", "name": evt.ToolName, "result": evt.ToolResult, "ok": evt.ToolOK})
 		case agent.EventNotice:
 			writeEvent(map[string]any{"type": "notice", "text": evt.Notice})
+		case agent.EventQuestion:
+			writeEvent(map[string]any{"type": "question", "question_id": evt.QuestionID, "question": evt.Question, "options": evt.Options})
 		}
 	}
 
@@ -212,6 +216,42 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 	})
 	fmt.Fprint(w, "data: [DONE]\n\n")
 	flusher.Flush()
+}
+
+type answerQuestionRequest struct {
+	QuestionID string `json:"question_id"`
+	Answer     string `json:"answer"`
+}
+
+// handleAnswerQuestion delivers a pending ask_question's answer — the
+// {id} path segment is the session (kept for REST consistency and so
+// nothing else needs a separate top-level route) but the lookup itself is
+// by question_id, which is already globally unique.
+func (s *Server) handleAnswerQuestion(w http.ResponseWriter, r *http.Request) {
+	var req answerQuestionRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
+		return
+	}
+	if req.QuestionID == "" {
+		writeError(w, http.StatusBadRequest, "question_id must not be empty")
+		return
+	}
+	if !s.agent.AnswerQuestion(req.QuestionID, req.Answer) {
+		writeError(w, http.StatusNotFound, "no pending question with that id")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// handleListTools reports every registered tool and skill, enabled or
+// not — the CLI's tools/skills toggle screen builds its list from this
+// rather than hardcoding a duplicate of the daemon's own registry.
+func (s *Server) handleListTools(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{
+		"tools":  s.agent.Tools(),
+		"skills": s.agent.Skills(),
+	})
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

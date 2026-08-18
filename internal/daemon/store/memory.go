@@ -40,6 +40,69 @@ func (s *Store) WriteMemoryEntry(scope, content string, pinned bool) (MemoryEntr
 	return MemoryEntry{ID: id, Scope: scope, Content: content, Pinned: pinned, CreatedAt: now, UpdatedAt: now}, nil
 }
 
+// UpdateMemoryEntry replaces one entry's content in place, keeping its ID
+// and created_at — the "replace" half of the add/replace/remove trio the
+// agent needs to consolidate memory when it hits the size cap.
+func (s *Store) UpdateMemoryEntry(id int64, content string) error {
+	res, err := s.db.Exec(`UPDATE memory_entries SET content = ?, updated_at = ? WHERE id = ?`, content, time.Now().Unix(), id)
+	if err != nil {
+		return fmt.Errorf("updating memory entry: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("checking updated memory entry: %w", err)
+	}
+	if n == 0 {
+		return fmt.Errorf("no memory entry with id %d", id)
+	}
+	return nil
+}
+
+// DeleteMemoryEntry removes one entry by ID.
+func (s *Store) DeleteMemoryEntry(id int64) error {
+	res, err := s.db.Exec(`DELETE FROM memory_entries WHERE id = ?`, id)
+	if err != nil {
+		return fmt.Errorf("deleting memory entry: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("checking deleted memory entry: %w", err)
+	}
+	if n == 0 {
+		return fmt.Errorf("no memory entry with id %d", id)
+	}
+	return nil
+}
+
+// ScopeMemory returns every entry in one scope, pinned first then newest,
+// with no limit — used to enforce the per-scope size cap and to show the
+// agent everything it has to work with when consolidating.
+func (s *Store) ScopeMemory(scope string) ([]MemoryEntry, error) {
+	rows, err := s.db.Query(
+		`SELECT id, scope, content, pinned, created_at, updated_at FROM memory_entries
+		 WHERE scope = ? ORDER BY pinned DESC, updated_at DESC`,
+		scope,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("listing scope memory: %w", err)
+	}
+	defer rows.Close()
+	return scanMemoryRows(rows)
+}
+
+// ScopeMemorySize is the total character count of a scope's memory —
+// what the cap is enforced against.
+func (s *Store) ScopeMemorySize(scope string) (int, error) {
+	var total *int
+	if err := s.db.QueryRow(`SELECT SUM(LENGTH(content)) FROM memory_entries WHERE scope = ?`, scope).Scan(&total); err != nil {
+		return 0, fmt.Errorf("measuring scope memory: %w", err)
+	}
+	if total == nil {
+		return 0, nil // no rows in this scope yet
+	}
+	return *total, nil
+}
+
 // RecentMemory returns pinned entries first, then the most recently
 // updated ones, across the given scopes (typically the current workspace
 // plus GlobalScope) — this is what gets injected automatically at the

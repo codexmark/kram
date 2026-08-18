@@ -22,10 +22,12 @@ func (m *Model) refreshTranscript() {
 		case "user":
 			// User text is never run through the markdown renderer — it's
 			// what was typed, not a formatted reply, and echoing it back
-			// reformatted would be surprising. Anchored to the right, the
-			// basic chat convention this was missing — the agent's replies
-			// stay on the left below.
-			b.WriteString(m.renderUserBubble(msg.Content))
+			// reformatted would be surprising. Single left-aligned column,
+			// same as the agent's replies below — the two-sided bubble
+			// layout (you right, kram left) tested worse for reading than
+			// a plain tag-prefixed transcript, the format most terminal
+			// coding agents converged on.
+			b.WriteString(styleYouTag.Render("you") + "  " + styleUserBody.Render(msg.Content))
 		default:
 			for _, act := range msg.ToolActivity {
 				b.WriteString(m.renderToolActivity(act) + "\n")
@@ -86,54 +88,6 @@ func (m Model) thinkingLine() string {
 		styleMeta.Render(fmt.Sprintf("pensando (%s)", elapsed))
 }
 
-// renderUserBubble right-aligns a user message — the "you" tag and
-// content wrapped to a bubble narrower than the full width, then the
-// whole block pushed flush right, so the transcript reads as a normal
-// two-sided chat (you on the right, kram on the left) instead of
-// everything stacked in one left-aligned column.
-//
-// Padding is computed by hand, per line, rather than leaning on lipgloss's
-// Style.Width+Align: that combination pads a block out to a fixed box
-// only when its content actually reaches that width on some line — a
-// short message (or the lone "you" tag line) has no line that long, so
-// nothing pads it and it renders hugging the left edge instead. Measuring
-// each line's real rendered width and left-padding it individually always
-// anchors the block flush right, regardless of content length.
-func (m Model) renderUserBubble(content string) string {
-	bubbleWidth := m.viewport.Width - 10
-	if bubbleWidth > 64 {
-		bubbleWidth = 64
-	}
-	if bubbleWidth < 20 {
-		bubbleWidth = m.viewport.Width
-	}
-
-	// Width() wraps long lines at bubbleWidth, but it also pads short
-	// ones out to bubbleWidth with trailing spaces (left-aligned inside
-	// that box by default) — trimmed back off below, since otherwise the
-	// per-line pad computed next would measure the padded box width
-	// instead of the real content, and the visible text would sit at the
-	// box's left edge rather than flush against the transcript's right
-	// edge.
-	wrapped := lipgloss.NewStyle().Width(bubbleWidth).Render(styleBody.Render(content))
-	rawLines := strings.Split(wrapped, "\n")
-	lines := make([]string, 0, len(rawLines)+1)
-	lines = append(lines, styleYouTag.Render("you"))
-	for _, l := range rawLines {
-		lines = append(lines, strings.TrimRight(l, " "))
-	}
-
-	rightAligned := make([]string, len(lines))
-	for i, line := range lines {
-		pad := m.viewport.Width - lipgloss.Width(line)
-		if pad < 0 {
-			pad = 0
-		}
-		rightAligned[i] = strings.Repeat(" ", pad) + line
-	}
-	return strings.Join(rightAligned, "\n")
-}
-
 func (m Model) View() string {
 	if !m.ready {
 		return "iniciando…"
@@ -141,11 +95,21 @@ func (m Model) View() string {
 	if m.phase == phasePicker {
 		return m.renderPicker()
 	}
+	if m.phase == phaseAccounts {
+		return m.renderAccounts()
+	}
+	if m.phase == phaseTools {
+		return m.renderToolsToggle()
+	}
 
 	var b strings.Builder
 	b.WriteString(m.viewport.View())
 	b.WriteString("\n")
-	b.WriteString(m.input.View())
+	if m.question != nil {
+		b.WriteString(m.renderQuestion())
+	} else {
+		b.WriteString(m.input.View())
+	}
 	b.WriteString("\n")
 
 	switch m.active {

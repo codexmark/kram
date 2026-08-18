@@ -6,3 +6,6 @@
 
 # Disposable local dev tooling — never committed.
 /devtools/
+
+# Per-workspace daemon state (sessions DB, logs, todos).
+/.kram/

@@ -5,72 +5,84 @@ import (
 	"os"
 
 	"github.com/codexmark/kram-gateway/internal/config"
+	"github.com/codexmark/kram-gateway/internal/credentials"
+	"github.com/codexmark/kram-gateway/internal/providercatalog"
 )
 
-// knownProvider is one entry in the auto-detection table: if envVar is
-// set, this provider is added to the auto-built combo pinned to
-// defaultModel.
-type knownProvider struct {
-	id             string
-	kind           string
-	baseURL        string
-	envVar         string
-	defaultModel   string
-	supportsImages bool
-	supportsTools  bool
-}
-
-const openRouterBaseURL = "https://openrouter.ai/api/v1"
-
-var knownProviders = []knownProvider{
-	{id: "anthropic", kind: "anthropic", envVar: "ANTHROPIC_API_KEY", defaultModel: "claude-sonnet-4-5", supportsImages: true, supportsTools: true},
-	{id: "openai", kind: "openai-compat", baseURL: "https://api.openai.com/v1", envVar: "OPENAI_API_KEY", defaultModel: "gpt-5", supportsImages: true, supportsTools: true},
-	{id: "gemini", kind: "gemini", envVar: "GEMINI_API_KEY", defaultModel: "gemini-2.5-pro", supportsImages: true, supportsTools: true},
-	// OpenRouter free-tier models: several entries sharing one key so they
-	// form a real fallback chain (a $0 combo) rather than a single pinned
-	// model. Free-model slugs rotate on OpenRouter's end (verified against
-	// GET https://openrouter.ai/api/v1/models on 2026-08-17 — the previous
-	// picks here had already been retired) — check
-	// https://openrouter.ai/models?max_price=0 and override via -config if
-	// one of these has been retired too. Only models whose
-	// supported_parameters include "tools" were picked. Conservatively
-	// marked as not supporting images: capability varies per free model
-	// and Kram never assumes.
-	{id: "openrouter-gptoss", kind: "openai-compat", baseURL: openRouterBaseURL, envVar: "OPENROUTER_API_KEY", defaultModel: "openai/gpt-oss-20b:free", supportsTools: true},
-	{id: "openrouter-gemma", kind: "openai-compat", baseURL: openRouterBaseURL, envVar: "OPENROUTER_API_KEY", defaultModel: "google/gemma-4-31b-it:free", supportsTools: true},
-	{id: "openrouter-nemotron", kind: "openai-compat", baseURL: openRouterBaseURL, envVar: "OPENROUTER_API_KEY", defaultModel: "nvidia/nemotron-3-super-120b-a12b:free", supportsTools: true},
+// loadStoredCredentials exports every key saved via the CLI's accounts
+// screen into this process's environment, skipping any env var that's
+// already set — a real exported env var always takes priority over a
+// stored one, so this only fills gaps. Best-effort: a missing or
+// unreadable credentials file just means nothing gets filled in, not a
+// startup failure — the shell-env path still works exactly as before this
+// existed.
+func loadStoredCredentials() {
+	store, err := credentials.Load()
+	if err != nil {
+		return
+	}
+	for envVar, key := range store.All() {
+		if os.Getenv(envVar) == "" && key != "" {
+			os.Setenv(envVar, key)
+		}
+	}
 }
 
 // detectGatewayConfig builds a single-combo gateway config from whichever
-// knownProviders have their API-key env var set. Order is deterministic
-// (the table order above), which also becomes the round-robin combo order.
+// providercatalog.Providers have their API-key env var set (a real env
+// var, or a key loaded from the local credentials store and os.Setenv'd
+// by loadStoredCredentials in main.go before this runs). Order is
+// deterministic (the catalog's order), which also becomes the round-robin
+// combo order.
 func detectGatewayConfig() (*config.Config, error) {
 	var providers []config.ProviderConfig
 	var ids []string
 
-	for _, kp := range knownProviders {
-		key := os.Getenv(kp.envVar)
+	havePaid := false
+	for _, p := range providercatalog.Providers {
+		key := os.Getenv(p.EnvVar)
 		if key == "" {
 			continue
 		}
 		providers = append(providers, config.ProviderConfig{
-			ID: kp.id, Kind: kp.kind, BaseURL: kp.baseURL, APIKeyEnv: kp.envVar,
-			Model: kp.defaultModel, SupportsImages: kp.supportsImages, SupportsTools: kp.supportsTools,
+			ID: p.ID, Kind: p.Kind, BaseURL: p.BaseURL, APIKeyEnv: p.EnvVar,
+			Model: p.DefaultModel, SupportsImages: p.SupportsImages, SupportsTools: p.SupportsTools,
 		})
-		ids = append(ids, kp.id)
+		ids = append(ids, p.ID)
+		if !p.FreeTier {
+			havePaid = true
+		}
 	}
 
 	if len(providers) == 0 {
-		envVars := make([]string, len(knownProviders))
-		for i, kp := range knownProviders {
-			envVars[i] = kp.envVar
-		}
-		return nil, fmt.Errorf("no LLM provider configured: export one of %v, or pass -config with a gateway config.yaml", envVars)
+		return nil, fmt.Errorf("no LLM provider configured: export one of %v, pass -config with a gateway config.yaml, or add a key from the accounts screen (press \"a\" on the session picker)", providercatalog.EnvVars())
 	}
 
 	return &config.Config{
 		Providers:    providers,
-		Combos:       []config.ComboConfig{{ID: "default", Strategy: "round-robin", Providers: ids}},
+		Combos:       []config.ComboConfig{{ID: "default", Strategy: autoStrategy(havePaid), Providers: ids}},
 		DefaultCombo: "default",
 	}, nil
+}
+
+// autoStrategy picks how the auto-built combo routes, and the two cases
+// genuinely want opposite things:
+//
+// With a paid provider present, the catalog order is a *priority* order —
+// it leads the chain — and the cheapest thing to do is simply keep using
+// it. Leaving the strategy empty means no rotation at all, so the same
+// provider serves every call in a turn and its server-side prompt cache
+// stays warm across the tool round-trips, where an agent resends a large
+// near-identical prefix over and over. Rotating there would re-pay full
+// price for the same prefix on every round-trip.
+//
+// With only free tiers, the providers are interchangeable peers and the
+// binding constraint is not cost but rate limits, so round-robin's
+// proactive spreading is worth more than the cache — you can't benefit
+// from a warm cache on a provider that's answering 429.
+func autoStrategy(havePaid bool) string {
+	if havePaid {
+		return ""
+	}
+	return "round-robin"
 }

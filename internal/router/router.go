@@ -94,11 +94,31 @@ func (r *Router) Combos() []ComboInfo {
 	return out
 }
 
-// Attempts returns the ordered list of providers to try for a combo: the
-// round-robin strategy rotates which healthy provider leads, and the rest
-// of the combo's declared order follows as the fallback chain. Providers
+// StrategyPrefixAffinity routes by a hash of the request's stable prefix
+// instead of rotating per request.
+//
+// Round-robin has a cost that isn't obvious until you look for it: every
+// major provider caches prompt prefixes server-side and bills cached
+// input at a fraction of the normal rate, and that cache is per-provider.
+// An agent turn resends a large, near-identical prefix (system prompt,
+// tool definitions, conversation so far) on every tool round-trip — so
+// rotating providers between those calls throws the cache away each time
+// and pays full price for the same tokens, repeatedly. Pinning a given
+// conversation to one provider keeps that cache warm.
+//
+// The fallback chain is unaffected: a rate-limited or failing provider
+// still trips its breaker and drops out of the healthy set, at which
+// point affinity simply resolves to a different provider. Round-robin
+// spreads load *proactively*, which is the better choice when every
+// provider in the chain is a tight free tier; affinity is better
+// whenever cache economics dominate.
+const StrategyPrefixAffinity = "prefix-affinity"
+
+// Attempts returns the ordered list of providers to try for a combo.
+// affinityKey identifies the caller's stable prompt prefix (empty is
+// fine — it just degrades affinity to the declared order). Providers
 // whose circuit breaker is open are skipped entirely.
-func (r *Router) Attempts(comboID string) ([]provider.Provider, error) {
+func (r *Router) Attempts(comboID, affinityKey string) ([]provider.Provider, error) {
 	r.mu.RLock()
 	c, ok := r.combos[comboID]
 	r.mu.RUnlock()
@@ -116,11 +136,38 @@ func (r *Router) Attempts(comboID string) ([]provider.Provider, error) {
 		return nil, fmt.Errorf("combo %q: all providers are circuit-open", comboID)
 	}
 
-	if c.strategy == "round-robin" && len(healthy) > 1 {
-		n := atomic.AddUint64(&c.cursor, 1)
-		offset := int(n % uint64(len(healthy)))
-		healthy = append(healthy[offset:], healthy[:offset]...)
+	if len(healthy) > 1 {
+		switch c.strategy {
+		case "round-robin":
+			n := atomic.AddUint64(&c.cursor, 1)
+			offset := int(n % uint64(len(healthy)))
+			healthy = append(healthy[offset:], healthy[:offset]...)
+		case StrategyPrefixAffinity:
+			// Hashing over the *healthy* set, not the configured one, is
+			// deliberate: it keeps the choice stable for as long as the
+			// same providers are up, and reshuffles only when one drops
+			// out or comes back — which is exactly when the cache was
+			// going to be lost anyway.
+			offset := int(hashString(affinityKey) % uint64(len(healthy)))
+			healthy = append(healthy[offset:], healthy[:offset]...)
+		}
 	}
 
 	return healthy, nil
+}
+
+// hashString is FNV-1a, inlined rather than pulled from hash/fnv because
+// all this needs is a stable bucket index — not a hash.Hash, not
+// collision resistance.
+func hashString(s string) uint64 {
+	const (
+		offset64 = 14695981039346656037
+		prime64  = 1099511628211
+	)
+	h := uint64(offset64)
+	for i := 0; i < len(s); i++ {
+		h ^= uint64(s[i])
+		h *= prime64
+	}
+	return h
 }

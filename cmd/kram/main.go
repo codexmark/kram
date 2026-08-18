@@ -81,6 +81,13 @@ func run(opts runOptions) error {
 	defer logFile.Close()
 	logger := slog.New(slog.NewTextHandler(logFile, nil))
 
+	// Load any keys saved via the CLI's accounts screen and export them
+	// into this process's own environment before autodetection runs — a
+	// real, already-exported env var always wins (checked first, never
+	// overwritten), so this only fills gaps rather than overriding what
+	// the user explicitly set in their shell.
+	loadStoredCredentials()
+
 	gwCfg, err := loadOrDetectGatewayConfig(opts.gatewayConfigPath, opts.gatewayPort)
 	if err != nil {
 		return err
@@ -142,7 +149,7 @@ func run(opts runOptions) error {
 		sid = sess.ID
 	}
 
-	m := app.New(daemonC, gatewayC, sid, opts.combo)
+	m := app.New(daemonC, gatewayC, sid, opts.combo, absWorkspace)
 	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
 	_, cliErr := p.Run()
 

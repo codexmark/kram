@@ -20,18 +20,24 @@ import (
 
 	"github.com/codexmark/kram-gateway/internal/cli/daemonclient"
 	"github.com/codexmark/kram-gateway/internal/cli/statusclient"
+	"github.com/codexmark/kram-gateway/internal/credentials"
 	"github.com/codexmark/kram-gateway/internal/openai"
+	"github.com/codexmark/kram-gateway/internal/toolsettings"
 )
 
 const footerHeight = 2 // the pulse bar is always exactly two lines
 
 // phase tracks which screen the program is showing: the session picker
-// (when launched without an explicit -session) or the chat itself.
+// (when launched without an explicit -session), the chat itself, or the
+// accounts screen (add/remove provider API keys — reachable from the
+// picker with "a").
 type phase int
 
 const (
 	phasePicker phase = iota
 	phaseChat
+	phaseAccounts
+	phaseTools
 )
 
 // panel identifies which (if any) of the two on-demand panels is open.
@@ -60,9 +66,10 @@ type chatMessage struct {
 
 // Model is the CLI's full Bubble Tea state.
 type Model struct {
-	daemon  *daemonclient.Client
-	gateway *statusclient.Client
-	combo   string // combo/model name the daemon sends messages to
+	daemon    *daemonclient.Client
+	gateway   *statusclient.Client
+	combo     string // combo/model name the daemon sends messages to
+	workspace string // project root, shown on the picker banner; "" if unknown
 
 	sessionID string
 
@@ -110,12 +117,37 @@ type Model struct {
 	newSessionText textinput.Model // title prompt, only shown after picking "new session"
 	titling        bool
 
+	// accounts screen state — add/remove provider API keys without
+	// leaving the CLI. credStore is nil only if the local credentials
+	// file couldn't even be opened (rare; every screen guards for it).
+	credStore            *credentials.Store
+	accountsCursor       int
+	accountsEditing      bool
+	accountsKeyInput     textinput.Model
+	accountsStatus       string
+	accountsOAuthPending bool
+	accountsOAuthURL     string
+
+	// tools/skills toggle screen state.
+	toolSettings *toolsettings.Store
+	toolsList    []daemonclient.ToolInfo
+	skillsList   []daemonclient.Skill
+	toolsCursor  int
+	toolsLoading bool
+	toolsErr     error
+	toolsStatus  string
+
+	// question is set while an ask_question tool call is pausing the
+	// current turn — see ask.go. Nil the rest of the time.
+	question      *pendingQuestion
+	questionInput textinput.Model
+
 	err error
 }
 
 // New builds the initial model. If sessionID is empty, the program opens
 // on the session picker instead of going straight to chat.
-func New(daemon *daemonclient.Client, gateway *statusclient.Client, sessionID, combo string) Model {
+func New(daemon *daemonclient.Client, gateway *statusclient.Client, sessionID, combo, workspace string) Model {
 	ti := textinput.New()
 	ti.Placeholder = "mensagem…"
 	ti.Focus()
@@ -127,13 +159,29 @@ func New(daemon *daemonclient.Client, gateway *statusclient.Client, sessionID, c
 	titleInput.CharLimit = 100
 	titleInput.Prompt = "› "
 
+	keyInput := textinput.New()
+	keyInput.Placeholder = "sk-…"
+	keyInput.CharLimit = 400
+	keyInput.Prompt = "› "
+	keyInput.EchoMode = textinput.EchoPassword
+	keyInput.EchoCharacter = '•'
+
+	answerInput := textinput.New()
+	answerInput.Placeholder = "resposta…"
+	answerInput.CharLimit = 2000
+	answerInput.Prompt = "› "
+
 	sp := spinner.New()
 	sp.Spinner = spinner.Dot
 
+	credStore, _ := credentials.Load()     // nil on failure; every use site guards for it
+	toolSettings, _ := toolsettings.Load() // same
+
 	m := Model{
-		daemon: daemon, gateway: gateway, combo: combo, sessionID: sessionID,
-		input: ti, newSessionText: titleInput,
+		daemon: daemon, gateway: gateway, combo: combo, workspace: workspace, sessionID: sessionID,
+		input: ti, newSessionText: titleInput, accountsKeyInput: keyInput, questionInput: answerInput,
 		viewport: viewport.New(80, 20), spin: sp,
+		credStore: credStore, toolSettings: toolSettings,
 	}
 	if sessionID == "" {
 		m.phase = phasePicker
@@ -239,6 +287,47 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case oauthURLMsg:
+		if msg.err != nil {
+			m.accountsOAuthPending = false
+			m.accountsStatus = "erro ao iniciar oauth: " + msg.err.Error()
+			return m, nil
+		}
+		m.accountsOAuthURL = msg.url
+		openBrowser(msg.url)
+		return m, waitOpenRouterOAuthCmd(msg.wait)
+
+	case oauthResultMsg:
+		m.accountsOAuthPending = false
+		if msg.err != nil {
+			m.accountsStatus = "oauth falhou: " + msg.err.Error()
+			return m, nil
+		}
+		if m.credStore != nil {
+			if err := m.credStore.Set("OPENROUTER_API_KEY", msg.key); err != nil {
+				m.accountsStatus = "erro ao salvar: " + err.Error()
+			} else {
+				m.accountsStatus = "OpenRouter conectado — reinicie o kram pra usar."
+			}
+		}
+		return m, nil
+
+	case toolsListMsg:
+		m.toolsLoading = false
+		m.toolsErr = msg.err
+		if msg.err == nil {
+			m.toolsList = msg.tools
+			m.skillsList = msg.skills
+		}
+		return m, nil
+
+	case answerSentMsg:
+		if msg.err != nil {
+			m.err = msg.err
+			m.refreshTranscript()
+		}
+		return m, nil
+
 	case animTickMsg:
 		if !m.waiting {
 			return m, nil
@@ -265,6 +354,15 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	if m.phase == phasePicker {
 		return m.handlePickerKey(msg)
+	}
+	if m.phase == phaseAccounts {
+		return m.handleAccountsKey(msg)
+	}
+	if m.phase == phaseTools {
+		return m.handleToolsKey(msg)
+	}
+	if m.question != nil {
+		return m.handleQuestionKey(msg)
 	}
 
 	switch msg.String() {
@@ -337,6 +435,15 @@ func (m Model) handlePickerKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	itemCount := len(m.sessionList) + 1 // +1 for the "new session" row
 	switch msg.String() {
+	case "a":
+		m.phase = phaseAccounts
+		m.accountsStatus = ""
+		return m, nil
+	case "f":
+		m.phase = phaseTools
+		m.toolsStatus = ""
+		m.toolsLoading = true
+		return m, fetchToolsCmd(m.daemon)
 	case "up":
 		if m.pickerCursor > 0 {
 			m.pickerCursor--
@@ -498,6 +605,16 @@ func (m Model) handleStreamEvent(msg streamEventMsg) (tea.Model, tea.Cmd) {
 		if lm := last(); lm != nil {
 			lm.Notices = append(lm.Notices, msg.event.Text)
 		}
+		m.refreshTranscript()
+
+	case "question":
+		// The turn is genuinely paused server-side until answered —
+		// still read on from the stream below (readNextEventCmd), that
+		// read just blocks harmlessly until AnswerQuestion unblocks the
+		// daemon and it produces the next event.
+		m.question = &pendingQuestion{id: msg.event.QuestionID, question: msg.event.Question, options: msg.event.Options}
+		m.questionInput.SetValue("")
+		m.questionInput.Focus()
 		m.refreshTranscript()
 
 	case "done":
