@@ -3,7 +3,10 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -104,6 +107,46 @@ func TestProcessOutputUnknownID(t *testing.T) {
 	}
 }
 
+// TestProcessKillTerminatesChildProcessToo is the critical regression
+// test: process_kill must terminate the whole process tree a background
+// shell command started, not just the shell process itself. Before the
+// shell runner introduced Setpgid+process-group kill, process_kill only
+// ever called cmd.Process.Kill() — which kills the "sh -c ..." process
+// but leaves any child it forked (here, a backgrounded `sleep`) running
+// as an orphan.
+func TestProcessKillTerminatesChildProcessToo(t *testing.T) {
+	pm := newProcessManager(t.TempDir())
+	run := newRunBackground(pm)
+	kill := newProcessKill(pm)
+
+	childPidFile := t.TempDir() + "/child.pid"
+	// The parent shell backgrounds a long-lived child and waits on it —
+	// exactly the shape of a real "start a dev server" command, whose
+	// own runtime (node, python, etc.) is a child the shell forked.
+	command := "sleep 100 & echo $! > " + childPidFile + "; wait"
+	_, err := run.Execute(context.Background(), mustJSON(t, runBackgroundArgs{Command: command}))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	childPid := readPidFile(t, childPidFile)
+	if !pidAlive(childPid) {
+		t.Fatalf("child pid %d should be alive before kill", childPid)
+	}
+
+	out, err := kill.Execute(context.Background(), mustJSON(t, processIDArgs{ID: "bg1"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "killed") {
+		t.Fatalf("expected a kill confirmation, got %q", out)
+	}
+
+	waitUntil(t, 6*time.Second, func() bool {
+		return !pidAlive(childPid)
+	})
+}
+
 func TestKillAllStopsEverything(t *testing.T) {
 	pm := newProcessManager(t.TempDir())
 	run := newRunBackground(pm)
@@ -145,4 +188,33 @@ func mustJSON(t *testing.T, v any) json.RawMessage {
 		t.Fatal(err)
 	}
 	return data
+}
+
+// readPidFile waits briefly for a PID file a background shell command
+// writes asynchronously (via `echo $!`) and parses it — the write can
+// lag slightly behind run_background's own "started" response.
+func readPidFile(t *testing.T, path string) int {
+	t.Helper()
+	var data []byte
+	waitUntil(t, 2*time.Second, func() bool {
+		b, err := os.ReadFile(path)
+		if err != nil || len(b) == 0 {
+			return false
+		}
+		data = b
+		return true
+	})
+	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil {
+		t.Fatalf("parsing pid file %s: %v", path, err)
+	}
+	return pid
+}
+
+// pidAlive reports whether a process with the given pid still exists,
+// using signal 0 (POSIX-guaranteed to do existence/permission checking
+// only — no signal actually delivered). This is the deterministic check
+// the mission calls for in place of scraping `ps` output.
+func pidAlive(pid int) bool {
+	return syscall.Kill(pid, 0) == nil
 }
