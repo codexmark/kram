@@ -415,6 +415,284 @@ peers where stability matters more than spreading. Its key deliberately
 excludes the growing tool-call tail, which would otherwise produce a
 different key on every round-trip and defeat the purpose.
 
+### Combos v2: strategy, attempt execution, and response gate are three different concerns
+
+The router used to answer one question — "which providers, in what order"
+— and `internal/server/chat.go` did everything else inline: call each in
+order, treat any non-error response as good, done. That conflated three
+genuinely different decisions into one loop:
+
+1. **Routing strategy** (`internal/router`'s `Strategy` interface):
+   decides who to try and in what order.
+2. **Attempt execution** (`chat.go`'s `handleChatCompletions`): actually
+   calls each ranked candidate until one is accepted.
+3. **Response gate** (`gate.go`, `stream.go`): decides whether a
+   technically-successful response is actually good enough to end the
+   fallback chain.
+
+**Why split them:** the old loop couldn't tell "HTTP 500" apart from
+"HTTP 200 with an empty body" — both just meant "try the next one." Once
+gating became its own concern (see "Response gate" below), it had to stop
+living inside the same loop that decides ordering, or every new strategy
+would need to know about gating too.
+
+### `Strategy.Rank` returns a full ranking, never just a winner
+
+```go
+type Strategy interface {
+    Name() string
+    Rank(ctx RouteContext, candidates []Candidate) []RankedCandidate
+}
+```
+
+**Why a ranking and not a single pick:** the fallback chain needs an
+ordered list to fall through when the leader fails or gets rejected — a
+strategy that only picked a winner would force the executor to re-ask it
+"okay, now who's next" after every failure, which is worse for stateful
+strategies (round-robin's cursor, weighted's sticky pin) than computing
+the whole order once. It also directly enables explainability (see "UI
+route bar" below): the CLI can show `gemini .842, openai .816` for
+candidates that were never even attempted, because the full ranking — not
+just the one that won — is already sitting in the response.
+
+### Package layout: one package, many files — not `router/strategy`, `router/scoring`, `router/acceptance` subpackages
+
+`internal/router` has ~15 files (`router.go`, `candidate.go`,
+`context.go`, `trace.go`, `strategy.go`, `priority.go`, `roundrobin.go`,
+`affinity.go`, `weighted.go`, `factors.go`, `normalize.go`, `presets.go`,
+`sticky.go`, `lkgp.go`, `p2c.go`, `gate.go`, `stream.go`) but is still one
+package.
+
+**Alternative considered:** subpackages (`router/strategy`,
+`router/scoring`, `router/acceptance`) mirroring the shape a design
+sketch for this suggested.
+
+**Why one package:** `Strategy`, `Candidate`, `RouteContext`, and
+`RankedCandidate` all need to be visible both to the parent `Router` (to
+construct and call strategies) and to every strategy implementation (to
+be ranked). Splitting into subpackages that both need those types creates
+a straightforward import cycle — the standard fix is a driver-registration
+pattern (`database/sql` + blank-imported drivers), which trades one file
+count problem for a different one: now the strategy names have to be
+wired up via `init()` side effects and a blank import somewhere, which is
+more machinery for a package this size to carry. Go's own standard
+library organizes large single packages into many small files
+constantly (`net/http` is ~40 files, one package) — that's the same move
+here, and it keeps "small router.go" true without inventing an
+abstraction boundary the code doesn't actually need yet.
+
+### Strategies: priority, round-robin, prefix-affinity, smart/quality/fast/cheap/reliable (one weighted engine), lkgp, p2c, weighted
+
+`""` and `"priority"` are aliases for the same declared-order strategy —
+preserving the exact v0 default. `round-robin` and `prefix-affinity` are
+the same logic as before, ported to the `Strategy` interface unchanged.
+`smart`, `quality`, `fast`, `cheap`, and `reliable` are five *presets* of
+weights over one `weightedStrategy` engine, not five separate
+implementations — a custom `weights:` block starts from whichever
+preset's own weights and only overrides the factors it mentions, so
+`strategy: smart` with a single custom weight still has sensible values
+for the other five. `lkgp` and `p2c` are standalone strategies for cases
+that want that specific behavior without the rest of the weighted
+machinery. An unrecognized strategy name is rejected at `Router.New` time
+(a config error, not a silent fallback) — except the empty string, which
+has always meant "declared order" and stays that way.
+
+### Six real factors, never fabricated ones
+
+`health`, `reliability`, `latency`, `quality`, `cache_affinity`,
+`priority` — each backed by something Kram actually measures or an
+explicit operator setting, never invented:
+
+- **health** — circuit breaker state (closed vs. half-open; open is
+  already excluded before scoring runs, see "Capabilities and breaker
+  state are hard constraints" below).
+- **reliability** — `telemetry.ProviderStats.SuccessRate`, real observed
+  outcomes.
+- **latency** — `telemetry.ProviderStats.AvgLatencyMS`, normalized
+  *relative to the current candidate set* (fastest among those being
+  ranked scores 1.0, slowest scores 0.0) rather than against a fixed
+  millisecond threshold, since there's no universal "good" latency across
+  every provider/model a user might configure.
+- **quality** — `config.ProviderConfig.QualityHint`, an explicit,
+  optional, operator-set 0..1 value. Kram has no real per-provider
+  quality measurement of its own; this factor does not exist unless an
+  operator sets it.
+- **cache_affinity** — whether a candidate is the same provider
+  `prefix-affinity`'s own hash would pick for this request, computed with
+  the exact same `hashString` function — a real, reproducible signal, not
+  an estimated cache-hit rate no one actually has.
+- **priority** — declared position in the combo, linearly decaying from
+  first to last.
+
+**No-data policy:** a factor with no evidence for a candidate (zero
+requests yet, no quality hint set) scores exactly 0.5 — neutral, neither
+favored nor punished for being unproven. This is one fixed rule applied
+everywhere, not a per-factor special case, so an untested provider
+competes fairly on whatever factors *do* have data instead of losing by
+default.
+
+Weights are normalized (`normalizeWeights`) to sum to 1 regardless of
+what scale they're written in — `{health: 30, reliability: 20, ...}`
+summing to 100 works exactly like fractions summing to 1. All-zero or
+negative-weight input falls back to an equal split across all six
+factors rather than dividing by zero — this is what keeps a malformed
+`weights:` block from ever producing NaN or a score that silently favors
+nothing.
+
+### Smart Sticky: a hard preference within one run, not a nudge
+
+The weighted strategy family (not priority/round-robin/prefix-affinity/
+lkgp/p2c) can pin a run to its winning provider across tool round-trips.
+"Run" is identified by `AffinityKey` — the same stable system+first-user-
+message hash `prefix-affinity` already used, moved from
+`server/chat.go` into the router package since sticky needs it too. While
+the pinned provider is still present in the eligible candidate set (not
+circuit-open, still capability-compatible), it leads the ranking
+regardless of score; only losing eligibility, or the ResponseGate/
+StreamGate rejecting its response, moves the pin — and moving it means
+whoever wins the retried request becomes the new pin, via
+`Router.RecordOutcome`, called by the attempt executor once a request
+actually finishes.
+
+**Why this matters for Kram specifically:** a single user turn can be
+many model calls (read a file, grep, edit, run tests, answer) — rotating
+providers on every one of those tool round-trips throws away prompt cache
+warmth, changes latency/behavior unpredictably mid-task, and re-pays full
+price for a near-identical prefix repeatedly. Sticky trades a small amount
+of provider diversity for exactly the economics/predictability an agent
+loop's tool round-trips want. Default `true` for the weighted family
+(configurable per combo via `strategy_options.sticky`); the free-tier
+example config explicitly sets it `false`, since spreading load across
+rate-limited peers matters more there than cache warmth.
+
+Sticky's own state (`stickyStore`) is a bounded, in-memory map
+(`stickyMaxEntries = 256`, oldest-evicted-on-overflow) — no TTL sweeper
+goroutine. A pin for an abandoned session costs a little memory, never
+correctness, and isn't worth a background cleanup process at this scale.
+
+### LKGP is a modifier first, a strategy second
+
+"Last known good provider" is implemented once (`lkgpStore`, in-memory,
+per combo, gateway-process lifetime — deliberately not persisted to disk,
+since the gateway normally starts and stops together with the rest of
+Kram) and used two ways: as a standalone `lkgp` strategy (priority order,
+whoever last won moves to the front), and as an additive score boost
+inside the weighted engine (`strategy_options.lkgp_boost`, default 0.10)
+on top of whatever the six factors already computed. A circuit-open LKGP
+can never win from either form — it's excluded from the candidate set
+entirely before any strategy, including LKGP's own ranking, ever runs
+(see "hard constraints" below).
+
+### P2C: two random samples and a cheap comparison, not a load balancer
+
+`p2cStrategy` samples two eligible candidates uniformly at random,
+compares them with a small health/reliability score (not the full six-
+factor engine — the entire point of Power of Two Choices is being cheap),
+and promotes the better one to lead; everything else stays in declared-
+priority order behind it. This is a well-known technique for avoiding the
+herd effect of "always pick the single best" at a fraction of full
+scoring's cost — not a distributed load balancer, and not meant to become
+one.
+
+### Exploration: a small, capped chance to not pick the leader
+
+`strategy_options.exploration` (default 0.03) gives a uniformly random
+eligible candidate a chance to lead instead of the top-ranked one, so
+providers that would otherwise never win don't go forever without fresh
+telemetry. It never overrides a sticky pin (checked first), never fires
+with fewer than two candidates, and never selects a circuit-open or
+capability-incompatible candidate (both already excluded before scoring).
+Deliberately small by default — this is a safety valve against telemetry
+staleness, not a bandit algorithm.
+
+### Capabilities and breaker state are hard constraints, never scores
+
+`eligibleCandidates` filters the candidate list down to circuit-allowed,
+capability-compatible providers *before* any `Strategy.Rank` call — a
+provider without tool support for a tool-using request, or with an open
+circuit breaker, is simply absent from what a strategy ever sees, never
+merely scored low. This was a real, confirmed gap in v0: nothing
+cross-referenced `req.Tools`/image content against
+`SupportsTools()`/`SupportsImages()` at the routing layer at all before
+this. Health's *scoring* factor (see above) only ever distinguishes among
+candidates that already passed this filter — a half-open breaker scores
+lower than a closed one, but "open" never reaches scoring to begin with.
+
+### Response gate: technical validation, never a second-guess of a legitimate refusal
+
+`ResponseGate.Evaluate` runs deterministic checks — `reject_empty`,
+`require_terminal`, `min_content_length`, `forbidden_substrings` — against
+a fully-received response, entirely opt-in (an unconfigured combo accepts
+everything, exactly v0's behavior). It exists to catch empty/truncated/
+masked-error responses, never to route around a model's genuine safety or
+policy refusal: there is no "did the model say no" check anywhere in it,
+and there never should be — a refusal is normal, substantial text like
+any other answer as far as the gate is concerned.
+
+A rejection still counts as an operational failure for breaker/telemetry
+purposes (a provider that chronically returns short or empty content is
+not healthy, even though every individual HTTP call "succeeded"), but
+`AttemptInfo.Outcome` keeps `OutcomeRejected` visibly distinct from
+`OutcomeError` — an HTTP 500 and an HTTP 200-with-rejected-content are
+different findings, and the wire format says so explicitly now instead of
+collapsing both into `OK: false`.
+
+### Bounded streaming peek: fallback is still possible after `stream: true`
+
+Once a streamed response's headers are sent, no further fallback is
+possible for that request — the client is already receiving bytes.
+`router.BoundedPeek` buffers a small, bounded prefix of a candidate's
+stream (`streamPeekMaxEvents = 8` events, `streamPeekTimeout = 5s`) before
+the executor ever commits to relaying it onward, looking for a
+*meaningful* signal: a real non-empty text delta, or a terminal event
+carrying tool calls. "Received some bytes" is deliberately not sufficient
+— a role-only opening chunk or an empty delta would otherwise look like
+progress. If the peek doesn't find a meaningful signal (error, empty
+close, timeout, buffer exhausted), the attempt is treated as rejected and
+the executor moves to the next ranked candidate, exactly like a buffered
+response's gate rejection. If it does commit, every buffered event is
+replayed to the client in order before continuing to read fresh events
+from the source — the client never knows a peek happened.
+
+### `AttemptInfo` gained real fields, kept the old ones
+
+`Outcome` (`trying`/`success`/`error`/`rejected`/`skipped`), `Reason`,
+`HTTPStatus`, `Score`, `Attempt`, and `Model` are new; `Provider`, `OK`,
+and `LatencyMS` are unchanged, and `OK` still equals
+`Outcome == OutcomeSuccess` — anything that only ever read the old
+two-field shape keeps working. `HTTPStatus` comes from a new
+`provider.HTTPError` type the three adapters (anthropic, gemini,
+openai-compat) now return instead of a plain `fmt.Errorf`-wrapped string,
+so a real upstream status code survives the layers between the adapter
+and the wire response instead of only living inside an error message
+string.
+
+### `RankedProviderInfo`: every candidate's score is visible, not just who was tried
+
+`ChatCompletionResponse`/`ChatCompletionChunk` gained `Ranking
+[]RankedProviderInfo` and `Strategy string` — the *entire* ranking a
+scoring strategy produced, including candidates the fallback chain never
+actually reached, plus each one's per-factor score breakdown
+(`ScoreFactor{Name, Weight, Value, Contribution}`). This is a pure,
+lossless projection of what the router already decided
+(`router.ToRankedProviderInfo`) — nothing about a score is computed twice,
+and nothing here is invented for display purposes. This is what lets a UI
+show `gemini .842, openai .816` as context even when only the top
+candidate was ever called, and what section-19-style score-breakdown
+explainability (health 30% × 1.00 = .300, ...) reads from directly instead
+of recomputing.
+
+### `config.StrategyOptions`/`ResponseGateConfig`: fully optional, backward compatible
+
+A `combos:` entry with just `strategy: prefix-affinity` and a `providers:`
+list — the entire v0 shape — still loads and behaves identically.
+`strategy_options` and `response` are both new, both optional blocks; every
+field inside them (`Sticky *bool`, `LKGPBoost *float64`,
+`Exploration *float64`, `Weights map[string]float64`, plus the gate's four
+fields) defaults to "use the strategy's/gate's own sensible default" when
+omitted, which is what lets `strategy: smart` alone (no options block at
+all) behave well out of the box.
+
 ### Both Anthropic and Gemini adapters concatenate system messages
 
 **Found as a real bug**, while adding AGENTS.md injection: Anthropic

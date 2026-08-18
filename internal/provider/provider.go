@@ -5,6 +5,7 @@ package provider
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/codexmark/kram-gateway/internal/openai"
 )
@@ -51,3 +52,18 @@ type capabilities struct {
 
 func (c capabilities) SupportsImages() bool { return c.images }
 func (c capabilities) SupportsTools() bool  { return c.tools }
+
+// HTTPError wraps a non-2xx upstream response so a caller can report the
+// real status code instead of just a formatted string — this is what lets
+// the router's attempt executor tell an HTTP 500 apart from an HTTP 200
+// whose *content* got rejected by the ResponseGate (see
+// openai.AttemptInfo.HTTPStatus and DECISIONS.md).
+type HTTPError struct {
+	Provider   string
+	StatusCode int
+	Status     string
+}
+
+func (e *HTTPError) Error() string {
+	return fmt.Sprintf("%s: upstream returned %s", e.Provider, e.Status)
+}

@@ -123,3 +123,14 @@ func (r *Registry) IsOpen(id string) bool {
 	defer e.mu.Unlock()
 	return e.state == open
 }
+
+// IsHalfOpen reports whether a provider is currently in its half-open
+// trial window — allowed through by Allow(), but not yet proven healthy
+// again. Scoring strategies use this to treat a half-open candidate more
+// cautiously than a fully closed one, without excluding it outright.
+func (r *Registry) IsHalfOpen(id string) bool {
+	e := r.get(id)
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.state == halfOpen
+}

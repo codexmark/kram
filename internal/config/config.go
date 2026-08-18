@@ -31,6 +31,13 @@ type ProviderConfig struct {
 	// tool/function definitions. Kram's agent loop skips providers that
 	// don't when a request requires tool calling.
 	SupportsTools bool `yaml:"supports_tools,omitempty"`
+	// QualityHint is an optional, explicitly user-configured 0..1 signal
+	// feeding the "quality" scoring factor (see internal/router) —
+	// deliberately never inferred or fabricated by Kram itself, since
+	// there is no real per-provider quality measurement to derive it
+	// from. Zero means "no opinion", which the scorer treats as neutral
+	// (0.5), not "worst possible" — see DECISIONS.md.
+	QualityHint float64 `yaml:"quality_hint,omitempty"`
 }
 
 // APIKey resolves the provider's credential from its configured env var.
@@ -45,12 +52,70 @@ func (p ProviderConfig) APIKey() (string, error) {
 	return v, nil
 }
 
+// StrategyOptions tunes a combo's routing strategy — every field is
+// optional, and an absent strategy_options block (the whole existing v0
+// config shape) means "use the strategy's own defaults", never a required
+// section. Pointers distinguish "not set, use the default" from "set to
+// the zero value", which matters for Sticky in particular (explicitly
+// disabling stickiness is a real, different choice from never mentioning
+// it).
+type StrategyOptions struct {
+	// Sticky pins a run (see router.AffinityKey) to its winning provider
+	// across tool round-trips, only used by the weighted (smart/quality/
+	// fast/cheap/reliable/custom) strategy family. Defaults to true for
+	// that family if unset — see DECISIONS.md, "Sticky by default".
+	Sticky *bool `yaml:"sticky,omitempty"`
+	// LKGPBoost is the additive score bonus (0..1) a candidate gets when
+	// it's the combo's current last-known-good provider, on top of its
+	// own weighted score. 0 (the zero value) if unset would disable the
+	// boost entirely, so an unset field falls back to a small nonzero
+	// default instead — see router.defaultLKGPBoost.
+	LKGPBoost *float64 `yaml:"lkgp_boost,omitempty"`
+	// Exploration is the probability (0..1) of picking a uniformly random
+	// eligible candidate as the leader instead of the top-ranked one, so
+	// non-winning candidates still occasionally get real telemetry — see
+	// DECISIONS.md, "Exploration". Small and conservative by default.
+	Exploration *float64 `yaml:"exploration,omitempty"`
+	// Weights overrides the weighted strategy's per-factor weights
+	// (health, reliability, latency, quality, cache_affinity, priority).
+	// Any factor not mentioned keeps its preset's weight; values are
+	// normalized automatically, so they don't need to sum to any
+	// particular total.
+	Weights map[string]float64 `yaml:"weights,omitempty"`
+}
+
+// ResponseGateConfig configures deterministic, technical validation of an
+// otherwise-successful response before it's allowed to end the fallback
+// chain — see router.ResponseGate. Every field is opt-in; an absent
+// response block disables gating entirely (the v0 behavior: any
+// technically-successful response is accepted).
+type ResponseGateConfig struct {
+	// RejectEmpty rejects a response with neither text content nor tool
+	// calls.
+	RejectEmpty bool `yaml:"reject_empty,omitempty"`
+	// RequireTerminal rejects a stream that never produced a proper
+	// finish signal (e.g. a connection that was cut mid-stream) even if
+	// it carried some content.
+	RequireTerminal bool `yaml:"require_terminal,omitempty"`
+	// MinContentLength rejects a text response shorter than this many
+	// characters (tool-call-only responses are exempt — a short "ok,
+	// calling the tool now" isn't what this guards against).
+	MinContentLength int `yaml:"min_content_length,omitempty"`
+	// ForbiddenSubstrings rejects a response whose content contains any
+	// of these — for masked upstream errors that come back as HTTP 200
+	// with an error message as the body, not for filtering legitimate
+	// model output.
+	ForbiddenSubstrings []string `yaml:"forbidden_substrings,omitempty"`
+}
+
 // ComboConfig is a named, ordered fallback chain of providers plus the
 // strategy used to pick among the healthy ones.
 type ComboConfig struct {
-	ID        string   `yaml:"id"`
-	Strategy  string   `yaml:"strategy"` // "round-robin" in v0
-	Providers []string `yaml:"providers"`
+	ID              string             `yaml:"id"`
+	Strategy        string             `yaml:"strategy"` // "round-robin" in v0; see internal/router for the full set
+	Providers       []string           `yaml:"providers"`
+	StrategyOptions StrategyOptions    `yaml:"strategy_options,omitempty"`
+	Response        ResponseGateConfig `yaml:"response,omitempty"`
 }
 
 // Config is the top-level gateway configuration.

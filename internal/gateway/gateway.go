@@ -39,7 +39,7 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger) error {
 	breakers := breaker.NewRegistry()
 	tel := telemetry.New()
 
-	rt, err := router.New(cfg, providers, breakers)
+	rt, err := router.New(cfg, providers, breakers, tel)
 	if err != nil {
 		return fmt.Errorf("building router: %w", err)
 	}

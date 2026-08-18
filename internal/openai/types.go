@@ -92,14 +92,88 @@ type ChatCompletionResponse struct {
 	// request, and the full fallback trail attempted to get there.
 	Provider string        `json:"provider,omitempty"`
 	Attempts []AttemptInfo `json:"attempts,omitempty"`
+	// Ranking is the full candidate ranking a scoring strategy produced
+	// for this request, if any (nil for non-scoring strategies) — see
+	// RankedProviderInfo.
+	Ranking  []RankedProviderInfo `json:"ranking,omitempty"`
+	Strategy string               `json:"strategy,omitempty"`
 }
 
-// AttemptInfo records one provider attempt made while serving a request,
-// successful or not — the real fallback trail for a single completion.
+// AttemptOutcome classifies how one attempt ended — see AttemptInfo.
+// Deliberately a small, closed set rather than free-form strings: the CLI
+// switches on these to pick a glyph/color, and a routing decision (the
+// gateway/router) is the only thing that should ever produce one.
+type AttemptOutcome string
+
+const (
+	OutcomeTrying   AttemptOutcome = "trying"   // in flight — used only by live route.* events, never persisted on a finished attempt
+	OutcomeSuccess  AttemptOutcome = "success"  // response received and accepted by the ResponseGate
+	OutcomeError    AttemptOutcome = "error"    // transport/HTTP failure — never reached a response to gate
+	OutcomeRejected AttemptOutcome = "rejected" // response received (HTTP 200 or equivalent) but the ResponseGate/StreamGate rejected it
+	OutcomeSkipped  AttemptOutcome = "skipped"  // never attempted — filtered out before execution (circuit-open, capability mismatch)
+)
+
+// AttemptInfo records one provider attempt made while serving a request —
+// the real fallback trail for a single completion. Combined with Outcome
+// and Reason, this is what lets a caller tell an HTTP 500 apart from an
+// HTTP 200 whose content the ResponseGate rejected — two very different
+// situations that used to look identical (OK=false either way).
+//
+// OK is kept and still set (OK == Outcome == OutcomeSuccess) purely for
+// backward compatibility: any code that only ever read the old two-field
+// shape keeps working unchanged. New code should read Outcome.
 type AttemptInfo struct {
 	Provider  string `json:"provider"`
 	OK        bool   `json:"ok"`
 	LatencyMS int64  `json:"latency_ms"`
+
+	// Model is the upstream model ID actually requested for this attempt,
+	// when known — providers can pin a model regardless of what the
+	// client asked for (config.ProviderConfig.Model), so this can differ
+	// from the request's own Model field.
+	Model string `json:"model,omitempty"`
+	// Outcome classifies how the attempt ended — see AttemptOutcome.
+	Outcome AttemptOutcome `json:"outcome,omitempty"`
+	// Reason is a short human-readable explanation, set whenever Outcome
+	// isn't OutcomeSuccess: an upstream error message, a ResponseGate
+	// rejection reason, or why a candidate was skipped.
+	Reason string `json:"reason,omitempty"`
+	// HTTPStatus is the upstream HTTP status code, when the attempt
+	// reached one (0 for a transport-level failure that never got a
+	// response, or for a skipped attempt).
+	HTTPStatus int `json:"http_status,omitempty"`
+	// Score is this candidate's ranking score from the strategy that
+	// produced the routing order, when the strategy scores (nil for
+	// non-scoring strategies like priority/round-robin). Pointer so "not
+	// scored" and "scored zero" stay distinguishable.
+	Score *float64 `json:"score,omitempty"`
+	// Attempt is this attempt's 1-indexed position in the fallback chain
+	// actually tried for this request (1 = first candidate tried).
+	Attempt int `json:"attempt,omitempty"`
+}
+
+// ScoreFactor is one weighted component of a scoring strategy's decision
+// for a single candidate — kept so a UI can show *why* a candidate scored
+// the way it did without ever recomputing the score itself; it only ever
+// renders what the router already decided (see DECISIONS.md).
+type ScoreFactor struct {
+	Name         string  `json:"name"`
+	Weight       float64 `json:"weight"`       // 0..1, normalized
+	Value        float64 `json:"value"`        // 0..1, this candidate's raw score for the factor
+	Contribution float64 `json:"contribution"` // weight * value
+}
+
+// RankedProviderInfo is one entry in a scoring strategy's full ranking —
+// distinct from AttemptInfo: every ranked candidate appears here whether
+// or not it was actually attempted (fallback can stop before reaching a
+// lower-ranked candidate), which is what lets a UI show "gemini .842,
+// openai .816" as context even when only the top candidate was ever
+// called.
+type RankedProviderInfo struct {
+	Provider string        `json:"provider"`
+	Score    float64       `json:"score"`
+	Factors  []ScoreFactor `json:"factors,omitempty"`
+	Reasons  []string      `json:"reasons,omitempty"` // e.g. "sticky", "last-known-good", "cache-affinity"
 }
 
 // ChatCompletionChunkDelta is the incremental content of one SSE chunk. On
@@ -134,6 +208,8 @@ type ChatCompletionChunk struct {
 	Choices  []ChatCompletionChunkChoice `json:"choices"`
 	Provider string                      `json:"provider,omitempty"`
 	Attempts []AttemptInfo               `json:"attempts,omitempty"`
+	Ranking  []RankedProviderInfo        `json:"ranking,omitempty"`
+	Strategy string                      `json:"strategy,omitempty"`
 	Usage    *Usage                      `json:"usage,omitempty"`
 }
 

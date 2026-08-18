@@ -1,39 +1,67 @@
-// Package router picks which provider serves a request, in what fallback
-// order, based on each combo's configured strategy and the current circuit
-// breaker state of its providers.
+// Package router decides which provider serves a request, in what order,
+// based on each combo's configured strategy — and, once a response comes
+// back, whether it was actually good enough to accept. Three concepts are
+// kept deliberately separate (see DECISIONS.md, "Combos v2"):
+//
+//  1. Routing strategy (this package's Strategy interface): decides WHO
+//     to try and in WHAT ORDER — a full ranking, not just a winner.
+//  2. Attempt execution (internal/server/chat.go): actually calls each
+//     candidate in ranked order until one is accepted or the chain is
+//     exhausted.
+//  3. Response gate (gate.go, stream.go): decides whether a technically-
+//     successful response is good enough to end the fallback chain.
 package router
 
 import (
 	"fmt"
 	"sync"
-	"sync/atomic"
 
 	"github.com/codexmark/kram-gateway/internal/breaker"
 	"github.com/codexmark/kram-gateway/internal/config"
+	"github.com/codexmark/kram-gateway/internal/openai"
 	"github.com/codexmark/kram-gateway/internal/provider"
+	"github.com/codexmark/kram-gateway/internal/telemetry"
 )
 
-// combo is a resolved, ordered fallback chain plus its round-robin cursor.
+// combo is a resolved combo: its provider pool, its strategy instance
+// (built once at Router construction and reused across every request —
+// this is what lets round-robin's cursor and the weighted strategy's
+// sticky/LKGP state persist across calls), and its response gate config.
 type combo struct {
-	strategy  string
-	providers []provider.Provider
-	cursor    uint64 // atomic, used by round-robin
+	id           string
+	strategyName string
+	strategy     Strategy
+	providers    []provider.Provider
+	response     config.ResponseGateConfig
 }
 
-// Router resolves a combo ID to an ordered attempt list: which provider to
-// try first, and which to fall back to if it fails or its breaker is open.
+// Router resolves a combo ID to a ranked candidate list for one request.
 type Router struct {
 	mu           sync.RWMutex
 	combos       map[string]*combo
 	defaultCombo string
 	breakers     *breaker.Registry
+	telemetry    *telemetry.Registry
+	// qualityHints is provider ID -> operator-configured QualityHint,
+	// resolved once at construction — see config.ProviderConfig.QualityHint.
+	qualityHints map[string]float64
 }
 
 // New builds a Router from config, wiring each combo to already-built
-// provider adapters keyed by ID.
-func New(cfg *config.Config, providers map[string]provider.Provider, breakers *breaker.Registry) (*Router, error) {
+// provider adapters keyed by ID and constructing its configured Strategy.
+func New(cfg *config.Config, providers map[string]provider.Provider, breakers *breaker.Registry, tel *telemetry.Registry) (*Router, error) {
+	qualityHints := make(map[string]float64, len(cfg.Providers))
+	for _, pc := range cfg.Providers {
+		if pc.QualityHint > 0 {
+			qualityHints[pc.ID] = pc.QualityHint
+		}
+	}
+
 	combos := make(map[string]*combo, len(cfg.Combos))
 	for _, cc := range cfg.Combos {
+		if !validStrategyName(cc.Strategy) {
+			return nil, unknownStrategyError(cc.ID, cc.Strategy)
+		}
 		ps := make([]provider.Provider, 0, len(cc.Providers))
 		for _, pid := range cc.Providers {
 			p, ok := providers[pid]
@@ -42,13 +70,16 @@ func New(cfg *config.Config, providers map[string]provider.Provider, breakers *b
 			}
 			ps = append(ps, p)
 		}
-		combos[cc.ID] = &combo{strategy: cc.Strategy, providers: ps}
+		opts := resolveStrategyOptions(cc.StrategyOptions)
+		combos[cc.ID] = &combo{
+			id: cc.ID, strategyName: cc.Strategy, strategy: newStrategy(cc.Strategy, opts),
+			providers: ps, response: cc.Response,
+		}
 	}
 
 	return &Router{
-		combos:       combos,
-		defaultCombo: cfg.DefaultCombo,
-		breakers:     breakers,
+		combos: combos, defaultCombo: cfg.DefaultCombo,
+		breakers: breakers, telemetry: tel, qualityHints: qualityHints,
 	}, nil
 }
 
@@ -78,7 +109,8 @@ type ComboInfo struct {
 }
 
 // Combos returns a summary of every configured combo, in the order the
-// providers were declared — the same order the fallback chain follows.
+// providers were declared — the same order a non-scoring strategy's
+// fallback follows.
 func (r *Router) Combos() []ComboInfo {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -89,85 +121,70 @@ func (r *Router) Combos() []ComboInfo {
 		for _, p := range c.providers {
 			ids = append(ids, p.ID())
 		}
-		out = append(out, ComboInfo{ID: id, Strategy: c.strategy, Providers: ids})
+		out = append(out, ComboInfo{ID: id, Strategy: c.strategyName, Providers: ids})
 	}
 	return out
 }
 
-// StrategyPrefixAffinity routes by a hash of the request's stable prefix
-// instead of rotating per request.
-//
-// Round-robin has a cost that isn't obvious until you look for it: every
-// major provider caches prompt prefixes server-side and bills cached
-// input at a fraction of the normal rate, and that cache is per-provider.
-// An agent turn resends a large, near-identical prefix (system prompt,
-// tool definitions, conversation so far) on every tool round-trip — so
-// rotating providers between those calls throws the cache away each time
-// and pays full price for the same tokens, repeatedly. Pinning a given
-// conversation to one provider keeps that cache warm.
-//
-// The fallback chain is unaffected: a rate-limited or failing provider
-// still trips its breaker and drops out of the healthy set, at which
-// point affinity simply resolves to a different provider. Round-robin
-// spreads load *proactively*, which is the better choice when every
-// provider in the chain is a tight free tier; affinity is better
-// whenever cache economics dominate.
-const StrategyPrefixAffinity = "prefix-affinity"
-
-// Attempts returns the ordered list of providers to try for a combo.
-// affinityKey identifies the caller's stable prompt prefix (empty is
-// fine — it just degrades affinity to the declared order). Providers
-// whose circuit breaker is open are skipped entirely.
-func (r *Router) Attempts(comboID, affinityKey string) ([]provider.Provider, error) {
+// Rank returns the full candidate ranking for one request against combo:
+// hard constraints (circuit breaker, capability) are applied first (see
+// eligibleCandidates), then the combo's configured Strategy ranks
+// whatever's left. The returned RouteContext should be passed to
+// RecordOutcome once the request finishes.
+func (r *Router) Rank(comboID string, req openai.ChatCompletionRequest) ([]RankedCandidate, RouteContext, error) {
 	r.mu.RLock()
 	c, ok := r.combos[comboID]
 	r.mu.RUnlock()
 	if !ok {
-		return nil, fmt.Errorf("unknown combo %q", comboID)
+		return nil, RouteContext{}, fmt.Errorf("unknown combo %q", comboID)
 	}
 
-	healthy := make([]provider.Provider, 0, len(c.providers))
-	for _, p := range c.providers {
-		if r.breakers.Allow(p.ID()) {
-			healthy = append(healthy, p)
-		}
+	ctx := NewRouteContext(comboID, req)
+	candidates := eligibleCandidates(c.providers, r.qualityHints, r.breakers, r.telemetry, ctx)
+	if len(candidates) == 0 {
+		return nil, ctx, fmt.Errorf("combo %q: no eligible providers (all circuit-open, or none support what this request needs)", comboID)
 	}
-	if len(healthy) == 0 {
-		return nil, fmt.Errorf("combo %q: all providers are circuit-open", comboID)
-	}
-
-	if len(healthy) > 1 {
-		switch c.strategy {
-		case "round-robin":
-			n := atomic.AddUint64(&c.cursor, 1)
-			offset := int(n % uint64(len(healthy)))
-			healthy = append(healthy[offset:], healthy[:offset]...)
-		case StrategyPrefixAffinity:
-			// Hashing over the *healthy* set, not the configured one, is
-			// deliberate: it keeps the choice stable for as long as the
-			// same providers are up, and reshuffles only when one drops
-			// out or comes back — which is exactly when the cache was
-			// going to be lost anyway.
-			offset := int(hashString(affinityKey) % uint64(len(healthy)))
-			healthy = append(healthy[offset:], healthy[:offset]...)
-		}
-	}
-
-	return healthy, nil
+	return c.strategy.Rank(ctx, candidates), ctx, nil
 }
 
-// hashString is FNV-1a, inlined rather than pulled from hash/fnv because
-// all this needs is a stable bucket index — not a hash.Hash, not
-// collision resistance.
-func hashString(s string) uint64 {
-	const (
-		offset64 = 14695981039346656037
-		prime64  = 1099511628211
-	)
-	h := uint64(offset64)
-	for i := 0; i < len(s); i++ {
-		h ^= uint64(s[i])
-		h *= prime64
+// RecordOutcome tells combo's strategy who actually won a request — only
+// strategies that keep state between requests (the weighted family's
+// sticky/LKGP, the standalone lkgp strategy) act on this; everything else
+// is a no-op. Called by the attempt executor once a request finishes,
+// never predicted ahead of time.
+func (r *Router) RecordOutcome(comboID string, ctx RouteContext, winner string, ok bool) {
+	r.mu.RLock()
+	c, found := r.combos[comboID]
+	r.mu.RUnlock()
+	if !found {
+		return
 	}
-	return h
+	if rec, isRecorder := c.strategy.(outcomeRecorder); isRecorder {
+		rec.RecordOutcome(ctx, winner, ok)
+	}
+}
+
+// ResponseGateFor returns combo's configured ResponseGate. Unknown combos
+// get a permissive (accept-everything) gate rather than an error, since
+// callers already validate the combo ID via Resolve/Rank first.
+func (r *Router) ResponseGateFor(comboID string) *ResponseGate {
+	r.mu.RLock()
+	c, ok := r.combos[comboID]
+	r.mu.RUnlock()
+	if !ok {
+		return NewResponseGate(config.ResponseGateConfig{})
+	}
+	return NewResponseGate(c.response)
+}
+
+// StrategyName returns combo's configured strategy name (as written in
+// config — "" and "priority" both mean declared order), for the wire
+// response's Strategy field.
+func (r *Router) StrategyName(comboID string) string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if c, ok := r.combos[comboID]; ok {
+		return c.strategyName
+	}
+	return ""
 }

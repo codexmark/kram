@@ -239,7 +239,7 @@ func (p *Anthropic) ChatCompletion(ctx context.Context, req openai.ChatCompletio
 	}
 	if resp.StatusCode >= 400 {
 		defer resp.Body.Close()
-		return nil, fmt.Errorf("%s: upstream returned %s", p.id, resp.Status)
+		return nil, &HTTPError{Provider: p.id, StatusCode: resp.StatusCode, Status: resp.Status}
 	}
 
 	events := make(chan StreamEvent, 16)

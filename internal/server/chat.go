@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -11,8 +12,19 @@ import (
 
 	"github.com/codexmark/kram-gateway/internal/openai"
 	"github.com/codexmark/kram-gateway/internal/provider"
+	"github.com/codexmark/kram-gateway/internal/router"
 )
 
+// handleChatCompletions is the attempt executor: it asks the router for a
+// ranked candidate list (routing strategy), calls each one in order
+// (attempt execution), and gates whatever comes back before accepting it
+// (response quality) — three concepts the router package keeps separate
+// on purpose (see its package doc). A candidate that errors, that a
+// ResponseGate rejects, or whose stream never produces a meaningful
+// signal (see router.BoundedPeek) all fall through to the next ranked
+// candidate the same way; only the eventual winner is reported to the
+// router via RecordOutcome, so sticky/LKGP state always reflects who
+// really served the request.
 func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	var req openai.ChatCompletionRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -30,17 +42,24 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	candidates, err := s.router.Attempts(comboID, affinityKey(req))
+	ranked, routeCtx, err := s.router.Rank(comboID, req)
 	if err != nil {
 		writeError(w, http.StatusServiceUnavailable, err.Error())
 		return
 	}
+	gate := s.router.ResponseGateFor(comboID)
+	strategyName := s.router.StrategyName(comboID)
+	ranking := router.ToRankedProviderInfo(ranked)
 
 	ctx := r.Context()
 	var lastErr error
 	var trail []openai.AttemptInfo // real per-request fallback trail, streamed back to clients that ask for it
 
-	for _, p := range candidates {
+	for i, rc := range ranked {
+		p := rc.Provider.Provider
+		attemptNum := i + 1
+		score := rc.Score
+
 		s.telemetry.RecordAttempt(p.ID())
 		attemptStart := time.Now()
 		events, err := p.ChatCompletion(ctx, req)
@@ -49,57 +68,97 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			s.markFailure(p.ID(), err)
 			s.telemetry.RecordLatency(p.ID(), elapsed)
 			lastErr = err
-			trail = append(trail, openai.AttemptInfo{Provider: p.ID(), OK: false, LatencyMS: elapsed})
+			trail = append(trail, errorAttempt(p.ID(), elapsed, attemptNum, score, err))
 			continue
 		}
 
 		if req.Stream {
-			first, ok := <-events
-			if !ok {
-				elapsed := time.Since(attemptStart).Milliseconds()
-				lastErr = fmt.Errorf("%s: closed stream with no data", p.ID())
+			peek := router.BoundedPeek(ctx, events)
+			elapsed := time.Since(attemptStart).Milliseconds()
+			if !peek.Committed {
+				lastErr = fmt.Errorf("%s: %s", p.ID(), peek.Reason)
 				s.markFailure(p.ID(), lastErr)
 				s.telemetry.RecordLatency(p.ID(), elapsed)
-				trail = append(trail, openai.AttemptInfo{Provider: p.ID(), OK: false, LatencyMS: elapsed})
-				continue
-			}
-			if first.Err != nil {
-				elapsed := time.Since(attemptStart).Milliseconds()
-				lastErr = first.Err
-				s.markFailure(p.ID(), lastErr)
-				s.telemetry.RecordLatency(p.ID(), elapsed)
-				trail = append(trail, openai.AttemptInfo{Provider: p.ID(), OK: false, LatencyMS: elapsed})
+				trail = append(trail, openai.AttemptInfo{
+					Provider: p.ID(), OK: false, LatencyMS: elapsed,
+					Outcome: openai.OutcomeRejected, Reason: peek.Reason, Attempt: attemptNum, Score: &score,
+				})
 				continue
 			}
 			// Committed: headers are about to be written, no more fallback
 			// is possible for this request after this point.
-			commitElapsed := time.Since(attemptStart).Milliseconds()
-			s.telemetry.RecordLatency(p.ID(), commitElapsed)
-			trail = append(trail, openai.AttemptInfo{Provider: p.ID(), OK: true, LatencyMS: commitElapsed})
-			s.streamResponse(w, p.ID(), req.Model, first, events, trail)
+			s.telemetry.RecordLatency(p.ID(), elapsed)
+			trail = append(trail, openai.AttemptInfo{
+				Provider: p.ID(), OK: true, LatencyMS: elapsed,
+				Outcome: openai.OutcomeSuccess, Attempt: attemptNum, Score: &score,
+			})
+			s.router.RecordOutcome(comboID, routeCtx, p.ID(), true)
+			s.streamResponse(w, p.ID(), req.Model, peek.Buffered, events, trail, ranking, strategyName)
 			return
 		}
 
-		content, toolCalls, usage, err := drainToBuffer(events)
+		content, toolCalls, usage, sawTerminal, err := drainToBuffer(events)
 		elapsed := time.Since(attemptStart).Milliseconds()
 		if err != nil {
 			lastErr = err
 			s.markFailure(p.ID(), err)
 			s.telemetry.RecordLatency(p.ID(), elapsed)
-			trail = append(trail, openai.AttemptInfo{Provider: p.ID(), OK: false, LatencyMS: elapsed})
+			trail = append(trail, errorAttempt(p.ID(), elapsed, attemptNum, score, err))
 			continue
 		}
+
+		outcome := gate.Evaluate(content, toolCalls, sawTerminal)
+		if !outcome.Accepted {
+			// A rejection here is not a transport/HTTP failure — the
+			// provider answered, the ResponseGate just decided the answer
+			// wasn't good enough. It still counts as an operational
+			// failure for breaker/telemetry purposes (a provider that
+			// chronically returns empty or truncated content is not
+			// healthy, even though every individual HTTP call "succeeded"),
+			// but AttemptInfo.Outcome keeps the distinction visible: this
+			// is OutcomeRejected, never OutcomeError.
+			lastErr = fmt.Errorf("%s: %s", p.ID(), outcome.Reason)
+			s.markFailure(p.ID(), lastErr)
+			s.telemetry.RecordLatency(p.ID(), elapsed)
+			trail = append(trail, openai.AttemptInfo{
+				Provider: p.ID(), OK: false, LatencyMS: elapsed,
+				Outcome: openai.OutcomeRejected, Reason: outcome.Reason, Attempt: attemptNum, Score: &score,
+			})
+			continue
+		}
+
 		s.breakers.ReportSuccess(p.ID())
 		s.telemetry.RecordLatency(p.ID(), elapsed)
 		if usage != nil {
 			s.telemetry.RecordUsage(p.ID(), usage.PromptTokens, usage.CompletionTokens)
 		}
-		trail = append(trail, openai.AttemptInfo{Provider: p.ID(), OK: true, LatencyMS: elapsed})
-		writeBufferedResponse(w, req.Model, p.ID(), content, toolCalls, usage, trail)
+		trail = append(trail, openai.AttemptInfo{
+			Provider: p.ID(), OK: true, LatencyMS: elapsed,
+			Outcome: openai.OutcomeSuccess, Attempt: attemptNum, Score: &score,
+		})
+		s.router.RecordOutcome(comboID, routeCtx, p.ID(), true)
+		writeBufferedResponse(w, req.Model, p.ID(), content, toolCalls, usage, trail, ranking, strategyName)
 		return
 	}
 
+	s.router.RecordOutcome(comboID, routeCtx, "", false)
 	writeError(w, http.StatusBadGateway, fmt.Sprintf("all providers in combo %q failed, last error: %v", comboID, lastErr))
+}
+
+// errorAttempt builds a trail entry for a transport/HTTP-level failure,
+// extracting the real upstream status code when the provider adapter
+// returned a *provider.HTTPError (see provider.go) instead of a generic
+// wrapped error.
+func errorAttempt(providerID string, elapsedMS int64, attempt int, score float64, err error) openai.AttemptInfo {
+	info := openai.AttemptInfo{
+		Provider: providerID, OK: false, LatencyMS: elapsedMS,
+		Outcome: openai.OutcomeError, Reason: err.Error(), Attempt: attempt, Score: &score,
+	}
+	var httpErr *provider.HTTPError
+	if errors.As(err, &httpErr) {
+		info.HTTPStatus = httpErr.StatusCode
+	}
+	return info
 }
 
 func (s *Server) markFailure(id string, err error) {
@@ -111,28 +170,31 @@ func (s *Server) markFailure(id string, err error) {
 // drainToBuffer fully consumes a provider's stream and concatenates its
 // deltas and any tool calls. Used for non-streaming requests, where
 // nothing is written to the client until we know the whole response
-// succeeded — so a failure here can still fall back to the next provider.
-func drainToBuffer(events <-chan provider.StreamEvent) (string, []openai.ToolCall, *openai.Usage, error) {
-	var content strings.Builder
-	var toolCalls []openai.ToolCall
-	var usage *openai.Usage
+// succeeded — so a failure (or a ResponseGate rejection) here can still
+// fall back to the next provider. sawTerminal reports whether the
+// provider ever sent a Done event before its channel closed — a stream
+// that's cut off mid-flight without one is what
+// config.ResponseGateConfig.RequireTerminal catches.
+func drainToBuffer(events <-chan provider.StreamEvent) (content string, toolCalls []openai.ToolCall, usage *openai.Usage, sawTerminal bool, err error) {
+	var b strings.Builder
 	for evt := range events {
 		if evt.Err != nil {
-			return "", nil, nil, evt.Err
+			return "", nil, nil, false, evt.Err
 		}
-		content.WriteString(evt.Delta)
+		b.WriteString(evt.Delta)
 		if evt.Usage != nil {
 			usage = evt.Usage
 		}
 		if evt.Done {
 			toolCalls = evt.ToolCalls
+			sawTerminal = true
 			break
 		}
 	}
-	return content.String(), toolCalls, usage, nil
+	return b.String(), toolCalls, usage, sawTerminal, nil
 }
 
-func writeBufferedResponse(w http.ResponseWriter, model, providerID, content string, toolCalls []openai.ToolCall, usage *openai.Usage, trail []openai.AttemptInfo) {
+func writeBufferedResponse(w http.ResponseWriter, model, providerID, content string, toolCalls []openai.ToolCall, usage *openai.Usage, trail []openai.AttemptInfo, ranking []openai.RankedProviderInfo, strategyName string) {
 	finish := "stop"
 	if len(toolCalls) > 0 {
 		finish = "tool_calls"
@@ -147,6 +209,8 @@ func writeBufferedResponse(w http.ResponseWriter, model, providerID, content str
 		},
 		Provider: providerID,
 		Attempts: trail,
+		Ranking:  ranking,
+		Strategy: strategyName,
 	}
 	if usage != nil {
 		resp.Usage = *usage
@@ -155,14 +219,18 @@ func writeBufferedResponse(w http.ResponseWriter, model, providerID, content str
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
-// streamResponse writes SSE chunks to w as events arrive. Once called, the
-// response is committed: headers are sent immediately, so no further
-// fallback is possible if a later event carries an error. The terminal
-// chunk carries provider/attempts/usage/tool_calls (kram-gateway
-// extensions) so a caller can run entirely off the streaming path — the
-// daemon's agent loop does exactly that, rather than needing a separate
-// non-streaming request.
-func (s *Server) streamResponse(w http.ResponseWriter, providerID, model string, first provider.StreamEvent, rest <-chan provider.StreamEvent, trail []openai.AttemptInfo) {
+// streamResponse writes SSE chunks to w as events arrive. buffered is
+// whatever router.BoundedPeek already consumed deciding to commit — it's
+// replayed first, in order, before continuing to read fresh events from
+// rest, so the client sees exactly the same stream it would have seen
+// without the peek ever happening. Once this is called, the response is
+// committed: headers are sent immediately, so no further fallback is
+// possible if a later event carries an error. The terminal chunk carries
+// provider/attempts/ranking/strategy/usage (kram-gateway extensions) so a
+// caller can run entirely off the streaming path — the daemon's agent
+// loop does exactly that, rather than needing a separate non-streaming
+// request.
+func (s *Server) streamResponse(w http.ResponseWriter, providerID, model string, buffered []provider.StreamEvent, rest <-chan provider.StreamEvent, trail []openai.AttemptInfo, ranking []openai.RankedProviderInfo, strategyName string) {
 	flusher, _ := w.(http.Flusher)
 
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -203,6 +271,8 @@ func (s *Server) streamResponse(w http.ResponseWriter, providerID, model string,
 			}},
 			Provider: providerID,
 			Attempts: trail,
+			Ranking:  ranking,
+			Strategy: strategyName,
 			Usage:    usage,
 		}
 		write(chunk)
@@ -234,7 +304,14 @@ func (s *Server) streamResponse(w http.ResponseWriter, providerID, model string,
 		return true
 	}
 
-	if handle(first) {
+	keepGoing := true
+	for _, evt := range buffered {
+		if !handle(evt) {
+			keepGoing = false
+			break
+		}
+	}
+	if keepGoing {
 		for evt := range rest {
 			if !handle(evt) {
 				break
@@ -252,27 +329,4 @@ func newID() string {
 	buf := make([]byte, 12)
 	_, _ = rand.Read(buf)
 	return "chatcmpl-" + hex.EncodeToString(buf)
-}
-
-// affinityKey identifies a request's stable prompt prefix, for combos
-// using the prefix-affinity strategy (see router.StrategyPrefixAffinity).
-//
-// It's built from the leading system messages plus the first user
-// message, which is precisely the part that does not change across an
-// agent turn's tool round-trips — the growing tail of tool calls and
-// results is deliberately excluded, since including it would produce a
-// different key on every round-trip and defeat the entire purpose.
-func affinityKey(req openai.ChatCompletionRequest) string {
-	var b strings.Builder
-	for _, m := range req.Messages {
-		if m.Role == "system" {
-			b.WriteString(m.Content)
-			continue
-		}
-		if m.Role == "user" {
-			b.WriteString(m.Content)
-			break
-		}
-	}
-	return b.String()
 }
