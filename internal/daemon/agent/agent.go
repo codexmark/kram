@@ -91,10 +91,15 @@ type ToolActivity struct {
 type RunResult struct {
 	Message      store.Message
 	ToolActivity []ToolActivity
-	Attempts     []openai.AttemptInfo // fallback trail of the final (deciding) gateway call
-	Usage        openai.Usage         // summed across every gateway call this turn
-	Compactions  int
-	ImageNotice  string // set if images were attached but the combo can't accept them
+	Attempts     []openai.AttemptInfo // fallback trail of the final (deciding) gateway call — kept for the simple footer view
+	// RouteTrace is the full picture Attempts alone can't show: every
+	// model call this run made (a turn can be several, across tool
+	// round-trips), each with its own complete fallback trail — see
+	// route.go for why this exists and what bug it fixes.
+	RouteTrace  RouteTrace
+	Usage       openai.Usage // summed across every gateway call this turn
+	Compactions int
+	ImageNotice string // set if images were attached but the combo can't accept them
 }
 
 const maxToolResultChars = 4000 // how much of a tool result ToolActivity keeps for display
@@ -462,12 +467,15 @@ func (s *Service) runLoop(ctx context.Context, sessionID, model string, depth in
 			})
 		}
 
+		emit(onEvent, Event{Kind: EventRouteStart})
 		callResult, err := s.streamCall(ctx, model, modelMessages, toolDefs, onEvent)
 		if err != nil {
 			return RunResult{}, fmt.Errorf("gateway call failed: %w", err)
 		}
 		result.Attempts = callResult.Attempts
 		result.Usage = sumUsage(result.Usage, callResult.Usage)
+		routeCall := result.RouteTrace.addCall(model, callResult.Strategy, callResult.Attempts, callResult.Ranking)
+		emit(onEvent, Event{Kind: EventRouteDone, RouteCall: &routeCall})
 
 		if len(callResult.ToolCalls) == 0 {
 			if strings.TrimSpace(callResult.Content) == "" && !emptyRetryUsed {
@@ -564,6 +572,7 @@ func (s *Service) streamCall(ctx context.Context, model string, messages []opena
 			result = gatewayclient.Result{
 				Content: content.String(), ToolCalls: d.ToolCalls,
 				Provider: d.Provider, Attempts: d.Attempts, Usage: d.Usage,
+				Ranking: d.Ranking, Strategy: d.Strategy,
 			}
 		}
 	}

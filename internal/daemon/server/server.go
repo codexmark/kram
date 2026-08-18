@@ -200,6 +200,10 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 				"type": "approval", "approval_id": evt.ApprovalID, "tool": evt.ApprovalTool,
 				"subject": evt.ApprovalSubject, "options": []string{"once", "always", "deny"},
 			})
+		case agent.EventRouteStart:
+			writeEvent(map[string]any{"type": "route_start"})
+		case agent.EventRouteDone:
+			writeEvent(map[string]any{"type": "route_done", "route_call": evt.RouteCall})
 		}
 	}
 
@@ -215,6 +219,7 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 		"type":          "done",
 		"message":       result.Message,
 		"attempts":      result.Attempts,
+		"route_trace":   result.RouteTrace,
 		"usage":         result.Usage,
 		"tool_activity": result.ToolActivity,
 		"compactions":   result.Compactions,

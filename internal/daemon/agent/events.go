@@ -30,6 +30,19 @@ const (
 	// "once"|"always"|"deny") on a separate call, same blocking shape as
 	// EventQuestion.
 	EventApproval EventKind = "approval"
+	// EventRouteStart fires right before a model call goes out — the
+	// earliest point a live route bar can show "routing…" instead of
+	// staying blank until the whole call finishes. Real per-attempt
+	// progress (which candidate is being tried right now, mid-fallback)
+	// isn't observable here: the gateway's fallback loop happens inside
+	// one HTTP round-trip the daemon only sees the result of, so the next
+	// signal is EventRouteDone — see DECISIONS.md, "Live route events are
+	// per model call, not per attempt."
+	EventRouteStart EventKind = "route_start"
+	// EventRouteDone fires once a model call's full routing story is
+	// known: every attempt made, the winner, and (for a scoring strategy)
+	// the full candidate ranking — see RouteCall.
+	EventRouteDone EventKind = "route_done"
 )
 
 // Event is one thing that happened during Run, emitted live via the
@@ -51,6 +64,8 @@ type Event struct {
 	ApprovalID      string // EventApproval
 	ApprovalTool    string // EventApproval
 	ApprovalSubject string // EventApproval
+
+	RouteCall *RouteCall // EventRouteDone
 }
 
 // EventFunc receives live events during Run. A nil EventFunc is valid —

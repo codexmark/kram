@@ -23,7 +23,10 @@ type StreamDelta struct {
 	Provider  string
 	Usage     openai.Usage
 	Attempts  []openai.AttemptInfo
-	Err       error
+	// Ranking and Strategy mirror Result's — see its doc comment.
+	Ranking  []openai.RankedProviderInfo
+	Strategy string
+	Err      error
 }
 
 // ChatCompletionStream is ChatCompletion's streaming counterpart: same
@@ -99,7 +102,10 @@ func (c *Client) ChatCompletionStream(ctx context.Context, model string, message
 			}
 
 			if choice.FinishReason != nil {
-				delta := StreamDelta{Done: true, ToolCalls: choice.Delta.ToolCalls, Provider: chunk.Provider, Attempts: chunk.Attempts}
+				delta := StreamDelta{
+					Done: true, ToolCalls: choice.Delta.ToolCalls, Provider: chunk.Provider,
+					Attempts: chunk.Attempts, Ranking: chunk.Ranking, Strategy: chunk.Strategy,
+				}
 				if chunk.Usage != nil {
 					delta.Usage = *chunk.Usage
 				}

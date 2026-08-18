@@ -87,11 +87,33 @@ type ToolActivity struct {
 	Running bool   `json:"-"`
 }
 
+// RouteCall mirrors agent.RouteCall — one model call's full routing
+// story within a run.
+type RouteCall struct {
+	Index    int                         `json:"index"`
+	Combo    string                      `json:"combo"`
+	Strategy string                      `json:"strategy"`
+	Attempts []openai.AttemptInfo        `json:"attempts"`
+	Ranking  []openai.RankedProviderInfo `json:"ranking,omitempty"`
+	Winner   string                      `json:"winner,omitempty"`
+}
+
+// RouteTrace mirrors agent.RouteTrace — every model call a run made, in
+// order, each with its own complete fallback trail. Distinct from
+// StreamEvent.Attempts (the last call's trail only, kept for the simple
+// footer view): RouteTrace is what a full route-trace UI (Ctrl+R) needs.
+type RouteTrace struct {
+	Combo    string      `json:"combo"`
+	Strategy string      `json:"strategy"`
+	Calls    []RouteCall `json:"calls"`
+}
+
 // StreamEvent is one event from a message stream. Type selects which
 // other fields are meaningful: "delta" (Content), "tool_start" (Name,
 // Args), "tool_result" (Name, Result, OK), "notice" (Text), "question"
 // (QuestionID, Question, Options), "approval" (ApprovalID, Tool, Subject,
-// Options), "done" (Message, Attempts, Usage, ToolActivity, Compactions,
+// Options), "route_start" (none), "route_done" (RouteCall), "done"
+// (Message, Attempts, RouteTrace, Usage, ToolActivity, Compactions,
 // ImageNotice), or "error" (Error).
 type StreamEvent struct {
 	Type         string               `json:"type"`
@@ -107,8 +129,10 @@ type StreamEvent struct {
 	ApprovalID   string               `json:"approval_id,omitempty"`
 	Tool         string               `json:"tool,omitempty"`
 	Subject      string               `json:"subject,omitempty"`
+	RouteCall    *RouteCall           `json:"route_call,omitempty"`
 	Message      Message              `json:"message,omitempty"`
 	Attempts     []openai.AttemptInfo `json:"attempts,omitempty"`
+	RouteTrace   RouteTrace           `json:"route_trace,omitempty"`
 	Usage        openai.Usage         `json:"usage,omitempty"`
 	ToolActivity []ToolActivity       `json:"tool_activity,omitempty"`
 	Compactions  int                  `json:"compactions,omitempty"`

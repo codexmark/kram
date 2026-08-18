@@ -34,7 +34,14 @@ type Result struct {
 	ToolCalls []openai.ToolCall
 	Provider  string
 	Attempts  []openai.AttemptInfo
-	Usage     openai.Usage
+	// Ranking and Strategy are the router's own full candidate ranking
+	// and the combo's configured strategy name for this call — kram-
+	// gateway extensions passed straight through from
+	// openai.ChatCompletionResponse, used to build a RouteCall (see
+	// internal/daemon/agent/route.go).
+	Ranking  []openai.RankedProviderInfo
+	Strategy string
+	Usage    openai.Usage
 }
 
 // ChatCompletion sends a non-streaming chat completion request — with the
@@ -80,6 +87,8 @@ func (c *Client) ChatCompletion(ctx context.Context, model string, messages []op
 		ToolCalls: completion.Choices[0].Message.ToolCalls,
 		Provider:  completion.Provider,
 		Attempts:  completion.Attempts,
+		Ranking:   completion.Ranking,
+		Strategy:  completion.Strategy,
 		Usage:     completion.Usage,
 	}, nil
 }
