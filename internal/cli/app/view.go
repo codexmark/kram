@@ -22,12 +22,9 @@ func (m *Model) refreshTranscript() {
 		case "user":
 			// User text is never run through the markdown renderer — it's
 			// what was typed, not a formatted reply, and echoing it back
-			// reformatted would be surprising. Single left-aligned column,
-			// same as the agent's replies below — the two-sided bubble
-			// layout (you right, kram left) tested worse for reading than
-			// a plain tag-prefixed transcript, the format most terminal
-			// coding agents converged on.
-			b.WriteString(styleYouTag.Render("you") + "  " + styleUserBody.Render(msg.Content))
+			// reformatted would be surprising. Right-aligned prompt block,
+			// not a chat bubble — see promptblock.go and DECISIONS.md.
+			b.WriteString(m.renderPromptBlock(msg.Content))
 		default:
 			for _, act := range msg.ToolActivity {
 				b.WriteString(m.renderToolActivity(act) + "\n")
@@ -103,6 +100,8 @@ func (m Model) View() string {
 	}
 
 	var b strings.Builder
+	b.WriteString(m.renderRouteBar())
+	b.WriteString("\n")
 	b.WriteString(m.viewport.View())
 	b.WriteString("\n")
 	switch {
@@ -127,65 +126,27 @@ func (m Model) View() string {
 }
 
 // renderFooter draws the pulse bar: a breathing dot for the active
-// provider with an animated latency sparkline while a request is in
-// flight, and — once it lands — the real per-request fallback trail this
-// exact reply took, plus running token totals. It never grows past two
-// lines.
+// provider, latency, and fallback trail — that's now the route bar's job
+// (see routebar.go), live during the turn and left showing the last
+// completed model call's real story afterward. The footer is one line:
+// running token totals on the left, the context-usage icon and keyboard
+// shortcuts on the right. See DECISIONS.md, "Footer stops duplicating
+// the route bar."
 func (m Model) renderFooter() string {
-	line1 := m.footerLine1()
-	line2 := m.footerLine2()
-	return line1 + "\n" + line2
-}
-
-func (m Model) footerLine1() string {
-	var dot, name, latency, spark string
-
-	if m.waiting {
-		dot = styleBadgeWarn.Render("●")
-		name = styleBody.Render(m.combo)
-		latency = styleMeta.Render(time.Since(m.waitStartedAt).Round(time.Second).String())
-		spark = animatedSparkline(m.animFrame)
-	} else if m.lastProvider != "" {
-		dot = styleBadgeOK.Render("●")
-		name = styleBody.Render(m.lastProvider)
-		if ms := lastLatencyMS(m.lastAttempts, m.lastProvider); ms >= 0 {
-			latency = styleMeta.Render(fmt.Sprintf("%dms", ms))
-		}
-		spark = staticSparkline(m.lastAttempts)
-	} else {
-		dot = styleBadgeIdle.Render("●")
-		name = styleMeta.Render(m.combo)
-	}
-
 	tokens := ""
 	if last := m.lastAssistantTokens(); last != "" {
 		tokens = styleMeta.Render(last)
 	}
-
-	left := joinNonEmpty("  ", dot, name, spark, latency)
-	return padBetween(m.width, left, tokens)
-}
-
-func (m Model) footerLine2() string {
-	trail := attemptTrailGlyphs(m.lastAttempts)
-	count := ""
-	if n := len(m.lastAttempts); n > 0 {
-		word := "tentativa"
-		if n != 1 {
-			word = "tentativas"
-		}
-		count = styleMeta.Render(fmt.Sprintf("%d %s", n, word))
-	}
-	left := joinNonEmpty("  ", trail, count)
-	return padBetween(m.width, left, m.footerRightBlock())
+	return padBetween(m.width, tokens, m.footerRightBlock())
 }
 
 // footerRightBlock is the clickable context-usage icon plus keyboard
-// hints, right-aligned on the footer's bottom row. It's a method (not
-// inlined) because handleMouse needs the exact same string to compute
-// where the click target starts.
+// hints, right-aligned on the footer's row. It's a method (not inlined)
+// because handleMouse needs the exact same string to compute where the
+// click target starts.
 func (m Model) footerRightBlock() string {
-	return joinNonEmpty("  ", m.contextIcon(), styleHint.Render("^t contexto"), styleHint.Render("^p estratégia"))
+	return joinNonEmpty("  ", m.contextIcon(),
+		styleHint.Render("^r rota"), styleHint.Render("^t contexto"), styleHint.Render("^p estratégia"))
 }
 
 // contextIcon is the discreet, clickable context-window badge: a filled

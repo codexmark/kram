@@ -25,7 +25,8 @@ import (
 	"github.com/codexmark/kram-gateway/internal/toolsettings"
 )
 
-const footerHeight = 2 // the pulse bar is always exactly two lines
+const footerHeight = 1   // context/tokens/shortcuts, one line — see view.go's renderFooter
+const routeBarHeight = 1 // the route bar is always exactly one line
 
 // phase tracks which screen the program is showing: the session picker
 // (when launched without an explicit -session), the chat itself, or the
@@ -80,9 +81,17 @@ type Model struct {
 	messages []chatMessage
 	waiting  bool
 
-	lastProvider string
-	lastAttempts []openai.AttemptInfo
-	lastUsage    openai.Usage
+	lastUsage openai.Usage
+
+	// Route bar state — see routebar.go. routeRunning is true between a
+	// route_start event and its matching route_done (or the turn ending
+	// without one, e.g. an error before any model call went out).
+	// routeCall is the most recently *completed* model call's routing
+	// story for the current turn; true per-attempt progress isn't
+	// observable while routeRunning (see DECISIONS.md), so the bar shows
+	// a generic pulse until the real trail lands.
+	routeRunning bool
+	routeCall    *daemonclient.RouteCall
 
 	active panel
 
@@ -212,7 +221,13 @@ func (m Model) Init() tea.Cmd {
 }
 
 func (m Model) enterChatCmds() tea.Cmd {
-	return tea.Batch(textinput.Blink, loadHistoryCmd(m.daemon, m.sessionID), fetchContextCmd(m.daemon, m.sessionID))
+	// fetchStatusCmd is prefetched here (not only on-demand when Ctrl+P
+	// opens) so the route bar has a real strategy name/combo to show from
+	// the very first turn, same reasoning as the context-usage prefetch.
+	return tea.Batch(
+		textinput.Blink, loadHistoryCmd(m.daemon, m.sessionID),
+		fetchContextCmd(m.daemon, m.sessionID), fetchStatusCmd(m.gateway),
+	)
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -480,9 +495,9 @@ func (m Model) handlePickerKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 // handleMouse implements the "discreet clickable icon" affordance: the
 // context-usage badge on the footer's bottom-right is a real click target,
-// not just a keyboard shortcut. The footer always occupies the terminal's
-// last two rows, so hit-testing is just a column check against the same
-// right-aligned block footerLine2 renders.
+// not just a keyboard shortcut. The footer is always the terminal's last
+// row, so hit-testing is just a column check against the same
+// right-aligned block renderFooter draws.
 func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	// Enabling mouse mode at all (needed for the footer-icon click below)
 	// takes the wheel away from the terminal's own scrollback, so we have
@@ -503,8 +518,8 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	if msg.Action != tea.MouseActionPress || msg.Button != tea.MouseButtonLeft {
 		return m, nil
 	}
-	footerRow2 := m.height - 1
-	if msg.Y != footerRow2 {
+	footerRow := m.height - 1
+	if msg.Y != footerRow {
 		return m, nil
 	}
 	iconStart := m.width - lipgloss.Width(m.footerRightBlock())
@@ -547,6 +562,8 @@ func (m Model) submit() (tea.Model, tea.Cmd) {
 	m.waitStartedAt = time.Now()
 	m.lastEventAt = time.Now()
 	m.err = nil
+	m.routeRunning = false
+	m.routeCall = nil
 	m.refreshTranscript()
 	return m, tea.Batch(startSendMessageCmd(m.daemon, m.sessionID, text), animTickCmd(), m.spin.Tick)
 }
@@ -632,11 +649,21 @@ func (m Model) handleStreamEvent(msg streamEventMsg) (tea.Model, tea.Cmd) {
 		m.approval = &pendingApproval{id: msg.event.ApprovalID, tool: msg.event.Tool, subject: msg.event.Subject, options: msg.event.Options}
 		m.refreshTranscript()
 
+	case "route_start":
+		// A model call is going out — real per-attempt progress isn't
+		// observable until it finishes (the gateway's own fallback loop
+		// happens inside one HTTP round-trip), so the route bar shows a
+		// generic pulse from here until route_done lands.
+		m.routeRunning = true
+
+	case "route_done":
+		m.routeRunning = false
+		m.routeCall = msg.event.RouteCall
+
 	case "done":
 		m.waiting = false
 		m.err = nil
-		m.lastProvider = msg.event.Message.Provider
-		m.lastAttempts = msg.event.Attempts
+		m.routeRunning = false
 		m.lastUsage = msg.event.Usage
 		if lm := last(); lm != nil {
 			lm.Content = msg.event.Message.Content // authoritative final text, in case deltas ever diverge
@@ -651,6 +678,7 @@ func (m Model) handleStreamEvent(msg streamEventMsg) (tea.Model, tea.Cmd) {
 
 	case "error":
 		m.waiting = false
+		m.routeRunning = false
 		m.err = fmt.Errorf("%s", msg.event.Error)
 		m.finishStreamingPlaceholder()
 		_ = msg.stream.Close()
@@ -696,7 +724,7 @@ func (m Model) currentCombo() *statusclient.Combo {
 
 func (m *Model) syncViewportSize() {
 	inputLines := 1
-	reserved := footerHeight + inputLines
+	reserved := routeBarHeight + footerHeight + inputLines
 	if m.active != panelNone {
 		reserved += m.panelHeight()
 	}
