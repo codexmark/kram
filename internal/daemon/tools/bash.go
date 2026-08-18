@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"os/exec"
 	"time"
+
+	"github.com/codexmark/kram-gateway/internal/shell"
 )
 
 const (
@@ -27,7 +29,11 @@ func newBash(workspace string) *bash { return &bash{workspace: workspace} }
 
 func (t *bash) Name() string { return "bash" }
 func (t *bash) Description() string {
-	return "Run a shell command in the project root and return its combined stdout/stderr. Foreground only, bounded by a timeout — do not use for long-running or background processes."
+	// The shell named here is real, not assumed — see internal/shell:
+	// it's /bin/sh -c on Unix and cmd.exe /S /C on Windows, never
+	// promising Unix-only syntax (pipes, &&, backgrounding with &) on a
+	// platform where it wouldn't hold.
+	return fmt.Sprintf("Run a shell command (via %s) in the project root and return its combined stdout/stderr. Foreground only, bounded by a timeout — do not use for long-running or background processes.", shell.Describe())
 }
 
 func (t *bash) Schema() json.RawMessage {
@@ -66,14 +72,13 @@ func (t *bash) Execute(ctx context.Context, raw json.RawMessage) (string, error)
 	cmdCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(cmdCtx, "sh", "-c", args.Command)
-	cmd.Dir = t.workspace
+	cmd := shell.Command(cmdCtx, t.workspace, args.Command)
 
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &out
 
-	runErr := cmd.Run()
+	runErr := shell.Run(cmd)
 
 	output := out.String()
 	truncated := false
