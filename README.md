@@ -1,740 +1,1293 @@
-# kram-gateway
+# Kram
 
-An OpenAI-compatible LLM gateway: load balancing, circuit-breaker fallback
-and per-provider telemetry across multiple upstream providers, in a single
-static Go binary. Three routing strategies (declared-priority,
-round-robin, prefix-affinity) — see "Routing and prompt caching".
+**A local-first coding agent runtime, multi-provider LLM gateway, and terminal workspace — built from scratch in Go.**
 
-This started as the first component of **Kram**, a coding-agent platform
-built from scratch in Go, aimed at performance, reliability ("never
-crash") and token economy. The gateway is now one piece of four: gateway,
-daemon, CLI, and the agent loop — plus cross-session memory, subagent
-delegation, skills, and an MCP client.
+Kram is a terminal-native coding agent designed to do real work inside a project: inspect code, edit files, run commands and tests, use language servers, delegate independent tasks, remember decisions across sessions, connect to MCP servers, recover workspace state, and route model calls across multiple LLM providers without tying the agent loop to any one vendor.
 
-**To actually use Kram, run `cmd/kram`** (see "All-in-one" below) — the
-rest of this doc mostly describes the individual components for
-development. The gateway, daemon and CLI all still work standalone too.
-
-**[DECISIONS.md](DECISIONS.md)** records why Kram is built the way it is —
-including the decisions that were wrong at first and got reversed, the
-capabilities deliberately not built, and the known gaps.
-
-## Inspirations
-
-Kram is a clean-room build, not a fork — but its design borrows ideas from
-several existing projects:
-
-- **[opencode](https://github.com/sst/opencode)** — the agent/UX layer
-  model: session, tools, LSP integration, plugins, MCP client. Kram's
-  coding-agent layer (not yet started) will follow a similar shape,
-  rewritten in Go.
-- **[OmniRoute](https://github.com/diegosouzapw/OmniRoute)** — the idea of
-  a dedicated LLM gateway in front of the agent: load balancing across
-  many providers, circuit-breaker fallback chains ("combos"), context
-  compression, per-provider telemetry. `kram-gateway` reimplements this
-  concept from scratch in Go rather than embedding or wrapping OmniRoute
-  itself.
-- **[Compozy](https://github.com/compozy/compozy)** — the daemon-owned,
-  local-first orchestration model: durable sessions/tasks that survive
-  closing a terminal, multiple control surfaces (CLI/HTTP/MCP), a single
-  source of truth. `cmd/daemon` follows this model.
-- **[Hermes Agent](https://github.com/NousResearch/hermes-agent)** — the
-  agent loop's iteration-budget "soft landing" (a warning near the limit,
-  then one forced final answer instead of a hard cutoff), and its
-  foreground-only, timeout-bounded shell tool.
-- **[OpenClaude](https://github.com/Gitlawb/openclaude)** and
-  **[Antigravity CLI](https://github.com/google-antigravity/antigravity-cli)**
-  — per-session model routing and terminal-first agent UX patterns.
-- **[ai-memory](https://github.com/akitaonrails/ai-memory)** — the idea of
-  agent-curated, scoped (project vs. global) persistent memory searchable
-  by full-text index, surfaced automatically at the start of a turn
-  instead of requiring the user to repeat themselves every session. Kram's
-  version is a deliberately smaller slice of that design — see "Memory"
-  below for what was kept and what wasn't.
-
-No code from any of these is reused; only the architectural ideas are.
-
-## All-in-one (`cmd/kram`)
-
-This is the actual entry point for using Kram — one binary, one command,
-no separate terminals and no manual port coordination.
+The normal experience is intentionally simple:
 
 ```bash
-export ANTHROPIC_API_KEY=sk-...   # or OPENAI_API_KEY / GEMINI_API_KEY
-go run ./cmd/kram -workspace ~/projects/whatever
+kram -workspace ~/code/my-project
 ```
 
-`cmd/kram` starts the gateway and daemon **in-process** (goroutines, not
-subprocesses — `internal/gateway` and `internal/daemon` export the same
-`Run()` each standalone binary calls) on free localhost ports, waits for
-both `/health` checks, creates a session, and drops straight into the CLI.
-Gateway/daemon logs go to `<workspace>/.kram/kram.log` instead of stdout,
-since stdout belongs to the CLI's alt-screen once it starts. `ctrl+c`
-shuts everything down together — no orphaned processes, no ports left
-bound.
+One process starts the complete runtime — gateway, durable daemon, agent loop, and TUI — while keeping those components independently runnable for development or distributed setups.
 
-With no `-config`, it auto-detects a gateway config from whichever of
-`ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `GEMINI_API_KEY` are set in your
-environment, pinned to a sensible default model each, in one round-robin
-combo. Pass `-config path/to/config.yaml` (see `config.example.yaml`) for
-anything more specific — multiple providers per kind, OpenRouter/opencode
-zen, custom strategies. If neither is available it fails immediately with
-a clear message rather than starting partially.
+Kram is built around a few priorities:
 
-Session state persists to `<workspace>/.kram/kram-daemon.db` — same
-durability guarantees as running the daemon standalone (component 2).
+- **Reliability over cleverness.** Failures should be visible, bounded, recoverable, and isolated.
+- **Local-first state.** Conversations, memory, workspace metadata, artifacts, and operational state stay on the machine running Kram.
+- **Provider independence.** The agent talks to one normalized gateway instead of embedding provider-specific behavior throughout the runtime.
+- **Real observability.** Routing, context usage, tool activity, latency, fallback, and approvals come from real runtime state — the TUI does not invent telemetry.
+- **Token economy.** Prompt-prefix stability, deterministic output filtering, artifact spilling, memory limits, context compaction, and progressive disclosure reduce unnecessary context growth.
+- **Explicit control.** Tools can be disabled, permission-gated, approved interactively, or denied before execution.
+- **Small operational surface.** The core ships as a single Go binary with `CGO_ENABLED=0` builds.
 
-Everything below describes the individual components — useful for
-development, or if you want the gateway/daemon on separate machines.
+> [!IMPORTANT]
+> **Kram's core is an original implementation written specifically for this repository in Go.** It is not a fork, port, wrapper, source transplant, or repackaging of another coding agent or LLM gateway. The agent loop, routing layer, gateway, daemon, MCP client, LSP client, permission system, persistence wiring, process control, and terminal behavior are implemented here from the ground up.
+>
+> Kram does use normal third-party Go libraries for infrastructure such as terminal rendering, YAML parsing, and SQLite. Those are dependencies, not reused agent/runtime source code.
 
-## Run
+For the architectural decisions behind the implementation, including trade-offs, reversals, and deliberately deferred features, see [`DECISIONS.md`](DECISIONS.md).
+
+---
+
+## What Kram is
+
+At a high level, Kram is four things working together:
+
+```text
+┌─────────────────────────────────────────────────────────────────────┐
+│                              KRAM                                   │
+│                                                                     │
+│  ┌──────────────┐      ┌────────────────────────────────────────┐   │
+│  │ Terminal TUI │─────▶│ Durable daemon + agent runtime         │   │
+│  │              │ SSE  │                                        │   │
+│  │ sessions     │◀─────│ sessions · tools · memory · context    │   │
+│  │ route trace  │      │ delegation · approvals · persistence   │   │
+│  │ context      │      └────────────────┬───────────────────────┘   │
+│  └──────────────┘                       │ model calls               │
+│                                         ▼                           │
+│                          ┌──────────────────────────────┐           │
+│                          │ Multi-provider LLM gateway   │           │
+│                          │                              │           │
+│                          │ routing · fallback · gates   │           │
+│                          │ circuit breakers · telemetry │           │
+│                          └──────────────┬───────────────┘           │
+│                                         │                           │
+│                         ┌───────────────┼────────────────┐          │
+│                         ▼               ▼                ▼          │
+│                    Anthropic        OpenAI-style       Gemini       │
+│                    providers         providers         providers     │
+└─────────────────────────────────────────────────────────────────────┘
+
+Agent tools branch out locally to:
+
+filesystem · shell/processes · git · LSP · MCP · snapshots · artifacts
+skills · memory · session search · web fetch · subagents · user approval
+```
+
+The separation is deliberate. The **agent loop does not contain provider-specific code**, the **TUI owns no durable state**, and the **gateway does not own conversations**. Each layer has one job and can be tested or run independently.
+
+---
+
+## Why Go
+
+Kram was written from zero in Go because the runtime has unusually strong requirements around lifecycle ownership, long-running processes, concurrency, portability, and failure isolation.
+
+Go gives Kram:
+
+- a single native executable instead of a runtime plus a dependency tree;
+- cheap goroutines for gateway, daemon, streams, MCP supervision, LSP clients, and delegated work;
+- explicit `context.Context` cancellation through long-running operations;
+- straightforward HTTP/SSE and JSON-RPC implementations;
+- predictable process ownership and graceful shutdown;
+- easy cross-compilation;
+- a strong standard library for filesystem, networking, synchronization, and testing;
+- low operational complexity for a tool that is supposed to live inside development environments.
+
+The SQLite layer uses `modernc.org/sqlite`, a pure-Go driver. Release builds therefore keep `CGO_ENABLED=0`, allowing the same project to cross-compile for Linux, macOS, and Windows without a C cross-toolchain.
+
+The goal is not “zero dependencies.” The goal is **a small, inspectable application core whose behavior Kram owns**.
+
+---
+
+## Quick start
+
+### Requirements
+
+For building from source:
+
+- Go version declared in [`go.mod`](go.mod) — currently Go 1.26.6;
+- at least one configured LLM provider;
+- Git is recommended and required for workspace snapshot features;
+- language-server binaries are optional and only needed when using LSP tools.
+
+### 1. Configure a provider
+
+The simplest path is an environment variable:
 
 ```bash
-cp config.example.yaml config.yaml
-# edit config.yaml, set the env vars it references (ANTHROPIC_API_KEY, etc.)
-go run ./cmd/gateway -config config.yaml
+export ANTHROPIC_API_KEY="..."
+# or
+export OPENAI_API_KEY="..."
+# or
+export GEMINI_API_KEY="..."
+# or another provider supported by the catalog/configuration
 ```
 
-## Use
+Environment variables always take precedence over keys stored by Kram.
+
+### 2. Start Kram
 
 ```bash
-curl http://127.0.0.1:20128/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{"model":"default","messages":[{"role":"user","content":"hi"}],"stream":false}'
+go run ./cmd/kram -workspace ~/code/my-project
 ```
 
-`model` selects a combo from `config.yaml` (falls back to `default_combo`
-if it doesn't match a combo ID). Each combo is an ordered list of
-providers; round-robin picks which one leads on a given request, and if it
-fails (or its breaker is open), the next one in the combo is tried —
-before any bytes are sent to the client, for non-streaming requests.
-
-## Endpoints
-
-- `POST /v1/chat/completions` — OpenAI-compatible, streaming and non-streaming
-- `GET /admin/status` — per-provider request/failure counts, token usage, breaker state
-- `GET /health` — liveness check
-
-## Providers
-
-Three adapter kinds, one file each in `internal/provider/`:
-
-- `anthropic` — native Messages API
-- `gemini` — native streamGenerateContent
-- `openai-compat` — anything that already speaks OpenAI's chat-completions
-  format: OpenAI, OpenRouter, opencode zen, etc. Only `base_url` and the
-  API key env var differ.
-
-## Reliability
-
-- Panic in any request handler is recovered — it never takes the process down.
-- Per-provider circuit breaker: 3 consecutive failures trips it open for
-  30s, then a single half-open trial decides whether to close or re-open.
-- Non-streaming requests only commit to a provider (write any bytes) after
-  it has fully succeeded — a failure anywhere in the combo before that
-  falls through to the next provider.
-
-## Daemon (component 2)
-
-`cmd/daemon` is the single, local, durable owner of sessions: it persists
-sessions and messages to SQLite (pure-Go driver, no cgo) before reporting
-success to any caller, so a session survives both a client disconnecting
-and the daemon itself restarting. It never talks to LLM providers
-directly — every completion goes through `kram-gateway`.
+Or, once using a release binary:
 
 ```bash
-# terminal 1
-go run ./cmd/gateway -config config.yaml
-
-# terminal 2
-go run ./cmd/daemon -db kram-daemon.db -gateway http://127.0.0.1:20128
+kram -workspace ~/code/my-project
 ```
+
+Kram will:
+
+1. resolve the workspace;
+2. create `<workspace>/.kram/` if needed;
+3. load provider credentials/configuration;
+4. start the gateway and daemon on localhost;
+5. wait for both health checks;
+6. open the terminal UI;
+7. restore access to durable sessions already stored for that workspace.
+
+Gateway and daemon logs are written to:
+
+```text
+<workspace>/.kram/kram.log
+```
+
+Conversation state is stored in:
+
+```text
+<workspace>/.kram/kram-daemon.db
+```
+
+### Useful flags
+
+```text
+-workspace      project root
+-config         explicit gateway YAML configuration
+-strategy       routing strategy for the auto-detected combo
+-model          gateway combo used by the session
+-session        resume a specific session ID
+-title          create/open directly with a new session title
+-max-turns      maximum model-call budget for one agent run (default 50)
+-gateway-port   explicit gateway port; 0 chooses a free localhost port
+-daemon-port    explicit daemon port; 0 chooses a free localhost port
+-version        print Kram version
+```
+
+For example:
 
 ```bash
-# create a session
-curl -s -X POST http://127.0.0.1:20130/sessions -d '{"title":"demo"}'
-# → {"id":"ses_...","title":"demo",...}
-
-# send a message (daemon calls the gateway, persists both turns)
-curl -s -X POST http://127.0.0.1:20130/sessions/ses_.../messages \
-  -d '{"content":"hi"}'
-
-# read it back — works even after restarting the daemon
-curl -s http://127.0.0.1:20130/sessions/ses_...
+go run ./cmd/kram \
+  -workspace . \
+  -strategy smart \
+  -max-turns 50
 ```
 
-Endpoints: `POST /sessions`, `GET /sessions`, `GET /sessions/{id}`,
-`POST /sessions/{id}/messages`, `GET /health`.
+---
 
-## CLI (component 3)
+# Feature overview
 
-`cmd/cli` is Kram's user-facing interface: a Bubble Tea ([charmbracelet](https://github.com/charmbracelet/bubbletea))
-terminal app over a daemon session. Its own visual language — the "pulse
-bar" — is designed from scratch for this project, not copied from
-opencode/Crush's bordered-panel look. It never talks to an LLM provider
-or persists anything itself; it's a live view over the daemon and the
-gateway's real telemetry (nothing shown is simulated).
+## 1. A real tool-calling agent loop
 
-Assistant replies render through a custom [Glamour](https://github.com/charmbracelet/glamour)
-style matching Kram's own palette (`internal/cli/app/markdown.go`) — bold,
-headings, lists, code blocks and blockquotes render properly instead of
-showing raw `**`/`###`. A malformed-markdown or rendering failure falls
-back to the raw text rather than crashing; user messages are never run
-through it (echoing back reformatted input would be surprising). While a
-turn is running, the transcript shows a "thinking" line — the `kram` tag
-under a real color-gradient shimmer (`internal/cli/app/shimmer.go`,
-[go-colorful](https://github.com/lucasb-eyer/go-colorful) interpolation
-sweeping per character, not a discrete palette step) plus a live elapsed
-counter. This came out of a research pass on Crush and OpenClaude's chat
-UIs specifically: both independently converged on a moving color gradient
-as their "working" indicator instead of a spinner glyph, and OpenClaude
-separately tracks stalled-vs-progressing state rather than showing the
-same "busy" look either way — so past 8s with no new event (delta, tool
-start/result, notice — see `stallThreshold`), the line switches to a
-distinct color and says plainly that it's still going, instead of
-shimmering as if everything's normal. Same real elapsed time is echoed in
-the footer while waiting.
+Kram is not a chat proxy that makes one model request per message. Each user turn can become a complete agent run:
 
-User message bubbles anchor flush right regardless of length: Lip Gloss's
-`Style.Width` pads short content out to that width with trailing spaces
-by default, which the naive version of this used as the input to its
-own right-alignment math — so a short message inherited the padded box's
-width, not its own, and rendered hugging the left edge inside an
-invisible box instead of flush against the true right edge. Fixed by
-trimming that trailing padding before measuring each line.
-
-A small block-letter "KRAM" banner (`internal/cli/app/banner.go`) opens
-the session picker — hand-built and verified by direct render before
-shipping, not typed freehand into the final file (ASCII art is easy to
-get subtly misaligned).
-
-Replies stream token by token instead of appearing as one block after the
-whole turn finishes. `POST /sessions/{id}/messages` (`internal/daemon/
-server`) always responds over SSE now — a play-by-play of the agent loop
-(`internal/daemon/agent`'s `EventFunc`: text deltas, tool start/result,
-notices) as they happen, ending in one `done` event — instead of a single
-JSON blob returned after everything completes. The daemon itself now runs
-its gateway calls through `gatewayclient.ChatCompletionStream` rather than
-the buffered `ChatCompletion`, and the gateway's own streaming responses
-(`internal/server/chat.go`) carry `provider`/`attempts`/`usage`/
-`tool_calls` on the terminal chunk so the daemon never needs a separate
-non-streaming request to get them. While a reply is streaming in, its text
-renders plain (no Glamour) — parsing a markdown string mid-formation (an
-unclosed code fence, a stray `**`) would flicker through broken rendering
-every frame — the full markdown render happens once, when the message
-completes. Tool calls show a live spinner from the moment they start,
-switching to ✓/✗ when their result lands, not just at the very end.
-
-```bash
-go run ./cmd/cli -daemon http://127.0.0.1:20130 -gateway http://127.0.0.1:20128
+```text
+user request
+    │
+    ▼
+model call
+    │
+    ├─ final answer ──────────────────────────────▶ done
+    │
+    └─ tool calls
+          │
+          ▼
+      execute tools
+          │
+          ▼
+      persist results
+          │
+          └──────────────────────────────────────▶ next model call
 ```
 
-- Messages are laid out like an actual chat: yours anchored to the right,
-  Kram's replies on the left — not everything stacked in one left-aligned
-  column.
-- The mouse wheel scrolls the transcript. Mouse mode has to be enabled for
-  the footer-icon click below, which takes the wheel away from the
-  terminal's own scrollback — so it's reimplemented against the viewport
-  directly rather than just losing it. Text selection is unaffected: every
-  mainstream terminal (GNOME Terminal, kitty, Alacritty, foot, xterm) lets
-  you hold Shift while dragging to bypass an app's mouse capture, same as
-  it would for any other TUI.
-- The footer is always exactly two lines: the active provider with a
-  breathing dot and an animated latency indicator while a request is in
-  flight, settling — once the reply lands — into the real per-request
-  fallback trail (one dot per provider actually attempted) and token
-  usage. It never grows past two lines, no matter how many providers a
-  combo has.
-- `ctrl+p` opens the strategy panel (25% of the terminal height): every
-  provider in the active combo, staggered to show fallback order, each
-  tagged with its live circuit-breaker state, average latency and success
-  rate straight from `/admin/status`. Arrow keys move focus between
-  providers; the explanation line updates to describe whichever one is
-  focused. `esc` or `enter` closes it.
-- A discreet badge on the footer's bottom-right (`◔ NN%`) is a real click
-  target, not just decoration — click it, or press `ctrl+t`, to open the
-  context-window panel: a segmented bar plus a per-category token
-  breakdown (messages, tool definitions, project context, compaction
-  summary, free space)
-  computed by `GET /sessions/{id}/context` the same way the daemon decides
-  when to compact (`internal/daemon/compaction`), so the panel and the
-  actual compaction trigger never disagree. Only real categories Kram
-  actually has — no invented "skills" or "MCP tools" line items.
-- `ctrl+c` quits.
-- Launch without `-session`/`-title` and the CLI opens on a **session
-  picker** instead of always starting a new one — durable sessions
-  (component 2) stay reachable across restarts instead of getting buried.
-  `↑`/`↓` to move, `enter` to resume the selected session or create a new
-  one (optional title prompt, `enter` to skip it, `esc` to cancel back to
-  the list). Passing `-session <id>` or `-title <name>` skips the picker
-  entirely, for scripting.
+The loop persists the user message before work begins, streams visible text to the client, executes completed tool calls, feeds their results back to the model, and continues until a final answer is produced or a safety budget is reached.
 
-## Agent loop (component 4)
+### Important loop behavior
 
-`internal/daemon/agent` is what makes Kram an agent rather than a chat
-relay: each user message runs a full tool-calling loop, not a single
-model call.
+- **Tool calls are executed only after the model response containing them is complete.** Kram never executes half-streamed arguments.
+- **Default run budget: 50 model calls.** Tool round-trips count toward the same budget.
+- **Soft landing at the limit.** On the final allowed call, tools are withdrawn and the model is explicitly asked to provide its best final answer rather than being cut off mid-task.
+- **Empty-answer recovery.** A genuinely empty final model response receives one explicit retry; a second empty response becomes a visible diagnostic instead of silent failure.
+- **Usage is aggregated across the whole run**, not only the last model call.
+- **Routing trace is accumulated across the whole run**, including model calls made before and after tools.
+- **Tool results and assistant tool-call messages are durable**, so the history reflects what actually happened.
 
-- **Tool-calling protocol** (`internal/openai`, `internal/provider`): the
-  gateway translates Kram's normalized tool-call format to and from each
-  provider's native wire format — OpenAI-style `tool_calls` deltas
-  (accumulated across fragmented SSE chunks), Anthropic `tool_use`/
-  `tool_result` content blocks, and Gemini `functionCall`/
-  `functionResponse` parts.
-- **Tools** (`internal/daemon/tools`), 16 total: `read_file`, `write_file`,
-  `edit_file` (exact find-and-replace — cheaper in tokens than rewriting a
-  whole file, and refuses an ambiguous match instead of guessing which
-  occurrence was meant), `list_dir`, `glob` (`**` supported, no external
-  glob-library dependency), `grep` (pure Go, no `ripgrep` dependency),
-  `move_file`, `delete_file` (refuses directories — recursive deletes go
-  through `bash`, where the command is at least visible in the tool-call
-  log), `bash` (foreground-only, timeout-bounded), `git_status`,
-  `git_diff`, `web_fetch` (GET + HTML-tag stripping, size-capped), and
-  `todo_write`/`todo_read` (a project-wide task list persisted to
-  `.kram/todos.json`, so the agent can plan multi-step work and pick it
-  back up after a restart), and `memory_write`/`memory_search` (see
-  "Memory" below). Every file/shell tool is confined to the daemon's
-  `-workspace` directory — a path that would escape it is rejected before
-  touching the filesystem.
-- **The loop**: waits for a complete (non-streaming) model response before
-  acting on tool calls — every agent-loop implementation we looked at
-  decouples token streaming from tool execution rather than interleaving
-  them. Tool calls run sequentially and their results are persisted and
-  fed back until the model answers in plain text. `-max-turns` bounds the
-  round-trips (default 50); near the limit, tools are withdrawn from the
-  next call and the model is asked directly for a final answer (Hermes's
-  "soft landing" pattern) rather than being cut off mid-loop.
-- **Memory and compaction** (`internal/daemon/compaction`): a tiered
-  strategy — cheap structural pruning of old tool output first, full LLM
-  summarization only if that isn't enough. The summary is stored as a
-  system message wrapped as explicitly non-actionable reference material,
-  and consecutive compactions are capped at 3 per run: both are direct
-  guards against a real, repeatedly-hit bug in other agent loops where the
-  model re-executes its own summary as a new task, overflows again, and
-  loops forever (see package doc for the specific issues this targets).
-- **Images**: gated by capability, never assumed. If images are attached
-  but no provider in the active combo declares `supports_images: true` in
-  `config.yaml`, they're dropped before the request is sent and the
-  caller gets an explicit notice — the CLI shows it inline rather than
-  silently sending a text-only request.
-- **Project context**: an `AGENTS.md` (or `CLAUDE.md`) at the workspace
-  root is read fresh and injected as a system message on every turn — not
-  persisted into history, so editing it takes effect on the very next
-  message rather than requiring a restart. Finding this bug is what
-  surfaced a real one: Anthropic accepts only one top-level `system`
-  field and Gemini only one `systemInstruction`, so a second system
-  message (a compaction summary, say) was silently clobbering the first
-  before this was fixed — both adapters now concatenate instead.
+---
 
-Every message, tool call, tool result, and compaction summary is
-persisted through the same durable store as component 2 — an agent run
-survives a daemon restart exactly like a plain conversation does.
+## 2. Multi-provider gateway and Combos v2
 
-## Memory
+The gateway gives the rest of Kram one normalized OpenAI-style surface while provider adapters handle the actual upstream wire formats.
 
-Session history (component 2) is durable but session-scoped — a new
-session starts with no memory of past ones. `internal/daemon/store`'s
-`memory_entries` table plus a `memory_fts` FTS5 virtual index (external-
-content, kept in sync with insert/delete/update triggers) add a second,
-cross-session layer, inspired by
-[akitaonrails/ai-memory](https://github.com/akitaonrails/ai-memory) but
-scaled down deliberately:
+Current adapter families:
 
-- **Agent-curated, not auto-captured.** The model calls `memory_write`
-  itself to save a compiled fact, decision, or preference — Kram never
-  scrapes raw conversation into memory automatically. This keeps entries
-  short and intentional instead of accumulating noise that has to be
-  pruned later.
-- **Two scopes**: `project` (the current workspace path) and `global`
-  (`store.GlobalScope`, literally `"_global"`) for things true across
-  every project, e.g. a user's name or preferences.
-- **Automatic injection**: at the start of every turn, the agent loop
-  (`Service.recentMemoryMessage`) pulls up to 8 entries — pinned first,
-  then most-recently-updated — across both scopes and prepends them as a
-  system message, so a brand-new session already has this context before
-  the user says anything. The same method backs the context-usage panel's
-  `memory` category, so what the panel reports and what actually gets
-  sent to the model can never disagree.
-- **`memory_search`**: an FTS5 full-text query tool for anything not
-  already covered by the automatic top-8 injection — the model reaches
-  for this itself when it needs older or more specific context.
-- **No embeddings, no decay, no MCP surface, no git-backed markdown
-  source-of-truth.** ai-memory's hybrid RRF retrieval and durability
-  model are out of scope for this v0 — SQLite FTS5 is the only retrieval
-  path, and entries live only in the daemon's existing SQLite store.
+- **Anthropic** — native Messages API translation;
+- **Gemini** — native Gemini content/function-call translation;
+- **OpenAI-compatible** — OpenAI itself plus compatible gateways and endpoints configured by the user.
 
-Verified end-to-end with the disposable mock provider (see below): a
-memory written in one session was independently confirmed in the SQLite
-`memory_entries`/`memory_fts` tables, and a second, brand-new session's
-`/sessions/{id}/context` response showed a non-zero `memory` category
-before any message was sent in it — proving the injection is automatic,
-not dependent on the model deciding to search.
+Tool calls are normalized through Kram and translated to/from the provider-specific representation. Provider capability declarations are explicit: tool support and image support are routing constraints, not guesses.
 
-## Subagents (delegation)
+### Combos
 
-Orchestration and memory are Kram's two flagship bets — this is the
-orchestration half. `delegate_task` (`internal/daemon/tools/delegate.go`)
-lets the agent fan out independent work to fresh subagents, modeled on
-[Hermes Agent](https://github.com/NousResearch/hermes-agent)'s
-`delegate_task` design rather than opencode's shared-session `task` tool,
-specifically for its stricter isolation defaults:
+A **combo** is a named pool/fallback chain of providers. The incoming OpenAI `model` field selects a combo, with `default_combo` as fallback.
 
-- **Zero context inheritance.** A subagent starts in a brand-new session
-  with no knowledge of the parent conversation — it sees only the `goal`
-  and `context` strings the parent passes it (closer to briefing a junior
-  engineer than calling a function). This is a deliberate default, not a
-  missing feature: it keeps a delegated task's context budget independent
-  of however long the parent conversation has run.
-- **Real parallelism.** One `delegate_task` call takes a `tasks` array;
-  every task runs concurrently (bounded by `defaultMaxConcurrentSubagents`,
-  3 by default, matching Hermes) and the tool blocks until all finish,
-  then returns a consolidated result — fits Kram's existing
-  synchronous-tool-call model instead of introducing a whole async/polling
-  subsystem for v0.
-- **Depth-capped, not infinitely recursive.** `defaultMaxSpawnDepth` (1 by
-  default, also matching Hermes) means a subagent can't itself delegate
-  further — attempting to hits a clean, immediate error instead of an
-  unbounded agent tree. Depth travels through `context.Context`
-  (`tools.WithDepth`/`depthFromContext`), not a parameter threaded through
-  every tool's `Execute` signature, since only `delegate_task` needs it.
-- **Per-task model override.** Each task in the batch can optionally name
-  a different gateway combo than the parent's — a cheap subagent for
-  grunt work, the parent's own model for anything that needs it.
-- **No workspace/filesystem isolation yet.** Hermes's optional git-
-  worktree-per-subagent mode isn't ported — every subagent shares the
-  same workspace as its parent, same as Kram's regular file tools.
+Combos v2 separates three concerns:
 
-Wiring note: `agent.Service` (which owns the full tool-calling loop)
-implements a `tools.Delegator` interface that `delegate_task` calls
-through — declared in the `tools` package rather than importing
-`agent` directly, since `agent` already imports `tools` for its own tool
-calls and the reverse import would be a cycle.
-`Registry.SetDelegator` wires the concrete implementation in after both
-are constructed (see `daemon.go`).
+```text
+COMBO
+  │
+  ▼
+ROUTE STRATEGY
+  │ ranks eligible candidates
+  ▼
+ATTEMPT EXECUTOR
+  │ calls providers in ranked order
+  ▼
+RESPONSE / STREAM GATE
+  │ accepts or rejects technical result
+  ├─ accept ──▶ client
+  └─ reject ──▶ next candidate, while fallback is still possible
+```
 
-Verified with the mock-provider devtool, forced to call `delegate_task`
-with two parallel tasks: two isolated child sessions were created (titled
-from each task's `goal`), both ran concurrently, and — since the mock
-always tries to call a tool on a fresh conversation — each child
-immediately attempted to delegate further and was correctly blocked by
-the depth cap (`error: max subagent nesting depth reached`), recovered on
-its next turn, and returned a normal answer that the parent's
-`delegate_task` call consolidated.
+Circuit-open and capability-incompatible providers are removed **before** scoring. A strategy cannot “score around” a hard constraint.
 
-## Skills, clarifying questions, and the tools/skills toggle
+### Routing strategies
 
-Closing the remaining gap against opencode/OpenClaude/Hermes: all three
-offer a skills system and a way for the agent to pause and ask the user
-something instead of guessing. Kram now has both, plus a way to turn any
-individual tool or skill off.
+| Strategy | Purpose |
+|---|---|
+| `priority` | Keep the configured provider order. Predictable and cache-friendly. |
+| `round-robin` | Rotate the leading candidate to distribute calls across peers. |
+| `prefix-affinity` | Deterministically keep a stable prompt prefix on the same healthy provider. |
+| `smart` | Balanced weighted routing across health, reliability, latency, quality hint, cache affinity, and priority. |
+| `quality` | Weighted preset that emphasizes explicit quality hints and reliability. |
+| `fast` | Weighted preset that emphasizes observed latency while still considering health. |
+| `reliable` | Weighted preset that strongly favors observed success and health. |
+| `cheap` | Cost-conscious preset using configured provider priority as the operator's cost preference. Kram does not fabricate price telemetry. |
+| `weighted` | Fully configurable version of the weighted engine. |
+| `lkgp` | Prefer the last known good eligible provider. |
+| `p2c` | Power-of-two-choices style selection for a small, cheap balancing decision. |
 
-- **Skills** (`internal/daemon/tools/skills.go`): the same open shape
-  opencode's Agent Skills, Hermes's agentskills.io-based skills, and
-  OpenClaude's `DiscoverSkillsTool` all converge on — a folder per skill
-  containing `SKILL.md` (a small `name`/`description` frontmatter block,
-  then markdown instructions as the body), discovered from
-  `<workspace>/.kram/skills/*/SKILL.md` (project) and
-  `~/.config/kram-gateway/skills/*/SKILL.md` (global). Progressive
-  disclosure, matching Hermes's pattern: `skill_list` returns only names
-  and one-line descriptions (cheap), `skill` loads one skill's full body
-  by name (only when actually needed) — the model never pays full
-  skill-body tokens for skills it isn't using.
-- **`ask_question`** (`internal/daemon/tools/ask.go`): lets the agent
-  genuinely pause a turn for a real answer instead of guessing — matching
-  opencode's `question` tool, OpenClaude's `AskUserQuestionTool`, and
-  Hermes's `clarify`. Mechanically this is the first tool that can't just
-  return text synchronously: it emits a new `EventQuestion` over the SSE
-  stream (carrying the question and any options) and then genuinely
-  blocks — the daemon's HTTP handler for that turn stays open and
-  parked — until a *separate* HTTP call, `POST
-  /sessions/{id}/answer`, delivers an answer and unblocks it. The `Asker`
-  interface behind this is injected into `context.Context` per turn (same
-  pattern `Delegator`/depth use), since unlike delegation it needs that
-  turn's live event channel and session ID, not a fixed dependency wired
-  in once at startup.
-- **Tools/skills toggle**: `internal/toolsettings` is a local on/off list
-  (same shape and guarantees as `internal/credentials` — plain JSON under
-  `kramhome`, `0600`) that `Registry.Definitions()`/`Execute()` both
-  respect — a disabled tool is invisible to the model, not just refused
-  if called (though it's refused too, as defense in depth against a model
-  that saw the tool name in an earlier turn). The CLI's `f` screen (from
-  the session picker) lists every registered tool and discovered skill,
-  fetched live from the daemon's `GET /tools` endpoint rather than a
-  hardcoded duplicate list, with a checkbox per row. Same pattern as the
-  accounts screen: toggling writes locally and takes effect on the
-  daemon's next restart, not live.
+The weighted family uses one scoring engine rather than separate implementations for each preset. Custom weights are normalized automatically.
 
-Verified with the mock-provider devtool: a real `SKILL.md` was placed in
-a test workspace and `skill_list` found it; `ask_question` was forced,
-confirmed to emit the `question` event and genuinely block the stream,
-then `POST /sessions/{id}/answer` was called independently and the exact
-chosen answer flowed back as the tool's result; and `bash` was disabled
-via a tool-settings file, confirmed to disappear from a fresh daemon's
-`GET /tools` listing and to be refused with a clear error when the model
-tried calling it anyway.
+### Smart routing signals
 
-## The agent's own prompt
+The current weighted engine can use:
 
-Every capability added to Kram had to be told to use itself. `memory_write`
-existed and never fired until a rule said "save durable facts unprompted";
-`skill_list` existed and was never called until a rule said "check skills
-before specialized work". A tool being in the schema is not an instruction
-to use it — a tool-calling model's default is to stay reactive.
+- circuit-breaker/health state;
+- observed provider success rate;
+- observed average latency;
+- explicit operator `quality_hint`;
+- prompt-prefix/cache affinity;
+- declared combo priority;
+- last-known-good boost;
+- run stickiness;
+- bounded exploration for gathering telemetry from non-leading candidates.
 
-`internal/daemon/agent/systemprompt.go` is where that lives now: identity,
-an explicit trigger for every proactive capability, verification
-discipline ("never claim something works because it should"), output
-rules for a terminal, and a standing instruction to treat file contents
-and command output as data rather than instructions. It is written from
-scratch against public agent-prompting practice — no proprietary prompt
-is reproduced.
+Kram intentionally does not invent quality, price, quota, or latency data it does not actually have.
 
-Style is deliberate: short imperative rules with literal trigger words,
-not paragraphs of nuanced prose. Kram's realistic default is a *small*
-model (its zero-cost chain is free-tier 20-30B-class models), and a large
-model loses nothing reading terse rules while a small one falls apart
-reading subtle ones.
+### ResponseGate
 
-The preamble assembles, most general first: system prompt → `AGENTS.md` →
-remembered facts → conversation. None of it is persisted into history;
-each is rebuilt from its current source every turn, so editing `AGENTS.md`
-takes effect on the very next message.
+A transport-level HTTP success is not always a useful model response. Combos may enable deterministic response validation such as:
 
-## MCP (Model Context Protocol)
+- reject empty output;
+- require a terminal completion signal;
+- require a minimum text length;
+- reject configured substrings used by upstreams to disguise technical failures inside HTTP 200 responses.
 
-`internal/mcp` is a from-scratch MCP client — how Kram reaches
-third-party tool servers instead of only what's compiled into its binary.
-No SDK: MCP is JSON-RPC 2.0 over stdio or HTTP, and hand-rolling it keeps
-the pure-Go static-binary property.
+This gate is for **technical validity**, not semantic judgment. It is not intended to route around legitimate model refusals or policy behavior.
 
-- **Both transports.** stdio (newline-delimited JSON over a child
-  process — no framing headers; this is genuinely the wire format, it is
-  not LSP-style) and Streamable HTTP (POST per message, answered with
-  either JSON or a request-scoped SSE stream, echoing `Mcp-Session-Id`).
-- **Protocol era.** Implements the stateful lifecycle (`initialize` →
-  `notifications/initialized` → `tools/list`/`tools/call`) used through
-  revision 2025-11-25. The 2026-07-28 revision drops the handshake for
-  stateless per-request metadata; that's deliberately deferred, because
-  essentially every MCP server deployed today still speaks the older
-  lifecycle. `client.go`'s `handshake` marks where a modern probe slots in.
-- **Config.** `mcpServers` in `~/.config/kram-gateway/mcp.json` (global)
-  and `<workspace>/.kram/mcp.json` (project, wins on name collision) —
-  the same shape Claude Desktop, Claude Code and opencode use, so an
-  existing config works unchanged.
-- **Namespacing.** Server tools register as `mcp__<server>__<tool>`, so a
-  server publishing `bash` or `read_file` can't silently shadow Kram's own.
-- **Isolation.** Connecting happens after the registry exists and never
-  blocks startup: an unavailable server costs its own tools and nothing
-  else.
+### Streaming fallback
 
-## Deterministic output filtering
+For streaming requests, Kram performs a small bounded peek before committing downstream SSE output. Empty role-only chunks, keepalives, immediate errors, and streams that fail before meaningful output can still fall through to another provider.
 
-Tool output is where a coding agent's context budget actually goes — one
-`npm install` or `go test ./...` is thousands of lines of progress noise
-around maybe five lines of signal, and it stays in history for the rest
-of the session.
+Once meaningful model content has been committed to the downstream client, the same HTTP response cannot safely switch providers. Kram therefore treats **pre-commit fallback** and **post-commit stream handling** as different lifecycle stages.
 
-`internal/daemon/tools/outputfilter.go` is a deterministic filter pass
-over that output, adapted from OmniRoute's RTK compression engine. The
-idea worth stealing is that it keys on *the command that produced the
-output* and uses plain regex rules — no LLM call, no latency, nothing to
-hallucinate.
+---
 
-The load-bearing invariant is that it must never eat an error: preserve
-patterns are checked before any drop rule, so a line that looks like a
-failure survives whatever else matches. `outputfilter_test.go` exists to
-make that failure mode impossible to ship quietly — it asserts that a Go
-test failure, an npm ERESOLVE, a jest failure and a compiler diagnostic
-each survive their own filter. These are also the repo's first Go tests.
-Writing them immediately paid: they caught the all-lines-dropped case
-returning the full original output, which added no signal and saved no
-tokens.
+## 3. Circuit breakers and provider isolation
 
-## Routing and prompt caching
+Every provider has independent breaker state.
 
-Round-robin has a non-obvious cost. Every major provider caches prompt
-prefixes server-side and bills cached input at a fraction of the rate,
-and that cache is per-provider. An agent turn resends a large,
-near-identical prefix on every tool round-trip — so rotating providers
-between those calls throws the cache away each time.
+Current breaker behavior:
 
-So the auto-built combo now picks its strategy from what's actually
-configured (`cmd/kram/autodetect.go`):
+- 3 consecutive failures open the circuit;
+- open providers are skipped during routing;
+- after a 30-second cooldown, recovery is probed through the half-open state;
+- a successful attempt closes and resets the circuit;
+- a failed half-open attempt reopens it.
 
-- **A paid provider is present** → no rotation. The catalog order is a
-  priority order, the paid provider leads, and the cheapest thing to do
-  is keep using it so its cache stays warm.
-- **Only free tiers** → round-robin. These are interchangeable peers and
-  the binding constraint is rate limits, not cost; you can't benefit from
-  a warm cache on a provider answering 429.
+The purpose is simple: one degraded upstream should not be hammered repeatedly and should not prevent healthy candidates from receiving work.
 
-`router.StrategyPrefixAffinity` is a third option for chains of
-equivalent peers where stability matters more than spreading: it hashes
-the request's stable prefix (leading system messages plus the first user
-message — deliberately excluding the growing tool-call tail, which would
-otherwise produce a different key every round-trip) and pins accordingly,
-reshuffling only when the healthy set changes.
+The gateway also exposes real per-provider telemetry: request count, failure count, token usage, average latency, success rate, capabilities, and breaker state.
 
-## Skills, installed
+---
 
-`skill_install` clones a public git repo, finds every folder with a
-`SKILL.md`, and installs the ones named — reporting the repo's license
-and warning when there isn't one. It reports; it never judges whether
-copying is permitted, because that's the user's call.
+## 4. Durable sessions and local-first persistence
 
-The bundled set was chosen by checking each repository's LICENSE file
-directly rather than trusting GitHub's detected label, which matters more
-than it sounds: `anthropics/claude-code` is "© Anthropic PBC, all rights
-reserved" despite being a public repo, and `anthropics/skills` is
-per-skill mixed (Apache-2.0 for most, proprietary for the document ones).
-Public is not the same as permissively licensed. Installed, all verified
-MIT first-hand:
+The daemon owns conversation durability. The TUI is only a view.
 
-- **[obra/superpowers](https://github.com/obra/superpowers)** —
-  `systematic-debugging`, `verification-before-completion`,
-  `test-driven-development`, `receiving-code-review`
-- **[addyosmani/agent-skills](https://github.com/addyosmani/agent-skills)** —
-  `frontend-ui-engineering`, `code-review-and-quality`,
-  `planning-and-task-breakdown`, `security-and-hardening`,
-  `code-simplification`
-- **[mattpocock/skills](https://github.com/mattpocock/skills)** —
-  `codebase-design`, `domain-modeling`, `diagnosing-bugs`
-- **[JuliusBrussee/caveman](https://github.com/JuliusBrussee/caveman)**
-  (its `skills/` dir is MIT per `LICENSING.md`; the engine dirs are BSL) —
-  `caveman`, `surgical-patch`, `investigate-first`, `verify-and-stop`,
-  `safe-refactor`
-- **[DietrichGebert/ponytail](https://github.com/DietrichGebert/ponytail)** —
-  `ponytail`
+Sessions and messages are written to SQLite before the caller is told the operation succeeded. Closing the terminal does not delete the conversation, and restarting the daemon does not erase history.
 
-Each installed copy keeps a `SOURCE` file recording where it came from.
-Cross-repo references (`superpowers:test-driven-development`) were
-rewritten to Kram's bare naming.
+The store also backs:
 
-## Memory, revisited
+- persistent cross-session memory;
+- full-text session search;
+- compaction summaries;
+- tool-call history;
+- provider attribution on assistant messages.
 
-The first version had no size limit, which meant memory silently became
-an unbounded prompt prefix on every turn. Two changes, both from Hermes
-Agent's design:
+The database lives inside the workspace, so project history follows the project rather than a remote account.
 
-- **A hard per-scope cap** (2,400 chars). Overflowing doesn't truncate or
-  fail — it returns every current entry with its id and tells the model
-  to consolidate first. `memory_write` grew `replace` and `remove` to make
-  that possible. The cap *is* the design: "summarize when it gets long"
-  only ever happens if something forces it.
-- **Snapshotted per run**, not re-read per turn. The preamble is a prompt
-  prefix; changing it between calls discards the provider's prefix cache
-  on every tool round-trip. Kram freezes per run rather than per session
-  (as Hermes does), so a fact written mid-conversation still appears on
-  the user's very next message instead of only in a new session.
+---
 
-## Background processes
+## 5. Built-in toolset
 
-`bash` stays foreground-only and timeout-bounded by design (see
-DECISIONS.md) — but a coding agent legitimately needs to start a dev
-server and keep working, so that's a separate, explicit capability:
-`run_background`, `process_list`, `process_output`, `process_kill`
-(`internal/daemon/tools/background.go`).
+A normal daemon with persistence available registers **34 core tools** before custom tools and MCP-provided tools are added.
 
-Processes are daemon-lifetime, not session-lifetime — a dev server
-started from one session is still checkable and killable from a
-different one, same pattern as the project-wide todo list. Output is
-captured into a capped ring buffer (500KB, keeps the tail) per process.
-The daemon kills every tracked process on its own shutdown, so nothing
-outlives it as an orphan.
+They are grouped by purpose below.
 
-Verified end to end with the mock-provider devtool: started a background
-loop, confirmed the turn returned immediately rather than blocking for
-the loop's full duration, then — from a completely separate session —
-confirmed the process had kept running and its output was fully captured
-after it exited on its own.
+| Area | Tools | What they are for |
+|---|---|---|
+| Files | `read_file`, `write_file`, `edit_file`, `list_dir`, `glob`, `grep`, `move_file`, `delete_file` | Inspect and modify the workspace with deterministic file operations. |
+| Shell & processes | `bash`, `run_background`, `process_list`, `process_output`, `process_kill` | Run bounded foreground commands or explicitly manage daemon-owned background processes. |
+| Git | `git_status`, `git_diff` | Give the model read-only visibility into repository state and changes. |
+| Web | `web_fetch` | Fetch HTTP(S) resources with bounded output for reference material. |
+| Planning | `todo_write`, `todo_read` | Persist a project-level task list for multi-step work. |
+| Human interaction | `ask_question` | Pause the agent run and wait for a real user answer instead of guessing. |
+| Delegation | `delegate_task` | Fan independent work out to isolated subagents. |
+| Skills | `skill_list`, `skill`, `skill_install` | Discover, load, and install reusable instruction packages with progressive disclosure. |
+| Artifacts | `artifact_read` | Read bounded slices of oversized output previously spilled to disk. |
+| Code intelligence | `lsp_diagnostics`, `lsp_definition`, `lsp_references` | Use language-server semantics instead of relying only on text search. |
+| Workspace recovery | `snapshot_create`, `snapshot_list`, `snapshot_diff`, `snapshot_restore` | Capture and restore explicit workspace snapshots. |
+| Memory & history | `memory_write`, `memory_search`, `session_search` | Preserve curated knowledge and search real historical conversations. |
 
-## Custom tools (plugins)
+### File safety
 
-`.kram/tools/*.json` (project) and `~/.config/kram-gateway/tools/*.json`
-(global) each define one tool with no Go code at all:
+Structured file tools resolve user-supplied paths against the workspace root and reject paths that escape it.
+
+The shell is intentionally different: it starts with the workspace as its working directory, but it is a real operating-system shell, **not a filesystem sandbox**. Shell risk is controlled through visibility, timeout/process ownership, and the permission engine. If stronger OS isolation is required, Kram should be run inside an appropriate container/VM/sandbox rather than pretending `cwd` is a security boundary.
+
+---
+
+## 6. Cross-platform shell and process-tree ownership
+
+All command-running features share `internal/shell` instead of each inventing its own `exec.Command` behavior.
+
+### Unix
+
+Commands run through `/bin/sh -c` in their own process group. Cancellation/kill targets the process group so children are not silently orphaned; shutdown can escalate from graceful termination to kill when necessary.
+
+### Windows
+
+Commands run through `cmd.exe /S /C` (resolved through `COMSPEC`) and are attached to a Windows Job Object with kill-on-close semantics. Kram does not assume Git Bash, WSL, or a POSIX shell exists on Windows.
+
+This layer is used by foreground shell calls, background processes, and manifest-defined custom tools.
+
+`bash` itself remains foreground-only with a default 30-second timeout and a 120-second maximum. Long-running servers/watchers belong in the explicit background-process tools so Kram can track and terminate them later.
+
+---
+
+## 7. Permission engine: ALLOW / ASK / DENY
+
+Tool availability and tool permission are separate concepts.
+
+A tool may be enabled but still require approval for a particular operation. Every built-in, manifest-defined, and MCP-backed tool call flows through the same permission evaluator before execution.
+
+Decisions are deterministic:
+
+- `allow` — execute immediately;
+- `ask` — pause the run and ask the user;
+- `deny` — refuse without executing.
+
+Rules may target exact tool names, MCP prefixes, and operation subjects such as a shell command or file path. More-specific matching wins over broader matching.
+
+Example project policy:
+
+```json
+{
+  "default": "allow",
+  "rules": [
+    {"tool": "bash", "pattern": "git push*", "decision": "ask"},
+    {"tool": "delete_file", "pattern": "*", "decision": "ask"},
+    {"tool": "mcp__github__*", "pattern": "*", "decision": "ask"}
+  ]
+}
+```
+
+Project policy:
+
+```text
+<workspace>/.kram/permissions.json
+```
+
+Global policy:
+
+```text
+~/.config/kram-gateway/permissions.json
+```
+
+When the user chooses **always**, Kram persists an allow grant for the exact approved subject rather than silently widening it to a wildcard.
+
+A fully denied tool is removed from model-visible definitions entirely; a partially denied tool remains visible because some calls are still valid.
+
+---
+
+## 8. Interactive questions and approvals
+
+Some decisions should not be guessed by the model.
+
+`ask_question` emits a live SSE event and genuinely parks the current agent run until a separate answer arrives. Permission `ask` decisions use a separate approval channel with `once`, `always`, and `deny` options.
+
+Questions and approvals are intentionally distinct mechanisms:
+
+```text
+ask_question  -> the model needs information
+approval      -> policy requires authorization
+```
+
+Both waits are bounded. Approval timeout fails closed rather than silently becoming permission.
+
+The TUI renders both flows directly inside the active turn.
+
+---
+
+## 9. Context management and compaction
+
+Coding agents can accumulate context quickly because every tool result becomes part of the next model call. Kram manages this deliberately instead of waiting for an upstream context-window error.
+
+The current compaction path is tiered:
+
+1. build effective history;
+2. structurally prune old/redundant tool output first;
+3. only if still necessary, ask the model for a compact summary;
+4. persist that summary as explicitly non-actionable reference context;
+5. reload the reduced effective history.
+
+A run is allowed at most three compaction attempts by default. If the context keeps overflowing, Kram returns a real `ErrContextOverflow` instead of entering an unbounded summarize/retry loop.
+
+The TUI's context panel reports the same categories the daemon uses to reason about context, including conversation content, tool definitions, project context, memory/compaction material, and remaining budget.
+
+---
+
+## 10. Deterministic tool-output filtering
+
+Raw command output is often mostly progress noise. Sending every line of a compiler, package manager, or test runner back through every later model call wastes tokens and makes signal harder to find.
+
+Kram applies deterministic, command-aware filtering to inline shell output:
+
+- no extra LLM call;
+- no summarization hallucination;
+- preserve/error patterns are evaluated before drop patterns;
+- an all-routine result still returns a small truthful summary rather than becoming empty.
+
+The filter can only remove known noise. It does not invent replacement output.
+
+---
+
+## 11. Artifact store and bounded command output
+
+Large outputs should not consume unbounded RAM or disappear through truncation.
+
+Foreground shell and custom-tool output use a spill writer directly as process stdout/stderr. Inline output is bounded; once the threshold is crossed, the complete stream is written to the workspace artifact store while memory use stays bounded.
+
+The model receives:
+
+- a short preview;
+- an artifact ID;
+- metadata sufficient to identify the stored result;
+- access through `artifact_read` in bounded slices.
+
+Artifact access accepts Kram-generated IDs, not arbitrary filesystem paths.
+
+Artifacts are local workspace state and old artifacts receive best-effort garbage collection at daemon startup.
+
+The agent loop separately enforces a combined per-turn tool-output budget so many individually reasonable results cannot explode context in one model turn.
+
+---
+
+## 12. Persistent memory
+
+Conversation history and memory are deliberately different.
+
+History answers:
+
+> What was actually said in this session?
+
+Memory answers:
+
+> What fact or decision is worth carrying into future sessions?
+
+Kram memory is **agent-curated**, not automatic conversation scraping. The model uses `memory_write` when a fact, preference, or decision is durable enough to keep.
+
+Memory supports:
+
+- **project scope** — tied to the current workspace;
+- **global scope** — available across projects;
+- FTS5 search through `memory_search`;
+- pinned/recent automatic injection at the beginning of a run;
+- replace/remove operations for consolidation;
+- a hard per-scope size cap to prevent memory from becoming an unbounded prompt prefix.
+
+Recent memory is frozen once per user run so tool round-trips keep a stable prompt prefix. Newly written memory becomes available on the next user run.
+
+---
+
+## 13. Cross-session conversation search
+
+`session_search` searches what users and assistants actually said across durable sessions, even if nobody promoted that information into memory.
+
+It uses deterministic SQLite FTS5/BM25 retrieval rather than an LLM query.
+
+By design:
+
+- user and assistant text is indexed;
+- system messages and tool output do not become primary search matches;
+- delegated subagent sessions are excluded by default to avoid drowning real conversation history in repeated worker transcripts;
+- callers can opt into the wider scope when needed;
+- matches include surrounding context so the result is useful, not just a disconnected line.
+
+This gives Kram both **curated memory** and **historical recall** without conflating the two.
+
+---
+
+## 14. Project context
+
+Kram looks for project-level instructions in the workspace root and injects them into the run preamble.
+
+Supported root files currently include:
+
+```text
+AGENTS.md
+CLAUDE.md
+```
+
+Project context is re-read instead of permanently copied into conversation history, so changing the file affects subsequent work without requiring the session to be recreated.
+
+The model preamble is assembled roughly as:
+
+```text
+Kram system rules
+    + project context
+    + persistent memory snapshot
+    + effective conversation history
+```
+
+Keeping this prefix deliberate and stable matters for both model behavior and upstream prompt caching.
+
+---
+
+## 15. Subagents and parallel delegation
+
+`delegate_task` lets the main agent split independent work into parallel subtasks.
+
+A delegated task starts in a fresh session with **zero inherited conversation history**. It only sees the explicit goal and context supplied by the parent. This keeps the worker's context budget independent from a potentially long parent conversation and forces delegation to carry a clear brief.
+
+Current safeguards:
+
+- up to 3 concurrent subagents by default;
+- delegation depth capped at 1;
+- subagents cannot recursively build an unbounded agent tree;
+- each delegated task may select a different gateway combo/model;
+- the parent tool call waits for workers and receives their consolidated results.
+
+Subagents currently share the same workspace. They are context-isolated, not filesystem-isolated.
+
+---
+
+## 16. Skills with progressive disclosure
+
+Skills are reusable instruction packages stored as a directory containing `SKILL.md`.
+
+Kram discovers project and global skills, but does not inject every skill body into every prompt. Instead:
+
+1. `skill_list` exposes cheap metadata — name and description;
+2. `skill` loads full instructions only when needed;
+3. `skill_install` can discover/install skills from a public Git repository and reports source/license information.
+
+Project skills:
+
+```text
+<workspace>/.kram/skills/<skill>/SKILL.md
+```
+
+Global skills:
+
+```text
+~/.config/kram-gateway/skills/<skill>/SKILL.md
+```
+
+This progressive-disclosure model keeps specialized knowledge available without permanently taxing the context window.
+
+Skills can also be disabled from the same settings system used for tools.
+
+---
+
+## 17. Custom tools without recompiling Kram
+
+Project and global JSON manifests can add tools without writing Go or rebuilding the binary.
+
+Locations:
+
+```text
+<workspace>/.kram/tools/*.json
+~/.config/kram-gateway/tools/*.json
+```
+
+Example:
 
 ```json
 {
   "name": "uppercase",
-  "description": "Uppercases the given text.",
-  "command": "python3 -c \"import sys,json; d=json.load(sys.stdin); print(d['text'].upper())\"",
-  "schema": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}
+  "description": "Uppercase the supplied text.",
+  "command": "python3 -c \"import json,sys; d=json.load(sys.stdin); print(d['text'].upper())\"",
+  "schema": {
+    "type": "object",
+    "properties": {
+      "text": {"type": "string"}
+    },
+    "required": ["text"]
+  }
 }
 ```
 
-The tool call's raw JSON arguments are piped to `command`'s stdin;
-whatever it writes to stdout becomes the result — same trust boundary as
-`bash` (confined to the workspace, `sh -c`, timeout-bounded, non-zero
-exit reported as a fact rather than editorialized as an error). A
-manifest can never override a built-in tool name — `bash`, `grep`, or
-anything else already registered wins silently, so a stray manifest can't
-change what those names do. A project manifest wins over a global one
-with the same name, same merge rule MCP's config uses.
+The tool-call JSON is sent to the command on stdin; stdout becomes the result. Manifest tools share Kram's shell runner, output limits/artifact handling, tool settings, and permission path.
 
-Deliberately not a Go plugin (`.so` files are fragile and break the
-static-binary goal) and not an embedded scripting language — just a
-manifest and a process.
+A manifest cannot override a built-in tool name. Project manifests take precedence over global manifests with the same custom name.
 
-## MCP resources and prompts
+This keeps extension simple and preserves the static Go binary instead of loading fragile in-process native plugins.
 
-Beyond `tools/*`, the MCP client now also supports:
+---
 
-- **Resources** (`resources/list`, `resources/read`) — server-exposed
-  readable data by URI. Surfaced as two tools, `mcp_resource_list` and
-  `mcp_resource_read`, rather than one tool per resource (a server can
-  expose an unbounded number of resources; two fixed tools scale, N
-  dynamic ones don't).
-- **Prompts** (`prompts/list`, `prompts/get`) — server-defined,
-  parameterized prompt templates. Surfaced the same way:
-  `mcp_prompt_list` / `mcp_prompt_get`.
+## 18. MCP client
 
-Elicitation is still deferred — it needs the same kind of turn-pausing
-plumbing `ask_question` required (a live event channel, a way to resume a
-blocked call), and no server in real use yet has forced building it.
+Kram includes its own MCP client implementation in Go. It does not require an MCP SDK inside the runtime.
 
-## Evals
+Supported capabilities include:
 
-`evals/` (`go run ./evals`) runs scripted scenarios against the real
-configured provider — same in-process gateway+daemon wiring `cmd/kram`
-uses, same autodetection. This is what unit tests structurally can't do:
-check what a real model actually does when handed Kram's system prompt
-and tools, not just that Kram's own code is internally correct.
+- stdio servers;
+- Streamable HTTP transport;
+- initialization/lifecycle handling;
+- dynamic `tools/list` and `tools/call`;
+- resources list/read;
+- prompts list/get;
+- project and global MCP configuration;
+- server isolation — one broken server does not prevent Kram from starting;
+- transport reconnect supervision with bounded exponential backoff;
+- `tools/list_changed` refresh;
+- on-disk schema snapshots keyed by connection-config fingerprint.
 
-Each scenario is a regression test for a specific behavior, several
-traced directly to bugs found by hand during development:
+Remote tools are namespaced as:
 
-- **Hard** scenarios must pass regardless of which model is configured —
-  a turn never returns a truly empty final answer, grep never leaks
-  binary garbage into a response, the core tool set is actually
-  registered.
-- **Soft** scenarios are informational, not blocking — whether a model
-  proactively calls `skill_list` for an unmistakable trigger phrase, or
-  `memory_write` for a volunteered fact, depends on that model's
-  capability level, not on whether Kram's own code is correct. A soft
-  scenario failing is a real, useful signal (the first real run already
-  found one — an explicit skill trigger phrase didn't get a free-tier
-  model to check `skill_list`) — it just shouldn't fail the whole harness
-  the moment someone runs it against a weaker model.
-
-Needs a real provider configured (env var or a key from the accounts
-screen) — there's no way to eval actual model behavior against the mock.
-
-## Releases
-
-```bash
-./scripts/build-release.sh v1.2.3   # or omit the version to use `git describe`
+```text
+mcp__<server>__<tool>
 ```
 
-Cross-compiles `cmd/kram` for linux/darwin × amd64/arm64 plus
-windows/amd64 into `dist/`, each archived (`.tar.gz`, or `.zip` for
-Windows). `CGO_ENABLED=0` — no cross-compiler toolchain, no
-platform-specific build image needed, because the SQLite driver
-(`modernc.org/sqlite`) was chosen pure-Go from the start specifically so
-the daemon's storage layer never needs cgo. Every target in the matrix
-was hand-verified to actually build *and run*, not just compile without
-error.
+so a remote server cannot silently replace a built-in name such as `bash` or `read_file`.
 
-`.github/workflows/release.yml` runs this same script on every `v*.*.*`
-tag push and attaches the archives plus a `checksums.txt` to a GitHub
-release. `.github/workflows/ci.yml` runs build/vet/format-check/test on
-every push and PR.
+When MCP servers are connected, Kram also exposes generic tools for server resources and prompts:
+
+```text
+mcp_resource_list
+mcp_resource_read
+mcp_prompt_list
+mcp_prompt_get
+```
+
+MCP connections are external trust boundaries. Their tools still pass through Kram's common tool registry and permission evaluator before execution.
+
+---
+
+## 19. LSP code intelligence
+
+Text search is useful, but a coding agent also benefits from semantic code navigation.
+
+Kram contains a small LSP client implementation over the protocol's `Content-Length` framed JSON-RPC transport. Language servers start **lazily** — not at daemon startup — and one server is reused per language.
+
+Current agent-facing capabilities:
+
+- diagnostics;
+- go-to-definition;
+- references.
+
+The manager has defaults for common Go, TypeScript/JavaScript, and Python language servers and can be extended through project configuration.
+
+If a language server is missing or fails to initialize, Kram keeps running. Only that language's LSP capability is unavailable; the agent can fall back to regular file/search tools.
+
+Language servers started by Kram are closed on daemon shutdown.
+
+---
+
+## 20. Workspace snapshots and restore
+
+Kram can explicitly snapshot the workspace before risky work and later inspect or restore that state.
+
+The snapshot engine uses a **separate, isolated Git repository** under Kram state, with the real workspace as its work tree. It never points snapshot commands at the user's own `.git` directory, index, branch, or HEAD.
+
+Available operations:
+
+```text
+snapshot_create
+snapshot_list
+snapshot_diff
+snapshot_restore
+```
+
+The snapshot store:
+
+- respects the project's `.gitignore`;
+- always excludes `.git` and `.kram` from snapshot history;
+- reports files affected by restore;
+- leaves files that were never captured by the snapshot system alone;
+- degrades cleanly when the system `git` executable is unavailable.
+
+Snapshots are currently **explicit**, not automatically created before every mutation. `snapshot_restore` is a destructive operation and can be permission-gated like any other tool.
+
+---
+
+## 21. Background processes
+
+Long-running work is deliberately separate from foreground shell execution.
+
+`run_background` starts a tracked daemon-owned process. The agent can later inspect or stop it through:
+
+```text
+process_list
+process_output
+process_kill
+```
+
+Background processes are daemon-lifetime rather than session-lifetime. That allows a server started in one conversation to be inspected from another session in the same workspace/runtime.
+
+The daemon kills tracked process trees on shutdown so a dev server does not silently outlive the process that owns it.
+
+---
+
+## 22. Terminal UI designed around real runtime state
+
+The TUI is implemented with Bubble Tea/Lip Gloss and talks to the daemon/gateway over their real APIs. It does not persist conversations itself and does not call providers directly.
+
+### Transcript
+
+- Kram responses remain left-aligned and render completed Markdown.
+- Submitted user messages are shown as a compact right-aligned **prompt block** with a slim accent, not a messaging-app bubble.
+- The active composer is a 3-row word-wrapping textarea, so long prompts remain visible instead of scrolling horizontally off-screen.
+- Responses stream incrementally.
+- Tool calls appear while they are running and settle into success/failure state when their result arrives.
+- Notices, questions, and approval prompts are integrated into the turn.
+- Mouse-wheel transcript scrolling is supported.
+
+### Route bar
+
+A one-line route bar sits above the transcript and reports the active strategy and the real routing trail once a model call completes.
+
+On wide terminals it can show provider names, outcome glyphs, and latency. It degrades to more compact forms on narrower terminals without allowing long provider IDs to wrap the layout.
+
+While a model call is in flight, the bar shows a generic routing state rather than fabricating which internal fallback attempt is currently active.
+
+### `Ctrl+R` — full route trace
+
+Shows the routing story for the most recently completed user run:
+
+- every model call;
+- every upstream attempt;
+- provider;
+- latency;
+- outcome;
+- technical rejection/error reason;
+- selected winner;
+- aggregate counts and provider time.
+
+This is important because a real agent turn may make several model calls around tools; showing only the last call would hide most of the routing behavior.
+
+### `Ctrl+P` — strategy explainability
+
+For scoring strategies, the panel renders the **router's actual ranking data**, including factor weight, value, contribution, total score, and reasons such as sticky/LKGP/cache affinity/exploration.
+
+The TUI does not recalculate the score independently, so display logic cannot drift into a second implementation of routing.
+
+### `Ctrl+T` — context panel
+
+Shows context usage and budget information sourced from the daemon. The context indicator is also clickable in mouse mode.
+
+### Session picker and settings
+
+Launching without `-session` opens the durable session picker.
+
+From the picker:
+
+- `a` opens provider/account management;
+- `f` opens tool/skill enable-disable settings;
+- arrow keys navigate;
+- `Enter` resumes or creates a session;
+- `Ctrl+C` exits.
+
+The accounts screen can store provider keys locally, use supported OAuth flows, and run real lightweight connectivity/auth checks. Status dots reflect actual ping results rather than decorative state.
+
+---
+
+## 23. Provider credentials
+
+Provider keys may come from environment variables or Kram's local credential store.
+
+Environment variables **always win**. Stored credentials only fill variables that are otherwise unset.
+
+The local store is:
+
+```text
+~/.config/kram-gateway/credentials.json
+```
+
+It is written with `0600` permissions and the containing directory with restrictive permissions.
+
+Credentials are **not encrypted at rest**. This is intentional: Kram has no separate local key-management system that would make application-level encryption with a bundled decryption secret meaningfully stronger. Treat the file like other local CLI credential files and protect the user account/filesystem accordingly.
+
+---
+
+## 24. Provider health checks
+
+The accounts UI can perform lightweight provider connectivity/auth checks without making a full agent request.
+
+Checks run when entering the accounts screen and can be refreshed manually. They are designed to answer questions such as:
+
+- is the endpoint reachable?
+- is this credential accepted?
+- is provider setup obviously broken before an agent run starts?
+
+This status is separate from gateway runtime telemetry and circuit-breaker history.
+
+---
+
+# Routing configuration
+
+For normal use, Kram can auto-detect configured provider credentials and build a default combo automatically.
+
+When only free-tier peers are available, the auto path favors distribution. When a paid provider is present, it favors stable priority to preserve prompt-prefix/cache economics. `-strategy` can override the auto choice without requiring a full YAML file.
+
+For complete control, pass `-config`.
+
+## Example modern config
+
+```yaml
+host: 127.0.0.1
+port: 20128
+
+providers:
+  - id: anthropic
+    kind: anthropic
+    api_key_env: ANTHROPIC_API_KEY
+    model: claude-sonnet-4-5
+    supports_tools: true
+    supports_images: true
+    quality_hint: 0.95
+
+  - id: openai
+    kind: openai-compat
+    base_url: https://api.openai.com/v1
+    api_key_env: OPENAI_API_KEY
+    model: gpt-5
+    supports_tools: true
+    supports_images: true
+    quality_hint: 0.95
+
+  - id: gemini
+    kind: gemini
+    api_key_env: GEMINI_API_KEY
+    model: gemini-2.5-pro
+    supports_tools: true
+    supports_images: true
+    quality_hint: 0.90
+
+combos:
+  - id: default
+    strategy: smart
+    providers: [anthropic, openai, gemini]
+
+    strategy_options:
+      sticky: true
+      lkgp_boost: 0.10
+      exploration: 0.03
+      weights:
+        health: 30
+        reliability: 20
+        latency: 15
+        quality: 15
+        cache_affinity: 15
+        priority: 5
+
+    response:
+      reject_empty: true
+      require_terminal: true
+      min_content_length: 8
+
+default_combo: default
+```
+
+`quality_hint` is an explicit operator signal. Kram does not infer model quality by pretending it has a benchmark result it never measured.
+
+An absent `response` block preserves the permissive compatibility behavior. An absent `strategy_options` block uses strategy defaults.
+
+See [`config.example.yaml`](config.example.yaml) for the repository example configuration.
+
+---
+
+# Gateway HTTP API
+
+The gateway can be used independently of the built-in agent runtime.
+
+### `POST /v1/chat/completions`
+
+OpenAI-compatible chat-completions surface with streaming and non-streaming support plus Kram routing extensions on completed responses/chunks.
+
+Example:
+
+```bash
+curl http://127.0.0.1:20128/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "default",
+    "messages": [
+      {"role": "user", "content": "Explain this API in one paragraph."}
+    ],
+    "stream": false
+  }'
+```
+
+### `GET /admin/status`
+
+Returns real gateway state including:
+
+- provider IDs/kinds;
+- capabilities;
+- circuit-breaker state;
+- request/failure counts;
+- prompt/completion token totals;
+- average latency;
+- success rate;
+- configured combos and strategies.
+
+### `GET /health`
+
+Liveness endpoint used by the all-in-one launcher and external supervision.
+
+---
+
+# Daemon HTTP API
+
+The daemon is Kram's durable local control surface.
+
+Current endpoints:
+
+```text
+GET  /health
+POST /sessions
+GET  /sessions
+GET  /sessions/{id}
+GET  /sessions/{id}/context
+POST /sessions/{id}/messages
+POST /sessions/{id}/answer
+POST /sessions/{id}/approve
+GET  /tools
+```
+
+`POST /sessions/{id}/messages` responds over SSE and emits the live agent lifecycle:
+
+```text
+delta
+route_start
+route_done
+tool_start
+tool_result
+notice
+question
+approval
+done / error
+```
+
+The final `done` event carries the persisted assistant message, usage, tool activity, compaction count, routing trace, and image capability notice.
+
+---
+
+# Running components separately
+
+The all-in-one `cmd/kram` path is the recommended user experience, but each layer remains independently runnable.
+
+### Gateway
+
+```bash
+go run ./cmd/gateway -config config.yaml
+```
+
+### Daemon
+
+```bash
+go run ./cmd/daemon \
+  -db ./kram-daemon.db \
+  -gateway http://127.0.0.1:20128 \
+  -workspace .
+```
+
+### CLI
+
+```bash
+go run ./cmd/cli \
+  -daemon http://127.0.0.1:20130 \
+  -gateway http://127.0.0.1:20128
+```
+
+This separation is useful for development, debugging, or setups where gateway and agent runtime should live on different machines/processes.
+
+---
+
+# Local state layout
+
+Kram intentionally keeps project state visible rather than hiding it in a remote service.
+
+Typical workspace state:
+
+```text
+<workspace>/.kram/
+├── kram.log
+├── kram-daemon.db
+├── todos.json
+├── permissions.json             # optional project policy
+├── permission_grants.json       # exact persistent approvals
+├── mcp.json                     # optional project MCP config
+├── lsp.json                     # optional project LSP config
+├── artifacts/                   # spilled large output
+├── snapshots/                   # isolated snapshot repository/state
+├── skills/                      # project skills
+└── tools/                       # custom tool manifests
+```
+
+Global/user configuration lives under:
+
+```text
+$XDG_CONFIG_HOME/kram-gateway/
+```
+
+falling back to:
+
+```text
+~/.config/kram-gateway/
+```
+
+This includes credentials, global tool settings, global policy/configuration, skills, tool manifests, MCP configuration, and MCP schema cache where applicable.
+
+---
+
+# Reliability model
+
+Kram treats “never crash” as an engineering direction, not a magic promise. The code tries to reduce the blast radius of failures and make failure states explicit.
+
+Examples:
+
+- gateway and daemon HTTP handlers recover panics instead of taking the whole process down;
+- providers have independent circuit breakers;
+- routing can fall through candidates before response commitment;
+- MCP server failure is isolated to that server;
+- missing LSP server disables only that semantic capability;
+- background processes and LSP servers are cleaned up during daemon shutdown;
+- command timeouts kill process trees rather than only the immediate shell where supported;
+- output growth is bounded and oversized results spill to artifacts;
+- agent turns have iteration and compaction budgets;
+- empty model output cannot silently complete a turn twice;
+- disabled/fully-denied tools are hidden from the model;
+- approval timeout denies rather than allowing;
+- durable messages are persisted by the daemon instead of trusting terminal state;
+- snapshots provide an explicit recovery mechanism for workspace changes.
+
+The result is not that failures disappear. It is that Kram attempts to make them **contained, observable, and recoverable**.
+
+---
+
+# Security and trust boundaries
+
+Kram is an agent that can execute developer tools. That means its security model should be explicit.
+
+### Structured file tools
+
+Kram rejects file-tool paths that escape the configured workspace.
+
+### Shell
+
+The shell is a real host shell started in the workspace directory. It is not an OS sandbox and can do whatever the host user and configured permission policy allow. Use containers/VMs/OS sandboxing when untrusted code requires stronger isolation.
+
+### Tool permissions
+
+ALLOW/ASK/DENY policy is evaluated before all registered tool execution paths, including custom tools and MCP tools.
+
+### MCP
+
+MCP servers are external code/services. Namespacing prevents tool-name shadowing, but an enabled and approved remote tool still acts with whatever capabilities its server has.
+
+### Skills and fetched content
+
+Skills, project files, command output, web content, and external resources are data/instructions supplied to an agent. Their provenance matters. Kram does not make untrusted external content magically safe.
+
+### Credentials
+
+Stored API keys rely on local filesystem permissions, not application-managed encryption.
+
+### Snapshots
+
+Snapshots use an isolated Git directory and do not intentionally mutate the user's own repository metadata. Snapshot creation/restoration is explicit; it is not a full filesystem backup system.
+
+---
+
+# Testing
+
+The repository uses regular Go tests plus higher-level model evals.
+
+## Unit/integration suite
+
+```bash
+go test ./... -race
+go vet ./...
+go build ./...
+```
+
+CI also checks `gofmt` cleanliness.
+
+The test suite includes coverage for areas such as:
+
+- routing strategies and weighted scoring;
+- response and stream gates;
+- route traces and TUI rendering;
+- circuit-breaker interaction;
+- permission policy/grants;
+- artifacts/spill behavior;
+- workspace snapshots;
+- shell process-tree cleanup;
+- LSP transport/client/manager behavior;
+- MCP JSON-RPC, lifecycle, caching, and reconnect behavior;
+- session/memory FTS5 search;
+- tool boundaries and output filtering;
+- eval-harness correctness.
+
+## Model evals
+
+```bash
+go run ./evals
+```
+
+Evals run through the real in-process gateway + daemon stack using an actual configured model. They are for behavior that ordinary unit tests cannot prove — for example whether a real model actually uses the capabilities exposed by Kram's prompt/tool contract.
+
+The harness distinguishes:
+
+- **PASS** — behavior was exercised and succeeded;
+- **FAIL** — behavior was exercised and violated the scenario;
+- **SKIP** — the scenario could not observe the property it was meant to test.
+
+Hard scenarios represent runtime invariants; model-dependent soft scenarios remain diagnostic rather than pretending every model has identical agent behavior.
+
+---
+
+# Building releases
+
+```bash
+./scripts/build-release.sh v1.2.3
+```
+
+Current release targets:
+
+```text
+linux/amd64
+linux/arm64
+darwin/amd64
+darwin/arm64
+windows/amd64
+```
+
+Release builds use:
+
+```text
+CGO_ENABLED=0
+```
+
+and embed the version through linker flags.
+
+The build script creates `.tar.gz` archives for Unix-like targets and `.zip` for Windows. GitHub Actions contains separate CI and tagged-release workflows; CI builds, vets, checks formatting, and runs the test suite with the race detector.
+
+---
+
+# Repository map
+
+For readers who want to open the hood:
+
+| Path | Responsibility |
+|---|---|
+| `cmd/kram` | Recommended all-in-one launcher. |
+| `cmd/gateway` | Standalone gateway entry point. |
+| `cmd/daemon` | Standalone durable daemon entry point. |
+| `cmd/cli` | Standalone terminal client. |
+| `internal/daemon/agent` | Tool-calling loop, run lifecycle, questions/approvals, route accumulation. |
+| `internal/daemon/store` | SQLite sessions, messages, memory, FTS5 history search. |
+| `internal/daemon/tools` | Core tool registry and concrete agent capabilities. |
+| `internal/daemon/compaction` | Context pruning and summarization. |
+| `internal/router` | Combos v2 strategies, factors, sticky/LKGP state, response/stream gating. |
+| `internal/server` | OpenAI-compatible gateway HTTP surface. |
+| `internal/provider` | Anthropic, Gemini, and OpenAI-compatible adapters. |
+| `internal/breaker` | Per-provider circuit breaker. |
+| `internal/telemetry` | Lightweight provider runtime counters. |
+| `internal/permission` | ALLOW/ASK/DENY policy and exact grants. |
+| `internal/artifact` | Bounded-output spill writer and artifact store. |
+| `internal/shell` | Cross-platform shell/process-tree control. |
+| `internal/snapshot` | Isolated workspace snapshot engine. |
+| `internal/lsp` | Hand-written LSP transport/client/manager. |
+| `internal/mcp` | Hand-written MCP JSON-RPC client, transports, reconnect/cache lifecycle. |
+| `internal/cli/app` | Bubble Tea terminal UI, route/context panels, accounts, approvals. |
+| `internal/credentials` | Local provider-key store. |
+| `internal/providercatalog` | Auto-configuration/account catalog. |
+| `internal/providerping` | Lightweight account connectivity/auth checks. |
+| `internal/toolsettings` | Tool/skill enable-disable persistence. |
+| `evals` | End-to-end behavioral evaluation harness. |
+| `scripts` | Release/build automation. |
+| `DECISIONS.md` | Architectural rationale and known boundaries. |
+
+---
+
+# Current boundaries
+
+Kram deliberately does not pretend to solve every agent-runtime problem today.
+
+A few important boundaries are worth stating clearly:
+
+- shell execution is not a host sandbox;
+- subagents share the workspace even though their conversational context is isolated;
+- snapshots are explicit rather than automatically taken before every mutation;
+- MCP schema caching currently improves persisted knowledge/refresh behavior but does not replace every startup connection with lazy discovery;
+- streaming fallback is only possible before downstream response commitment;
+- route-bar in-flight state is currently per model call rather than fake per-attempt progress;
+- scheduling/cron-style autonomous runs are not part of the current core;
+- the context policy layer continues to evolve as output/artifact behavior matures.
+
+These are explicit engineering boundaries, not hidden claims in the UI.
+
+---
+
+# Development philosophy
+
+Kram favors mechanisms that are easy to reason about under failure:
+
+- deterministic filtering before another LLM summarizer;
+- explicit process ownership before background shell magic;
+- a permission engine before scattered confirmation dialogs;
+- one durable owner before multiple clients writing state;
+- hard capability constraints before “smart” scoring;
+- real trace data before simulated dashboards;
+- bounded state before “we'll clean it up later”;
+- graceful degradation when optional integrations fail;
+- small protocol implementations where owning the wire behavior improves predictability.
+
+When a behavior is important enough to show in the TUI, the preferred architecture is for the runtime to compute it once and the UI to render that truth — not implement another version of the same logic for display.
+
+For the detailed rationale behind those decisions, see [`DECISIONS.md`](DECISIONS.md).
+
+---
+
+# License
+
+Kram is licensed under the [MIT License](LICENSE).
+
+Copyright © 2026 codexmark.
