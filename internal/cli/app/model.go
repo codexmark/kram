@@ -22,6 +22,7 @@ import (
 	"github.com/codexmark/kram-gateway/internal/cli/statusclient"
 	"github.com/codexmark/kram-gateway/internal/credentials"
 	"github.com/codexmark/kram-gateway/internal/openai"
+	"github.com/codexmark/kram-gateway/internal/providerping"
 	"github.com/codexmark/kram-gateway/internal/toolsettings"
 )
 
@@ -142,6 +143,12 @@ type Model struct {
 	accountsStatus       string
 	accountsOAuthPending bool
 	accountsOAuthURL     string
+	// accountsPings holds the most recent real connectivity/auth check per
+	// account (keyed by EnvVar — see providerping.Ping), and
+	// accountsPinging is true while a batch is in flight. Never simulated:
+	// a row with no entry here has simply never been checked yet.
+	accountsPings   map[string]providerping.Result
+	accountsPinging bool
 
 	// tools/skills toggle screen state.
 	toolSettings *toolsettings.Store
@@ -315,6 +322,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case pingResultsMsg:
+		m.accountsPinging = false
+		m.accountsPings = msg.results
+		return m, nil
+
 	case oauthURLMsg:
 		if msg.err != nil {
 			m.accountsOAuthPending = false
@@ -472,7 +484,8 @@ func (m Model) handlePickerKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "a":
 		m.phase = phaseAccounts
 		m.accountsStatus = ""
-		return m, nil
+		m.accountsPinging = true
+		return m, pingAccountsCmd(m.credStore)
 	case "f":
 		m.phase = phaseTools
 		m.toolsStatus = ""

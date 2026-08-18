@@ -2,12 +2,17 @@ package app
 
 import (
 	"context"
+	"os"
+	"sync"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/codexmark/kram-gateway/internal/cli/daemonclient"
 	"github.com/codexmark/kram-gateway/internal/cli/statusclient"
+	"github.com/codexmark/kram-gateway/internal/credentials"
+	"github.com/codexmark/kram-gateway/internal/providercatalog"
+	"github.com/codexmark/kram-gateway/internal/providerping"
 )
 
 type sessionsListMsg struct {
@@ -113,6 +118,71 @@ func fetchContextCmd(c *daemonclient.Client, sessionID string) tea.Cmd {
 		usage, err := c.GetContext(ctx, sessionID)
 		return contextResultMsg{usage: usage, err: err}
 	}
+}
+
+// pingResultsMsg carries one real connectivity/auth check per account,
+// keyed by EnvVar — see providerping.Ping. An account this run had no
+// resolvable key for (never configured at all) is simply absent from the
+// map, not reported as down.
+type pingResultsMsg struct {
+	results map[string]providerping.Result
+}
+
+// pingAccountsCmd checks every catalog account concurrently — this runs
+// on demand (entering the accounts screen, or a manual refresh), never in
+// the background, and each check is bounded by providerping's own
+// timeout, so the whole batch can't hang the UI indefinitely. credStore
+// may be nil (a fresh install with no credentials file yet); the real env
+// var always wins over a stored key, same precedence cmd/kram's own
+// startup wiring uses.
+func pingAccountsCmd(credStore *credentials.Store) tea.Cmd {
+	return func() tea.Msg {
+		var wg sync.WaitGroup
+		var mu sync.Mutex
+		results := make(map[string]providerping.Result, len(providercatalog.Accounts))
+
+		for _, acct := range providercatalog.Accounts {
+			key := os.Getenv(acct.EnvVar)
+			if key == "" && credStore != nil {
+				key = credStore.Get(acct.EnvVar)
+			}
+			if key == "" {
+				continue // nothing configured for this account — not "down", just unchecked
+			}
+			kind, baseURL, ok := providerKindForEnvVar(acct.EnvVar)
+			if !ok {
+				continue
+			}
+
+			wg.Add(1)
+			go func(envVar, kind, baseURL, key string) {
+				defer wg.Done()
+				res := providerping.Ping(context.Background(), kind, baseURL, key)
+				mu.Lock()
+				results[envVar] = res
+				mu.Unlock()
+			}(acct.EnvVar, kind, baseURL, key)
+		}
+
+		wg.Wait()
+		return pingResultsMsg{results: results}
+	}
+}
+
+// providerKindForEnvVar finds the adapter kind/base URL to use for
+// pinging an account — providercatalog.Accounts is the deduplicated
+// one-row-per-credential view, but pinging needs the same Kind/BaseURL
+// providercatalog.Providers (one-row-per-combo-entry) carries; several
+// Provider entries can share one Account (OpenRouter's three free-model
+// entries), so the first match is representative — they all use the same
+// key against the same host.
+func providerKindForEnvVar(envVar string) (kind, baseURL string, ok bool) {
+	for _, p := range providercatalog.Providers {
+		if p.EnvVar == envVar {
+			return p.Kind, p.BaseURL, true
+		}
+	}
+	return "", "", false
 }
 
 // animTickMsg drives the footer's breathing dot and sparkline while a

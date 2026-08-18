@@ -13,6 +13,7 @@ import (
 
 	"github.com/codexmark/kram-gateway/internal/oauthflow"
 	"github.com/codexmark/kram-gateway/internal/providercatalog"
+	"github.com/codexmark/kram-gateway/internal/providerping"
 )
 
 // accountStatus is what the accounts screen shows for one catalog entry.
@@ -54,7 +55,11 @@ func (m Model) renderAccounts() string {
 		case rows[i].storedSet:
 			status = styleBadgeOK.Render("✓ definido (salvo)")
 		}
-		line := fmt.Sprintf("%-30s %s", a.Label, status)
+		dot := pingDot(m, a.EnvVar, rows[i].envSet || rows[i].storedSet)
+		line := fmt.Sprintf("%s %-30s %s", dot, a.Label, status)
+		if detail := pingDetail(m, a.EnvVar); detail != "" {
+			line += "  " + styleHint.Render(detail)
+		}
 		if i == m.accountsCursor {
 			b.WriteString(styleYouTag.Render("▸ ") + styleBody.Render(line) + "\n")
 		} else {
@@ -85,9 +90,57 @@ func (m Model) renderAccounts() string {
 	if m.accountsCursor < len(providercatalog.Accounts) && providercatalog.Accounts[m.accountsCursor].SupportsOAuth {
 		hint += " · o conecta via oauth"
 	}
-	hint += " · d remove chave salva · esc volta"
+	hint += " · d remove chave salva · r verifica de novo · esc volta"
 	b.WriteString(styleHint.Render(hint))
 	return b.String()
+}
+
+// pingDot renders one account's real, current status as a small colored
+// dot — green (providerping.StatusOK), yellow (StatusDegraded: slow but
+// working), red (StatusDown: no quota, invalid key, unreachable, or a
+// server error), or a dim idle dot when there's nothing to check yet
+// (no key configured) or it hasn't been checked this screen visit. Never
+// simulated: the color reflects an actual request providerping.Ping just
+// made, not a guess from whether a key merely looks present.
+func pingDot(m Model, envVar string, configured bool) string {
+	if !configured {
+		return styleBadgeIdle.Render("○")
+	}
+	if m.accountsPinging {
+		return styleBadgeWarn.Render("◉")
+	}
+	res, ok := m.accountsPings[envVar]
+	if !ok {
+		return styleBadgeIdle.Render("○")
+	}
+	switch res.Status {
+	case providerping.StatusOK:
+		return styleBadgeOK.Render("●")
+	case providerping.StatusDegraded:
+		return styleBadgeWarn.Render("●")
+	case providerping.StatusDown:
+		return styleBadgeBad.Render("●")
+	default:
+		return styleBadgeIdle.Render("○")
+	}
+}
+
+// pingDetail is the short human-readable explanation shown next to a
+// pinged account — the real reason a dot is red/yellow ("sem cota (429)",
+// "chave inválida", "latência alta"), or the real latency for a clean
+// green check. Empty when there's nothing to show yet.
+func pingDetail(m Model, envVar string) string {
+	res, ok := m.accountsPings[envVar]
+	if !ok {
+		return ""
+	}
+	if res.Detail != "" {
+		return res.Detail
+	}
+	if res.Latency > 0 {
+		return formatLatency(res.Latency.Milliseconds())
+	}
+	return ""
 }
 
 func (m Model) handleAccountsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -155,6 +208,10 @@ func (m Model) handleAccountsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.accountsStatus = ""
 			return m, startOpenRouterOAuthCmd()
 		}
+	case "r":
+		m.accountsPinging = true
+		m.accountsStatus = ""
+		return m, pingAccountsCmd(m.credStore)
 	}
 	return m, nil
 }
