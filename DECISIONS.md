@@ -654,6 +654,46 @@ response's gate rejection. If it does commit, every buffered event is
 replayed to the client in order before continuing to read fresh events
 from the source — the client never knows a peek happened.
 
+### Streaming success is decided by the terminal event, not the first byte
+
+`streamResponse` (`internal/server/chat.go`) is the single place a
+committed streaming attempt's real outcome is decided and reported —
+`router.RecordOutcome`, breaker success/failure, and the trail entry's
+`Outcome`/`OK`/`Reason` all come from one `finalize` closure, called
+exactly once per attempt, only once the stream has actually reached one
+of three real terminal states: a valid `Done` (success), an explicit
+`evt.Err` (failure), or the upstream channel closing on its own without
+ever sending either (also failure — see below). Nothing about success is
+decided at commit time anymore; `BoundedPeek` committing only proves a
+meaningful *first* signal, never that the request will finish.
+
+**Found as two related real bugs, both reported by the user via GitHub
+issues, after shipping Combos v2:**
+
+1. The executor used to record `OutcomeSuccess` and call
+   `RecordOutcome(..., true)` immediately after `BoundedPeek` committed —
+   before the stream had actually finished. A provider whose first delta
+   looked fine but that then errored mid-stream could still become the
+   Sticky/LKGP winner, and the terminal SSE chunk's `Attempts` trail kept
+   showing `success` even though the same request's `finish_reason` was
+   `"error"` — genuinely contradictory state visible on the wire.
+2. If the upstream channel simply closed on its own after commit —
+   without ever sending a terminal `Done` or an `Err` — the old loop just
+   ended and Kram still wrote a bare `data: [DONE]\n\n`, indistinguishable
+   from a normal finish to any client reading the stream. A truncated
+   answer looked like a clean success. This directly undermined
+   `ResponseGate.RequireTerminal`'s whole purpose (already enforced on the
+   buffered path via `drainToBuffer`'s `sawTerminal`), which simply wasn't
+   checked at all once a stream had committed.
+
+Both are fixed by the same `finalize` path rather than two separate
+patches, per the issues' own explicit request to avoid duplicate or
+competing finalization logic — an abnormal close is treated exactly like
+an explicit upstream error (`OutcomeError`, an explicit `finish_reason:
+"error"` terminal chunk, no Sticky/LKGP success update), just with a
+different `Reason` string ("stream closed without a terminal
+completion").
+
 ### `AttemptInfo` gained real fields, kept the old ones
 
 `Outcome` (`trying`/`success`/`error`/`rejected`/`skipped`), `Reason`,

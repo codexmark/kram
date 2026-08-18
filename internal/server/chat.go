@@ -86,14 +86,16 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			// Committed: headers are about to be written, no more fallback
-			// is possible for this request after this point.
+			// is possible for this request after this point. BoundedPeek
+			// only proved a meaningful first signal, not that the request
+			// will actually finish successfully, so this attempt's real
+			// outcome — and whatever the router does with it (breaker,
+			// Sticky, LKGP) — is deliberately not decided here.
+			// streamResponse finalizes it once it actually knows how the
+			// stream ended; see its doc comment.
 			s.telemetry.RecordLatency(p.ID(), elapsed)
-			trail = append(trail, openai.AttemptInfo{
-				Provider: p.ID(), OK: true, LatencyMS: elapsed,
-				Outcome: openai.OutcomeSuccess, Attempt: attemptNum, Score: &score,
-			})
-			s.router.RecordOutcome(comboID, routeCtx, p.ID(), true)
-			s.streamResponse(w, p.ID(), req.Model, peek.Buffered, events, trail, ranking, strategyName)
+			pending := openai.AttemptInfo{Provider: p.ID(), LatencyMS: elapsed, Attempt: attemptNum, Score: &score}
+			s.streamResponse(w, comboID, routeCtx, pending, req.Model, peek.Buffered, events, trail, ranking, strategyName)
 			return
 		}
 
@@ -225,12 +227,20 @@ func writeBufferedResponse(w http.ResponseWriter, model, providerID, content str
 // rest, so the client sees exactly the same stream it would have seen
 // without the peek ever happening. Once this is called, the response is
 // committed: headers are sent immediately, so no further fallback is
-// possible if a later event carries an error. The terminal chunk carries
-// provider/attempts/ranking/strategy/usage (kram-gateway extensions) so a
-// caller can run entirely off the streaming path — the daemon's agent
-// loop does exactly that, rather than needing a separate non-streaming
-// request.
-func (s *Server) streamResponse(w http.ResponseWriter, providerID, model string, buffered []provider.StreamEvent, rest <-chan provider.StreamEvent, trail []openai.AttemptInfo, ranking []openai.RankedProviderInfo, strategyName string) {
+// possible if a later event carries an error.
+//
+// pending is this attempt's trail entry with everything already known at
+// commit time (provider, latency, attempt number, score) but no Outcome
+// yet — BoundedPeek proved only a meaningful first signal, not that the
+// request will actually finish successfully. streamResponse is the one
+// place that decides and reports the real terminal state: a valid Done
+// marks success (breaker, RecordOutcome — so Sticky/LKGP only ever
+// reflect a request that actually completed); an explicit evt.Err, or
+// the upstream channel closing without ever sending Done, both mark
+// failure and produce an explicit error terminal chunk instead of a bare
+// [DONE] that would otherwise make an abnormal close look identical to a
+// normal finish.
+func (s *Server) streamResponse(w http.ResponseWriter, comboID string, routeCtx router.RouteContext, pending openai.AttemptInfo, model string, buffered []provider.StreamEvent, rest <-chan provider.StreamEvent, priorTrail []openai.AttemptInfo, ranking []openai.RankedProviderInfo, strategyName string) {
 	flusher, _ := w.(http.Flusher)
 
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -261,7 +271,22 @@ func (s *Server) streamResponse(w http.ResponseWriter, providerID, model string,
 		})
 	}
 
-	writeFinal := func(finish string, toolCalls []openai.ToolCall, usage *openai.Usage) {
+	// finalize is the single place this attempt's terminal state becomes
+	// truthful and final — the router only ever hears about success here,
+	// once it's real, so the client's trail and the router's own Sticky/
+	// LKGP state can never disagree about who actually won.
+	finalize := func(outcome openai.AttemptOutcome, ok bool, reason string) []openai.AttemptInfo {
+		pending.Outcome = outcome
+		pending.OK = ok
+		pending.Reason = reason
+		trail := append(append([]openai.AttemptInfo{}, priorTrail...), pending)
+		if ok {
+			s.router.RecordOutcome(comboID, routeCtx, pending.Provider, true)
+		}
+		return trail
+	}
+
+	writeFinal := func(finish string, toolCalls []openai.ToolCall, usage *openai.Usage, trail []openai.AttemptInfo) {
 		chunk := openai.ChatCompletionChunk{
 			ID: id, Object: "chat.completion.chunk", Created: created, Model: model,
 			Choices: []openai.ChatCompletionChunkChoice{{
@@ -269,7 +294,7 @@ func (s *Server) streamResponse(w http.ResponseWriter, providerID, model string,
 				Delta:        openai.ChatCompletionChunkDelta{ToolCalls: toolCalls},
 				FinishReason: &finish,
 			}},
-			Provider: providerID,
+			Provider: pending.Provider,
 			Attempts: trail,
 			Ranking:  ranking,
 			Strategy: strategyName,
@@ -280,25 +305,28 @@ func (s *Server) streamResponse(w http.ResponseWriter, providerID, model string,
 
 	writeDelta("", "assistant")
 
+	sawTerminal := false
 	handle := func(evt provider.StreamEvent) (keepGoing bool) {
 		if evt.Err != nil {
-			s.markFailure(providerID, evt.Err)
-			writeFinal("error", nil, nil)
+			sawTerminal = true
+			s.markFailure(pending.Provider, evt.Err)
+			writeFinal("error", nil, nil, finalize(openai.OutcomeError, false, evt.Err.Error()))
 			return false
 		}
 		if evt.Delta != "" {
 			writeDelta(evt.Delta, "")
 		}
 		if evt.Done {
-			s.breakers.ReportSuccess(providerID)
+			sawTerminal = true
+			s.breakers.ReportSuccess(pending.Provider)
 			if evt.Usage != nil {
-				s.telemetry.RecordUsage(providerID, evt.Usage.PromptTokens, evt.Usage.CompletionTokens)
+				s.telemetry.RecordUsage(pending.Provider, evt.Usage.PromptTokens, evt.Usage.CompletionTokens)
 			}
 			finish := "stop"
 			if len(evt.ToolCalls) > 0 {
 				finish = "tool_calls"
 			}
-			writeFinal(finish, evt.ToolCalls, evt.Usage)
+			writeFinal(finish, evt.ToolCalls, evt.Usage, finalize(openai.OutcomeSuccess, true, ""))
 			return false
 		}
 		return true
@@ -317,6 +345,17 @@ func (s *Server) streamResponse(w http.ResponseWriter, providerID, model string,
 				break
 			}
 		}
+	}
+
+	if !sawTerminal {
+		// The upstream channel closed on its own without ever sending a
+		// terminal Done or an explicit error — an abnormal/truncated
+		// stream. Without this, the code below would simply write a bare
+		// [DONE], indistinguishable on the wire from a normal finish —
+		// silently turning a truncated answer into an apparent success.
+		err := fmt.Errorf("%s: stream closed without a terminal completion", pending.Provider)
+		s.markFailure(pending.Provider, err)
+		writeFinal("error", nil, nil, finalize(openai.OutcomeError, false, err.Error()))
 	}
 
 	fmt.Fprint(w, "data: [DONE]\n\n")
