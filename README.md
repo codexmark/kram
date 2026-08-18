@@ -414,6 +414,71 @@ The same components can still run independently through `cmd/gateway`, `cmd/daem
 
 ---
 
+## 18. A committed stream is not yet a successful one
+
+The bounded-peek commit point (insight 4) answers *when fallback stops being possible*. It does not answer *whether the request actually succeeded* — and those turned out to be two different moments that the first implementation of Combos v2 conflated.
+
+The original code recorded success — and told the router's Sticky/LKGP state about it — the instant `BoundedPeek` saw a meaningful first delta, before the stream had gone anywhere near its terminal event:
+
+```text
+first meaningful delta
+     │
+     ▼
+recorded as success, reported to the router
+     │
+     ▼
+stream continues
+     │
+     └─ later evt.Err -> too late, success was already reported
+```
+
+A provider whose first byte looked fine but then errored mid-stream could still become the sticky/LKGP winner. Separately, if the upstream channel just closed on its own without ever sending a terminal `Done`, the old loop still wrote a bare `data: [DONE]`, indistinguishable on the wire from a normal finish — a truncated answer looked like a clean success.
+
+The fix moves outcome decisions to the one place that actually knows the outcome:
+
+```text
+commit
+  │
+  ▼
+forward the stream
+  │
+  ├─ terminal Done         -> success, breaker/Sticky/LKGP updated
+  ├─ explicit evt.Err      -> failure, explicit error chunk
+  └─ channel closes,
+     no Done ever seen     -> failure, explicit error chunk
+```
+
+**The insight:** the moment fallback stops being possible and the moment a request actually succeeded are not the same moment. Reporting success at the first one instead of the second corrupts every piece of state that assumes "success" means "actually finished."
+
+---
+
+## 19. A hard preference needs a harder guard — and its own identity
+
+Smart Sticky (insight 3's "hard constraints" idea, applied to run-level preference) is documented as absolute: once a provider wins a run, nothing should displace it except a real failure. Two real bugs showed that "documented as absolute" and "enforced as absolute" are not the same thing.
+
+First, exploration ran unconditionally *after* Sticky applied its pin — the code comment even claimed exploration "never overrides sticky," but nothing in the ordering actually guaranteed that:
+
+```text
+score -> sort -> sticky pins the winner -> exploration still runs
+                                              │
+                                              └─ can still promote
+                                                 a different candidate
+```
+
+Second, Sticky's "run" identity was the same stable system+first-user-message hash `prefix-affinity`/cache-affinity routing use. That hash is stable across an *entire conversation*, not just one run — so a later, unrelated user turn that happened to start with the same opening message inherited the previous run's pin instead of getting a fresh initial ranking.
+
+```text
+turn 1: "inspect this repository"   -> provider A wins, pinned
+turn 2: "now redesign the router"   -> same opening message in history
+                                        -> same key -> inherits A's pin
+```
+
+Both fixes narrow the guard rather than removing the mechanism: exploration now skips entirely whenever a valid Sticky pin exists, and Sticky gained its own `RunKey` — an opaque ID the daemon generates once per agent run and sends as a header — distinct from the `AffinityKey` that cache-affinity/prefix-affinity still correctly share across a run's tool round-trips.
+
+**The insight:** a hard preference is only as strong as the code path that could still bypass it, and a cache-locality key is not automatically the same thing as a run-identity key just because both happen to be derived from the same prompt prefix today.
+
+---
+
 # What Kram is today
 
 At a high level, Kram is four things working together:
@@ -679,7 +744,7 @@ The gate judges **technical usability**, not whether Kram agrees with the model'
 
 For streaming requests, Kram performs a bounded peek before committing downstream output. Empty/role-only chunks, keepalives, immediate errors, and failures before meaningful output can still fall through to another provider.
 
-After meaningful content has been committed, provider switching is no longer safe inside the same response.
+After meaningful content has been committed, provider switching is no longer safe inside the same response — but commit is not the same thing as success. The attempt's real outcome (and whatever the router does with it — breaker state, Sticky, LKGP) is decided only once the stream reaches an actual terminal state: a valid completion, an explicit upstream error, or the upstream channel closing without ever completing, which is treated as a failure with an explicit error signal rather than a silent `[DONE]`.
 
 ---
 
