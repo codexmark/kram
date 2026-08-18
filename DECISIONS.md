@@ -1132,14 +1132,146 @@ Worth recording that the *bug fix* underneath it was real and subtle:
 measuring the padded string gave the box width rather than the content
 width, and short messages rendered left-shifted inside an invisible box.
 
+### The right-aligned prompt block is a narrower exception, not a reversal of the reversal
+
+Combos v2 gave the user's own message a right-aligned block (a small
+"you" label, a colored vertical accent on the left edge, width shrinking
+to fit short content) — worth being precise about why this doesn't
+contradict the entry above.
+
+**The distinction:** the earlier reversal was specifically about
+*two-sided chat bubbles* — full boxes on both sides, agent left / user
+right, reading like a messaging app. That's still rejected. What's new is
+an asymmetric exception for the user's own prompt *only*: no full border,
+no tail, no background card spanning the width, and Kram's own replies
+stay exactly as they were (left-aligned, unstyled, integrated into the
+transcript). The goal is hierarchy — instantly telling apart "what I
+typed" from "what Kram said" — not turning the transcript into a
+conversation UI.
+
+**The bug this reversal already caught stayed fixed:** the block's width
+is computed from the actual wrapped content (via `reflow/wordwrap`, then
+measuring the longest resulting line), never from `lipgloss.Style.Width()`
+— avoiding exactly the "short content padded into a wide invisible box"
+mistake recorded above.
+
 ### Nothing in the UI is simulated
 
 The footer's latency, fallback trail, breaker states and token counts all
 come from the gateway's own counters. The context panel is computed by
-the same code path that decides when to compact.
+the same code path that decides when to compact. Combos v2 extends this
+same rule to routing: the route bar, the Ctrl+R trace, and Ctrl+P's score
+breakdown all render facts the router/gateway already decided — nothing
+is guessed, interpolated, or recomputed in the TUI. The one deliberate
+exception is a generic "routing…" pulse while a model call is actually in
+flight, and even that's disclosed as a generic pulse rather than faked
+per-attempt progress (see "Route bar: per-model-call granularity, not
+per-attempt" below) — there was never a version of this that simulated
+which candidate was "currently" being tried.
 
 **Why:** a panel that can disagree with reality is worse than no panel. It
 also means the two can never drift.
+
+### Route bar: per-model-call granularity, not per-attempt
+
+The route bar shows a generic "routing…" pulse while a model call is in
+flight, then the real fallback trail once it's done — it does not show
+"now trying candidate 2 of 3" live, mid-call.
+
+**Why this isn't a shortcut:** it's structurally true, not a scope cut.
+The gateway's fallback loop (try candidate 1, try candidate 2, ...) runs
+entirely inside a single HTTP round-trip the daemon only ever observes
+the *result* of. For a streaming request specifically, no bytes are even
+sent to the client until a candidate's `router.BoundedPeek` commits — a
+failed early candidate never gets an open connection to report progress
+over in the first place. Showing fake "now trying X" progress would be
+exactly the kind of simulation the interface principle above forbids.
+Real per-attempt live events would require the gateway itself to push
+progress over a channel that exists before any candidate has committed,
+which is a materially different transport (a second connection, or a
+protocol upgrade) — deferred, not silently dropped; see "Known gaps."
+
+### Live routing events are per model call, not a new event bus
+
+`route_start`/`route_done` reuse the exact SSE/event-callback machinery
+`tool_start`/`tool_result`/`notice`/etc. already use — no new transport,
+no second WebSocket, no polling endpoint. `route_done` carries one
+`RouteCall` (see below); the final `done` event carries the whole
+`RouteTrace` for the completed turn.
+
+### `RouteTrace` fixes a real bug: only the last model call's trail was ever visible
+
+`agent.go`'s turn loop used to do `result.Attempts = callResult.Attempts`
+on every iteration — a turn with several tool round-trips (read a file,
+grep, edit, run tests, answer) silently discarded every earlier model
+call's real fallback trail except the very last one. A user watching a
+multi-step task would only ever see routing information for the *final*
+answer, never for the four model calls that preceded it, even though
+those all really happened and may have had real fallbacks of their own.
+
+`RunResult.Attempts` is kept exactly as it was (the last call's trail —
+still what the plain footer would use, before the footer itself dropped
+routing detail entirely, see below); `RunResult.RouteTrace` is the new,
+complete accumulator (`agent.RouteTrace`/`agent.RouteCall`), and Ctrl+R
+is what makes it visible.
+
+### Footer stops duplicating the route bar
+
+The footer used to be two lines: a provider/latency/sparkline summary,
+then a row of anonymous colored dots (one per attempt) plus a count.
+Once the route bar showed the *same* fallback trail with real provider
+names, outcome glyphs, and latencies — strictly more information, in a
+more prominent, always-visible position — the footer's routing detail
+became pure duplication. The footer is now one line: token usage on the
+left, the context-usage icon and keyboard shortcuts (including the new
+`^r`) on the right. Detailed routing lives in exactly two places now: the
+route bar (live summary) and Ctrl+R (full trace) — never a third,
+redundant copy.
+
+### Ctrl+R and Ctrl+P: the router's own data, rendered, never recomputed
+
+Both panels are strict projections of data the gateway/router already
+computed and sent over the wire (`openai.AttemptInfo`/
+`RankedProviderInfo`/`ScoreFactor`) — see "Strategy explainability" in
+the Routing section above for why the wire format carries the full
+ranking (every eligible candidate, not just the ones actually attempted)
+specifically so this is possible without a second scoring pass in the
+TUI. Ctrl+P falls back to the pre-Combos-v2 provider-list/telemetry view
+for non-scoring strategies (priority, round-robin, prefix-affinity),
+which never produce a ranking — there's nothing to show a breakdown of.
+
+### Two real bugs, found only by testing this live
+
+Both were caught by actually running the CLI against real mock providers
+in a tmux session and reading the output — not by any unit test, since
+neither is the kind of thing a value-level test would think to check:
+
+1. **Route bar spurious truncation at exact width.** `reflow`'s
+   ANSI-aware `truncate.StringWithTail` unconditionally reserves room for
+   its tail string, even when the input isn't actually over the limit —
+   so a line landing at exactly the terminal width got a spurious `…`
+   appended and its real last character silently dropped. Fixed by only
+   invoking `truncate` when the rendered width genuinely exceeds the
+   target (`lipgloss.Width(result) > m.width`), confirmed by a test that
+   sweeps widths 10 through 140 against long real provider names.
+2. **Ctrl+P's score breakdown silently truncated by panel height.** The
+   provider-list header plus a full six-factor breakdown together
+   routinely exceeded the shared panel height budget, so `padLines`'s
+   `lines[:height]` cut the output off *before* the factor lines were
+   ever appended — this looked exactly like the ranking data being empty
+   end to end, and was diagnosed as a data bug for a while before a
+   direct `curl` against the gateway's raw SSE output proved the wire
+   format was always complete. Fixed two ways: the panel now shows a
+   *focused* single-candidate breakdown instead of the provider list plus
+   the breakdown at once when real ranking data exists (matching the
+   original design mockup more closely, and using far less vertical
+   space), and the shared panel height itself grew (`height/3`, floor 9,
+   was `height/4`, floor 6).
+
+Both are recorded here as a concrete argument for the "test live in a
+browser/terminal before calling a UI change done" rule already in this
+project's own operating instructions — a passing `go build` and `go vet`
+told us nothing about either bug.
 
 ---
 
@@ -1326,12 +1458,29 @@ safety, and reliability rather than raw feature count:
 - ~~Eval false positives.~~ Closed: the harness reports SKIP, not a false
   PASS, when a scenario's check never observed the model taking the
   action it depends on.
+- ~~Ordered-fallback-only routing.~~ Closed by Combos v2: a
+  `Strategy`-ranked pipeline (priority/round-robin/prefix-affinity plus
+  smart/quality/fast/cheap/reliable as presets of one weighted engine,
+  lkgp, p2c), run-scoped sticky routing, an LKGP boost modifier,
+  capability/breaker hard constraints applied before any scoring, a
+  `ResponseGate` distinguishing technical failure from quality rejection,
+  a bounded streaming peek (`StreamGate`) so fallback survives past
+  `stream: true`, a full-turn `RouteTrace` (fixing a real bug where only
+  the last model call's fallback trail was ever visible), and a route
+  bar / Ctrl+R / Ctrl+P explainability UI reading that data directly with
+  nothing recomputed. See the expanded "Routing" and "Interface"
+  sections above for the full rationale.
 
-Still open, in rough priority order: a **context policy engine** (Wave 8
-in the mission that drove this round — deliberately deferred until
-artifact spill, above, had proven stable, which it now has), scheduling,
-async delegation with a real task-status subsystem, a more sophisticated
-extension host, and pluggable memory/terminal backends. None of these are
-accidental gaps — each was evaluated and set aside as narrower than what
-it would extend, the same discipline this file exists to make visible
-rather than silently re-litigated.
+Still open, in rough priority order: a **context policy engine** (deferred
+until artifact spill, above, had proven stable, which it now has — this
+was Wave 8 in the mission that drove the round *before* Combos v2's own
+numbering, worth being explicit about since this file now has two
+different "Wave 8"s from two different rounds), real per-attempt live
+routing progress (structurally blocked on the gateway's fallback loop
+running inside one HTTP round-trip — see "Route bar: per-model-call
+granularity" above), scheduling, async delegation with a real task-status
+subsystem, a more sophisticated extension host, and pluggable memory/
+terminal backends. None of these are accidental gaps — each was
+evaluated and set aside as narrower than what it would extend, the same
+discipline this file exists to make visible rather than silently
+re-litigated.
