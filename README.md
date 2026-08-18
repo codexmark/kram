@@ -552,7 +552,9 @@ For building from source:
 
 ## Configure a provider
 
-The simplest path is an environment variable:
+The fastest path is letting Kram ask: running `kram` with nothing configured yet opens a first-run setup wizard instead of failing — see "First-run setup wizard" below.
+
+To skip straight past it, export a key before the first run:
 
 ```bash
 export ANTHROPIC_API_KEY="..."
@@ -562,7 +564,7 @@ export OPENAI_API_KEY="..."
 export GEMINI_API_KEY="..."
 ```
 
-Other provider credentials can be configured through the catalog, an explicit gateway config, or the accounts screen.
+Other provider credentials can be configured through the catalog, an explicit gateway config, the accounts screen, or the wizard.
 
 Environment variables always take precedence over keys stored by Kram.
 
@@ -578,15 +580,15 @@ Or with a release binary:
 kram -workspace ~/code/my-project
 ```
 
-Kram will:
+On the very first run (no completed setup yet), Kram opens the setup wizard before anything else — see "First-run setup wizard" below. Every run after that:
 
-1. resolve the workspace;
-2. create `<workspace>/.kram/` if needed;
-3. load provider credentials/configuration;
-4. start gateway and daemon on localhost;
-5. wait for both health checks;
-6. open the terminal UI;
-7. expose durable sessions already stored for the workspace.
+1. resolves the workspace;
+2. creates `<workspace>/.kram/` if needed;
+3. loads provider credentials/configuration;
+4. starts gateway and daemon on localhost;
+5. waits for both health checks;
+6. opens the terminal UI;
+7. exposes durable sessions already stored for the workspace.
 
 Logs:
 
@@ -612,6 +614,7 @@ Conversation state:
 -max-turns      maximum model-call budget for one agent run (default 50)
 -gateway-port   explicit gateway port; 0 chooses a free localhost port
 -daemon-port    explicit daemon port; 0 chooses a free localhost port
+-setup          re-run the first-run setup wizard even if it already completed
 -version        print Kram version
 ```
 
@@ -627,6 +630,21 @@ go run ./cmd/kram \
 ---
 
 # Feature tour
+
+## First-run setup wizard
+
+Kram opens an 8-step wizard automatically the first time it runs with no completed setup — not just when nothing is configured (an already-exported `ANTHROPIC_API_KEY` still gets the full walkthrough once), and again any time `-setup` is passed. Reopening is driven by a small versioned marker (`onboarding.json`), not by re-checking whether a provider happens to exist.
+
+1. **Environment** — OS, current directory, Git detection, home directory.
+2. **Projects** — a suggested *Projects Root* (`~/Projects` on Linux/macOS, `Documents\Projects` on Windows, fully editable, persisted for a future project picker) and the *Workspace* for this session, defaulting to the current directory when it's already a Git repo.
+3. **Providers** — the same accounts screen described below, in-flow: paste a key or, for OpenRouter, authorize in the browser (no card, real per-user key, the wizard's recommended path — see "Provider credentials"). Each addition is pinged immediately, and a live "Gateway mode: BASIC/RESILIENT" line reports genuine independent-upstream count, never inflated by OpenRouter's several free-model routes sharing one account.
+4. **Routing** — Auto (Kram's existing priority/round-robin heuristic, shown resolved live), Smart, or Round Robin; a note that weights/gates/custom strategies stay tunable in the generated config afterward.
+5. **Permissions** — Recommended, Strict, or Autonomous, each a real starter `permissions.json` evaluated by the same engine described in "Permission engine" below, not a separate simplified rule set.
+6. **Tools & Skills** — Recommended (nothing disabled), Minimal (read/search/navigation/code-intelligence only), or Custom (the same tools/skills screen described below, with bulk enable-all/disable-all added alongside individual toggles).
+7. **System Check** — real, non-fabricated status for Git/Go/gopls, workspace writability, configured providers, and MCP servers — informational only, nothing here blocks continuing.
+8. **Ready** — a recap of every choice, then Kram creates a real session and drops straight into it with a one-time, client-side-only welcome note (never persisted, never mistaken for a model reply).
+
+Steps 1-5 run in a small standalone program before the gateway/daemon exist (that's what they're for: producing the config those two need to start). Steps 6-8 run in the normal post-daemon program, entered directly instead of the session picker, since listing real tools/skills needs a live daemon connection. The wizard writes a global `config.yaml` (`~/.config/kram-gateway/config.yaml` — provider credentials themselves stay in the separate, more tightly permissioned `credentials.json`) and a global `permissions.json`; an explicit `-config`, or a workspace-local `<workspace>/.kram/config.yaml`, both still override it — see "Routing configuration".
 
 ## Agent loop
 
@@ -1258,13 +1276,16 @@ Credentials are not application-encrypted at rest. Kram relies on local filesyst
 
 # Routing configuration
 
-For normal use, Kram can detect configured provider credentials and build a default combo automatically.
+Resolved in this order, first match wins:
 
-When only free-tier peers are present, the auto path favors distribution. When a paid provider is present, it favors stable priority for prompt-cache economics.
+1. an explicit `-config` file;
+2. `<workspace>/.kram/config.yaml` — a per-project override, hand-written or (currently) never auto-generated;
+3. `~/.config/kram-gateway/config.yaml` — the global config the first-run wizard writes;
+4. plain env-var autodetection, building a default combo automatically from whichever provider credentials are set.
 
-`-strategy` can override the auto choice without requiring a full YAML file.
+For that last, fully automatic tier: when only free-tier peers are present, the auto path favors distribution. When a paid provider is present, it favors stable priority for prompt-cache economics. `-strategy` can override the auto choice without requiring a full YAML file.
 
-For complete control, pass `-config`.
+For complete control, pass `-config` — or run `kram -setup` and let the wizard generate a starting point.
 
 ## Example
 
@@ -1626,6 +1647,7 @@ gh release create v1.2.3 dist/* --generate-notes
 | `internal/providercatalog` | Provider auto-configuration catalog. |
 | `internal/providerping` | Lightweight provider connectivity/auth checks. |
 | `internal/toolsettings` | Tool/skill enable-disable persistence. |
+| `internal/onboarding` | First-run wizard's versioned completion state. |
 | `evals` | End-to-end behavioral eval harness. |
 | `scripts` | Build/release automation. |
 | `DECISIONS.md` | Architectural rationale, reversals, and known gaps. |

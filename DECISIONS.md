@@ -1345,6 +1345,146 @@ told us nothing about either bug.
 
 ---
 
+## First-run setup wizard
+
+### The trigger is onboarding state, not "is a provider configured"
+
+**Found as a real gap in the first draft of this feature.** The obvious
+trigger — run the wizard when `detectGatewayConfig` would fail with "no
+provider configured" — has a real hole: someone who already exports
+`ANTHROPIC_API_KEY` would never see the wizard at all, and so would never
+get asked about routing, permissions, or tools. It also means a user who
+pastes one key via the wizard's provider step and then cancels *before*
+finishing would silently never see the wizard again — that credential is
+now enough to make `detectGatewayConfig` succeed on the next run.
+
+The actual trigger is a small versioned marker
+(`internal/onboarding`, `kramhome.Path("onboarding.json")`,
+`{version, completed, projects_root, last_workspace}`): the wizard runs
+when `!completed || version < currentVersion`, full stop, independent of
+what's already configured. `-setup` forces it regardless of `completed`.
+This is also what makes a version bump a clean way to force existing
+installs through a redesigned wizard later — no migration logic, just a
+fresh run.
+
+### Two stages, one continuous-feeling flow
+
+Steps 1-5 (Environment, Projects, Providers, Routing, Permissions) run in
+a **second, standalone `tea.Program`** (`app.RunWizard`), entirely before
+the gateway/daemon exist — they have to, since producing the config those
+two need to start *is* what these steps do. Steps 6-8 (Tools & Skills,
+System Check, Ready) run in the **normal post-daemon program**, entered
+directly via a new `app.New` parameter instead of the session picker,
+because listing what tools/skills are really registered needs a live
+daemon connection (`GET /tools`) that can't exist yet during Stage 1.
+
+Both stages share one `renderWizardHeader` (`N/8 Title`) so the split is
+invisible to the user — matching the explicit design goal that the
+wizard read as one flow, not "the setup ended and I fell into an
+unrelated tools screen." The Providers step doesn't get a third phase of
+its own; it reuses `phaseAccounts` (the existing accounts screen)
+directly, gated by a `wizardMode` bool, since nothing in that screen's
+render/handle path touches the daemon/gateway clients that don't exist
+yet — confirmed before reusing it, not assumed.
+
+### Provider validation is real, not inferred from "a key exists"
+
+Each key paste or completed OAuth immediately triggers the same
+`providerping` check the accounts screen already uses for its status
+dots (`internal/providerping`, a minimal "list models" call — never a
+full chat request), instead of waiting for a manual re-check. A
+"Gateway mode: BASIC/RESILIENT" line reports genuine independent-account
+count, explicitly not counting OpenRouter's three free-model *routes* as
+three upstreams — they share one account and one rate limit.
+
+### Permission presets are real `PolicyFile` values, checked against the real engine
+
+`internal/permission` gained `RecommendedPolicy()`/`StrictPolicy()`/
+`AutonomousPolicy()` plus `SavePolicy` — not a parallel, simplified rule
+language for onboarding, the exact same `Rule{Tool, Pattern, Decision}`
+matching described in "Permissions" above. Writing the three presets
+surfaced two things worth being explicit about in the wizard's own copy
+rather than leaving as a surprise:
+
+- Strict's `default: "ask"` means *every* unlisted tool asks, including
+  every `mcp__*` tool — not just tool names the preset doesn't mention.
+- Autonomous's one safety rule (`bash`, pattern `"rm -rf /*"`, deny) is a
+  prefix glob, so it blocks any `rm -rf` on an absolute path
+  (`rm -rf /home/x`, not just literally `rm -rf /`) while leaving
+  relative-path deletes (`rm -rf node_modules`) alone — a real behavior
+  test (`internal/permission/presets_test.go`) caught the difference
+  between "blocks one literal command" (what the first draft's comment
+  claimed) and "blocks a whole class of absolute-path deletes" (what the
+  prefix-glob engine actually does) before it shipped as a doc lie.
+
+### Config precedence gained a global tier, and the port-reuse trap that comes with it
+
+`loadOrDetectGatewayConfig` now resolves, in order: explicit `-config` →
+`<workspace>/.kram/config.yaml` (a per-project override, hand-written or
+future-wizard-generated — nothing writes this automatically today) →
+`kramhome.Path("config.yaml")` (what the wizard actually writes) → plain
+env-var autodetection. Both new file tiers deliberately do **not** trust
+whatever port is written in the file — they call `freePort()` just like
+plain autodetection does, unless `-gateway-port` was explicit. A global
+config is shared across every workspace; reusing its file's port would
+let two `kram` instances in two different project directories collide
+trying to bind the same one, a real regression an early draft of this
+change would have introduced.
+
+`config.Save` writes with a temp-file-then-rename (removing any existing
+file first, since `os.Rename` fails over an existing target on Windows,
+unlike POSIX) rather than truncating the destination in place — a reader
+should never be able to observe a half-written config. The generated
+file also always sets `response: {reject_empty: true, require_terminal:
+true}` on the wizard's combo — a safe default for a brand-new install,
+never retrofitted onto a config the wizard didn't generate.
+
+### Two real bugs found only by running the wizard in tmux, not by `go build`/`go vet`/tests
+
+1. **`syncViewportSize` panicked in wizard mode.** `Update`'s
+   `tea.WindowSizeMsg` case unconditionally called
+   `m.input.SetWidth(...)` on the chat composer — but `newWizardModel`
+   never calls `textarea.New()` for Stage 1 (there's no message composer
+   in the wizard), leaving `m.input` a zero-value `textarea.Model`.
+   `SetWidth` on that zero value panics. Every unit test, `go build`, and
+   `go vet` passed; only starting the actual binary in tmux crashed
+   immediately on the first resize event. Fixed by skipping
+   `syncViewportSize`/markdown-renderer setup entirely when
+   `wizardMode` — Stage 1 never renders any of that.
+2. **The Ready screen showed "Routing: auto" and a blank "Permissions"
+   row no matter what was actually chosen.** Stage 1 and Stage 2 are
+   *separate* `Model` instances in separate programs — Stage 2's summary
+   step was reading `m.wizardChosenStrategy`/`m.wizardChosenPermPreset`
+   off its own, freshly-constructed `Model`, which never inherited
+   anything Stage 1 decided. `go build` had no way to catch this: both
+   fields exist, both are valid strings, they're just always empty on
+   the model that was actually rendering. Only watching the real summary
+   screen (mid-manual-walkthrough, with `smart`/`recommended` chosen
+   moments earlier) revealed it showing the zero-value fallback instead.
+   Fixed by threading a small `WizardResult` (Stage 1's actual choices)
+   through `app.New` as a new parameter, read only when
+   `openOnToolsPreset` is true.
+
+Both are recorded here as further evidence for the same rule the route
+bar/score-breakdown bugs above already argued for: a passing test suite
+proves the code is internally correct, not that the feature behaves
+correctly end to end. This wizard was walked through fully in tmux,
+including a real OpenRouter account, before being called done — both
+bugs were caught that way, neither by static checks.
+
+### What Kram does *not* do here, on purpose
+
+No shared/relay API key ships with Kram, and no session gets bootstrapped
+against another product's hosted service. OpenCode Zen (one of Kram's own
+catalog providers) was checked directly and requires billing details to
+sign up — not a genuine zero-friction option — so it isn't presented as
+one. OpenRouter's already-working, per-user OAuth flow (no card, a real
+key, Kram's own rate limit exposure is zero) is the wizard's actual
+"click one button" path. Building and hosting a shared relay the way a
+company-backed product might is a real, ongoing cost/liability decision
+for a solo maintainer — not something to introduce as a side effect of an
+onboarding flow.
+
 ## Boundaries
 
 Several things were deliberately not built. Recording them so they don't
@@ -1624,3 +1764,13 @@ terminal backends. None of these are accidental gaps — each was
 evaluated and set aside as narrower than what it would extend, the same
 discipline this file exists to make visible rather than silently
 re-litigated.
+
+The first-run wizard (see its own section above) also has a deliberately
+scoped Phase 2, called out explicitly at the time rather than discovered
+later: OAuth/browser-auth for providers beyond OpenRouter; the richer
+"projects root + picker" launcher for a bare `kram` invocation (today's
+wizard only persists `projects_root` as seed data, no picker UI reads it
+yet); more advanced/tunable permission presets; deeper system
+diagnostics; and actual migration logic across future
+`currentOnboardingVersion` bumps (today a version bump just re-triggers
+the wizard from scratch, which is intentional, not a stopgap).
