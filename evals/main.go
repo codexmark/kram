@@ -130,7 +130,11 @@ type scenario struct {
 	// signal against a fixed one.
 	soft  bool
 	setup func(env *env) error
-	check func(env *env) (pass bool, detail string)
+	// check returns PASS/FAIL only when the scenario's property was
+	// actually exercised; SKIP means the model never took the action the
+	// check depends on observing, so nothing about the property in
+	// question was verified either way — see verdict's doc comment.
+	check func(env *env) (v verdict, detail string)
 }
 
 type env struct {
@@ -173,17 +177,21 @@ func (e *env) sendAndWait(content string) (daemonclient.StreamEvent, []string, e
 
 type result struct {
 	scenario
-	pass   bool
-	detail string
-	err    error
+	verdict verdict
+	detail  string
+	err     error
 }
 
+// summary renders one line for the report. A soft scenario's FAIL is
+// labeled "soft-fail" so it's visually distinct from a hard failure at a
+// glance, without changing what actually gates the run's exit code (see
+// report). SKIP is printed as-is regardless of soft/hard — a hard
+// scenario that somehow SKIPs is still worth seeing plainly, even though
+// none of today's hard scenarios can (they're all deterministically
+// exercised on every run).
 func (r result) summary() string {
-	status := "FAIL"
-	if r.pass {
-		status = "PASS"
-	}
-	if r.soft && !r.pass {
+	status := string(r.verdict)
+	if r.verdict == FailVerdict && r.soft {
 		status = "soft-fail"
 	}
 	if r.err != nil {
@@ -195,19 +203,28 @@ func (r result) summary() string {
 func runScenario(e *env, sc scenario) result {
 	if sc.setup != nil {
 		if err := sc.setup(e); err != nil {
-			return result{scenario: sc, err: fmt.Errorf("setup: %w", err)}
+			return result{scenario: sc, verdict: FailVerdict, err: fmt.Errorf("setup: %w", err)}
 		}
 	}
-	pass, detail := sc.check(e)
-	return result{scenario: sc, pass: pass, detail: detail}
+	v, detail := sc.check(e)
+	return result{scenario: sc, verdict: v, detail: detail}
 }
 
+// report prints the final summary and decides the process exit code. Only
+// a genuine FAIL on a hard (non-soft) scenario fails the run — a SKIP
+// never does, hard or soft, since it means the property in question was
+// never actually exercised rather than that it was exercised and found
+// wanting. That's the entire point of the three-state verdict: a SKIP
+// counted as a failure would punish the harness for the model's choice of
+// which tools to call on a given prompt, and a SKIP counted as a pass
+// (the bug this replaces) would silently understate how much was really
+// verified.
 func report(results []result) int {
 	var hardFails int
 	fmt.Println()
 	fmt.Println("summary:")
 	for _, r := range results {
-		if !r.pass && !r.soft {
+		if r.verdict == FailVerdict && !r.soft {
 			hardFails++
 		}
 		fmt.Printf("  %-32s %s\n", r.name, r.summary())
