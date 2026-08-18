@@ -458,6 +458,72 @@ A server that fails to start or handshake is logged and skipped.
 **Why:** MCP servers are third-party processes. One broken entry in a
 config must cost you that server's tools and nothing else.
 
+### A dead transport gets reconnected, with bounded backoff, not left dead
+
+`Client.dispatch()` already noticed a dying transport (it unblocks every
+pending caller when `Recv()` closes) but nothing acted on it. Now
+`Manager` supervises every server it connected: a `Client.Done()` channel
+(closed once, by `dispatch()`, whether the death was a crash or a
+deliberate `Close()`) tells a per-server goroutine when to redial, with
+backoff (1s, 2s, 4s, 8s, 16s, ... capped at 60s) and a hard stop at 5
+attempts.
+
+**Why capped, not infinite:** the same "one broken server costs only
+itself" contract `ConnectAll` already established — a server that's
+genuinely gone (uninstalled, its host is down) must not leave a goroutine
+spinning on it for the rest of the daemon's life. It just goes back to
+being absent, exactly like a server that failed to connect at startup,
+recoverable by a daemon restart.
+
+**Why the Manager's own child context, not the one `ConnectAll` was
+given:** `Close()` needs the authority to unblock every supervisor
+goroutine (including one mid-backoff-sleep) on its own schedule, without
+depending on whoever owns the outer context to have canceled it yet — and
+it cancels that child context *before* closing any client, specifically
+so a supervisor never observes its own client's deliberate shutdown and
+mistakes it for a crash worth reconnecting from.
+
+### `tools/list_changed` updates a snapshot, read again only at the next turn
+
+`dispatch()` used to drop every message with no `id` — spec-correct for
+anything unrecognized, but that included this notification. It now
+recognizes `notifications/tools/list_changed` specifically, re-fetches
+`tools/list` in its own goroutine (so it doesn't block the dispatch loop,
+which is itself needed to receive that fetch's response), and swaps
+`Client`'s tool snapshot under a lock.
+
+**Why this can't retroactively change a call already in flight:**
+`Registry.Definitions()` is read fresh at the top of each turn's loop
+iteration in `agent.go`, before that turn's model call is made — never
+mid-call. `loadTools` *replaces* the snapshot (a new slice assigned in,
+never mutated in place), so anything that already captured the old tool
+list for the in-flight turn keeps its own independent copy regardless of
+when the swap happens. The refresh lands whenever it lands; what changes
+is only what the *next* `Tools()` call sees.
+
+### Schema cache: one file, keyed by server name + a config fingerprint
+
+`kramhome/mcp-cache.json`, not one file per server — at the scale of "how
+many MCP servers does one workspace configure" (single digits), one file
+is simpler to read/write/reason about atomically than a directory, with
+no orphaned per-server files left behind when an entry is removed from
+`mcp.json`. Keyed by a SHA-256 fingerprint over every connection-identity
+field (kind, command, args, env, url, headers) — deliberately excluding
+`Enabled`, since toggling a server off and on again doesn't change what it
+would serve. 24h TTL on top of the fingerprint check, since a server can
+change its own tool set without Kram's config changing at all.
+
+**What's actually wired up:** every real `tools/list` (initial connect,
+a successful reconnect, or a `tools/list_changed` refresh) writes an
+entry. **What's deliberately not wired up:** nothing reads the cache to
+decide whether `ConnectAll` can skip starting a server's process for pure
+discovery — that would change `ConnectAll`'s "always dial every enabled
+server, log and skip failures" contract, which this work didn't need to
+touch. `cachedTools` is the seam a future lazy-discovery mode would call;
+today it's exercised only by its own tests. Recorded here so it doesn't
+read as a half-finished feature — it's infrastructure ahead of the need
+that would consume it.
+
 ---
 
 ## Permissions
