@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/codexmark/kram-gateway/internal/snapshot"
+	"github.com/codexmark/kram/internal/snapshot"
 )
 
 // snapshotErrorText turns a snapshot package error into the plain-text

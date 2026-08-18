@@ -11,12 +11,12 @@ import (
 	"log/slog"
 	"net/http"
 
-	"github.com/codexmark/kram-gateway/internal/breaker"
-	"github.com/codexmark/kram-gateway/internal/config"
-	"github.com/codexmark/kram-gateway/internal/provider"
-	"github.com/codexmark/kram-gateway/internal/router"
-	"github.com/codexmark/kram-gateway/internal/server"
-	"github.com/codexmark/kram-gateway/internal/telemetry"
+	"github.com/codexmark/kram/internal/breaker"
+	"github.com/codexmark/kram/internal/config"
+	"github.com/codexmark/kram/internal/provider"
+	"github.com/codexmark/kram/internal/router"
+	"github.com/codexmark/kram/internal/server"
+	"github.com/codexmark/kram/internal/telemetry"
 )
 
 // Run builds the gateway from cfg and serves until ctx is canceled, then

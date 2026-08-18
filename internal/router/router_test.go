@@ -4,11 +4,11 @@ import (
 	"context"
 	"testing"
 
-	"github.com/codexmark/kram-gateway/internal/breaker"
-	"github.com/codexmark/kram-gateway/internal/config"
-	"github.com/codexmark/kram-gateway/internal/openai"
-	"github.com/codexmark/kram-gateway/internal/provider"
-	"github.com/codexmark/kram-gateway/internal/telemetry"
+	"github.com/codexmark/kram/internal/breaker"
+	"github.com/codexmark/kram/internal/config"
+	"github.com/codexmark/kram/internal/openai"
+	"github.com/codexmark/kram/internal/provider"
+	"github.com/codexmark/kram/internal/telemetry"
 )
 
 // fakeProvider is the minimum needed to satisfy provider.Provider for

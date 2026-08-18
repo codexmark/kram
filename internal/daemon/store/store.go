@@ -12,7 +12,7 @@ import (
 
 	_ "modernc.org/sqlite" // pure-Go driver: keeps the daemon a static, cgo-free binary
 
-	"github.com/codexmark/kram-gateway/internal/openai"
+	"github.com/codexmark/kram/internal/openai"
 )
 
 const schema = `

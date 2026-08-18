@@ -11,9 +11,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/codexmark/kram-gateway/internal/artifact"
-	"github.com/codexmark/kram-gateway/internal/kramhome"
-	"github.com/codexmark/kram-gateway/internal/shell"
+	"github.com/codexmark/kram/internal/artifact"
+	"github.com/codexmark/kram/internal/kramhome"
+	"github.com/codexmark/kram/internal/shell"
 )
 
 // customToolDefaultTimeout matches bash's default — a custom tool is

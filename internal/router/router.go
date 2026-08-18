@@ -16,11 +16,11 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/codexmark/kram-gateway/internal/breaker"
-	"github.com/codexmark/kram-gateway/internal/config"
-	"github.com/codexmark/kram-gateway/internal/openai"
-	"github.com/codexmark/kram-gateway/internal/provider"
-	"github.com/codexmark/kram-gateway/internal/telemetry"
+	"github.com/codexmark/kram/internal/breaker"
+	"github.com/codexmark/kram/internal/config"
+	"github.com/codexmark/kram/internal/openai"
+	"github.com/codexmark/kram/internal/provider"
+	"github.com/codexmark/kram/internal/telemetry"
 )
 
 // combo is a resolved combo: its provider pool, its strategy instance

@@ -1,4 +1,4 @@
-module github.com/codexmark/kram-gateway
+module github.com/codexmark/kram
 
 go 1.26.6
 

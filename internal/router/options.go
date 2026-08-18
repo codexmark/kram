@@ -1,6 +1,6 @@
 package router
 
-import "github.com/codexmark/kram-gateway/internal/config"
+import "github.com/codexmark/kram/internal/config"
 
 // Defaults applied when a combo's strategy_options omits a field — chosen
 // to make "strategy: smart" alone (no strategy_options block at all)

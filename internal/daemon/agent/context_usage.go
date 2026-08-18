@@ -7,8 +7,8 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/codexmark/kram-gateway/internal/daemon/compaction"
-	"github.com/codexmark/kram-gateway/internal/daemon/store"
+	"github.com/codexmark/kram/internal/daemon/compaction"
+	"github.com/codexmark/kram/internal/daemon/store"
 )
 
 // ContextCategory is one real, distinct contributor to a session's context

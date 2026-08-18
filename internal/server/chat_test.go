@@ -11,12 +11,12 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/codexmark/kram-gateway/internal/breaker"
-	"github.com/codexmark/kram-gateway/internal/config"
-	"github.com/codexmark/kram-gateway/internal/openai"
-	"github.com/codexmark/kram-gateway/internal/provider"
-	"github.com/codexmark/kram-gateway/internal/router"
-	"github.com/codexmark/kram-gateway/internal/telemetry"
+	"github.com/codexmark/kram/internal/breaker"
+	"github.com/codexmark/kram/internal/config"
+	"github.com/codexmark/kram/internal/openai"
+	"github.com/codexmark/kram/internal/provider"
+	"github.com/codexmark/kram/internal/router"
+	"github.com/codexmark/kram/internal/telemetry"
 )
 
 // scriptedProvider replays a fixed event script on every ChatCompletion

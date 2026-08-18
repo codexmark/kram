@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/codexmark/kram-gateway/internal/cli/daemonclient"
-	"github.com/codexmark/kram-gateway/internal/openai"
+	"github.com/codexmark/kram/internal/cli/daemonclient"
+	"github.com/codexmark/kram/internal/openai"
 )
 
 func TestFocusedRankingFindsMatchingProvider(t *testing.T) {

@@ -12,12 +12,12 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/codexmark/kram-gateway/internal/artifact"
-	"github.com/codexmark/kram-gateway/internal/daemon/store"
-	"github.com/codexmark/kram-gateway/internal/lsp"
-	"github.com/codexmark/kram-gateway/internal/openai"
-	"github.com/codexmark/kram-gateway/internal/permission"
-	"github.com/codexmark/kram-gateway/internal/snapshot"
+	"github.com/codexmark/kram/internal/artifact"
+	"github.com/codexmark/kram/internal/daemon/store"
+	"github.com/codexmark/kram/internal/lsp"
+	"github.com/codexmark/kram/internal/openai"
+	"github.com/codexmark/kram/internal/permission"
+	"github.com/codexmark/kram/internal/snapshot"
 )
 
 // Tool is one callable capability the agent loop can offer the model.

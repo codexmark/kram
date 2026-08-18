@@ -1,6 +1,6 @@
 package router
 
-import "github.com/codexmark/kram-gateway/internal/openai"
+import "github.com/codexmark/kram/internal/openai"
 
 // ScoreFactor and RankedProviderInfo are the router's own names for the
 // wire types in internal/openai (AttemptInfo travels over the gateway's

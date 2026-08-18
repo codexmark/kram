@@ -5,8 +5,8 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/codexmark/kram-gateway/internal/openai"
-	"github.com/codexmark/kram-gateway/internal/provider"
+	"github.com/codexmark/kram/internal/openai"
+	"github.com/codexmark/kram/internal/provider"
 )
 
 func TestBoundedPeekNoBytesFallsBack(t *testing.T) {

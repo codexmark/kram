@@ -9,7 +9,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/codexmark/kram-gateway/internal/openai"
+	"github.com/codexmark/kram/internal/openai"
 )
 
 // StreamDelta is one normalized increment of a streaming chat completion —

@@ -5,7 +5,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/codexmark/kram-gateway/internal/artifact"
+	"github.com/codexmark/kram/internal/artifact"
 )
 
 // artifactMaxAge is how long a spilled tool result stays on disk before

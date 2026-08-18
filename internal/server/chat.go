@@ -10,9 +10,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/codexmark/kram-gateway/internal/openai"
-	"github.com/codexmark/kram-gateway/internal/provider"
-	"github.com/codexmark/kram-gateway/internal/router"
+	"github.com/codexmark/kram/internal/openai"
+	"github.com/codexmark/kram/internal/provider"
+	"github.com/codexmark/kram/internal/router"
 )
 
 // handleChatCompletions is the attempt executor: it asks the router for a

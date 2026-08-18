@@ -12,8 +12,8 @@ import (
 	"log/slog"
 	"os"
 
-	"github.com/codexmark/kram-gateway/internal/config"
-	"github.com/codexmark/kram-gateway/internal/gateway"
+	"github.com/codexmark/kram/internal/config"
+	"github.com/codexmark/kram/internal/gateway"
 )
 
 func main() {

@@ -12,8 +12,8 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/codexmark/kram-gateway/internal/daemon/agent"
-	"github.com/codexmark/kram-gateway/internal/daemon/session"
+	"github.com/codexmark/kram/internal/daemon/agent"
+	"github.com/codexmark/kram/internal/daemon/session"
 )
 
 // Server holds the session and agent services and exposes them over HTTP.

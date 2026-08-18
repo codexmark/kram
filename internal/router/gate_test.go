@@ -3,8 +3,8 @@ package router
 import (
 	"testing"
 
-	"github.com/codexmark/kram-gateway/internal/config"
-	"github.com/codexmark/kram-gateway/internal/openai"
+	"github.com/codexmark/kram/internal/config"
+	"github.com/codexmark/kram/internal/openai"
 )
 
 func TestGateAcceptsByDefault(t *testing.T) {

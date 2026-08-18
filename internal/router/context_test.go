@@ -3,7 +3,7 @@ package router
 import (
 	"testing"
 
-	"github.com/codexmark/kram-gateway/internal/openai"
+	"github.com/codexmark/kram/internal/openai"
 )
 
 // convReq builds a request with a stable system+first-user prefix — the

@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/codexmark/kram-gateway/internal/artifact"
+	"github.com/codexmark/kram/internal/artifact"
 )
 
 // artifactRead reads back a slice of a tool result that was too large to

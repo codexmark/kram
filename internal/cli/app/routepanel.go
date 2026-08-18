@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/codexmark/kram-gateway/internal/openai"
+	"github.com/codexmark/kram/internal/openai"
 )
 
 // renderRoutePanel draws the expanded Ctrl+R route trace: every model

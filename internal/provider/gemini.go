@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/codexmark/kram-gateway/internal/openai"
+	"github.com/codexmark/kram/internal/openai"
 )
 
 const defaultGeminiBaseURL = "https://generativelanguage.googleapis.com"

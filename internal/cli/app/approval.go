@@ -7,7 +7,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/codexmark/kram-gateway/internal/cli/daemonclient"
+	"github.com/codexmark/kram/internal/cli/daemonclient"
 )
 
 // pendingApproval is an in-flight permission-policy approval: like

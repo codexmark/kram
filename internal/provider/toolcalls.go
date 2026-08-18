@@ -3,7 +3,7 @@ package provider
 import (
 	"sort"
 
-	"github.com/codexmark/kram-gateway/internal/openai"
+	"github.com/codexmark/kram/internal/openai"
 )
 
 // toolCallAccumulator reassembles OpenAI-style tool-call deltas, which

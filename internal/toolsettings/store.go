@@ -9,7 +9,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/codexmark/kram-gateway/internal/kramhome"
+	"github.com/codexmark/kram/internal/kramhome"
 )
 
 // Store is a set of disabled item names. Tools and skills share one

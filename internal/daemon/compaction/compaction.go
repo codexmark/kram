@@ -19,9 +19,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/codexmark/kram-gateway/internal/daemon/gatewayclient"
-	"github.com/codexmark/kram-gateway/internal/daemon/store"
-	"github.com/codexmark/kram-gateway/internal/openai"
+	"github.com/codexmark/kram/internal/daemon/gatewayclient"
+	"github.com/codexmark/kram/internal/daemon/store"
+	"github.com/codexmark/kram/internal/openai"
 )
 
 // CompactionMarkerName tags a system message as a compaction summary

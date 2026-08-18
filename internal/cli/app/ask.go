@@ -7,7 +7,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/codexmark/kram-gateway/internal/cli/daemonclient"
+	"github.com/codexmark/kram/internal/cli/daemonclient"
 )
 
 // pendingQuestion is an in-flight ask_question call: the agent turn is

@@ -3,7 +3,7 @@ package router
 import (
 	"strings"
 
-	"github.com/codexmark/kram-gateway/internal/openai"
+	"github.com/codexmark/kram/internal/openai"
 )
 
 // AffinityKey identifies a request's stable prompt prefix: the leading

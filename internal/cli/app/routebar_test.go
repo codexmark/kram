@@ -6,9 +6,9 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/codexmark/kram-gateway/internal/cli/daemonclient"
-	"github.com/codexmark/kram-gateway/internal/cli/statusclient"
-	"github.com/codexmark/kram-gateway/internal/openai"
+	"github.com/codexmark/kram/internal/cli/daemonclient"
+	"github.com/codexmark/kram/internal/cli/statusclient"
+	"github.com/codexmark/kram/internal/openai"
 )
 
 func TestRenderRouteBarEmptyWhenNoStrategyKnown(t *testing.T) {

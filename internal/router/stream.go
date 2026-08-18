@@ -5,7 +5,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/codexmark/kram-gateway/internal/provider"
+	"github.com/codexmark/kram/internal/provider"
 )
 
 // Bounded-peek limits — small and short on purpose: this exists to catch

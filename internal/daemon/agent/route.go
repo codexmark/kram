@@ -1,6 +1,6 @@
 package agent
 
-import "github.com/codexmark/kram-gateway/internal/openai"
+import "github.com/codexmark/kram/internal/openai"
 
 // RouteCall is one model call's full routing story — every attempt made
 // while serving it (success, error, or gate-rejected), not just the one

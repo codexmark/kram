@@ -3,8 +3,8 @@ package router
 import (
 	"strings"
 
-	"github.com/codexmark/kram-gateway/internal/config"
-	"github.com/codexmark/kram-gateway/internal/openai"
+	"github.com/codexmark/kram/internal/config"
+	"github.com/codexmark/kram/internal/openai"
 )
 
 // GateOutcome is a ResponseGate's verdict on a fully-received response.

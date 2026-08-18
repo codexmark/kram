@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/codexmark/kram-gateway/internal/mcp"
+	"github.com/codexmark/kram/internal/mcp"
 )
 
 // mcpToolPrefix namespaces every tool that came from an MCP server.

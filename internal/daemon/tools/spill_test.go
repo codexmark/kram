@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/codexmark/kram-gateway/internal/artifact"
+	"github.com/codexmark/kram/internal/artifact"
 )
 
 func TestBashSpillsLargeOutputAsArtifactAndArtifactReadRetrievesIt(t *testing.T) {

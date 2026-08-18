@@ -30,12 +30,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/codexmark/kram-gateway/internal/cli/daemonclient"
-	"github.com/codexmark/kram-gateway/internal/config"
-	"github.com/codexmark/kram-gateway/internal/credentials"
-	"github.com/codexmark/kram-gateway/internal/daemon"
-	"github.com/codexmark/kram-gateway/internal/gateway"
-	"github.com/codexmark/kram-gateway/internal/providercatalog"
+	"github.com/codexmark/kram/internal/cli/daemonclient"
+	"github.com/codexmark/kram/internal/config"
+	"github.com/codexmark/kram/internal/credentials"
+	"github.com/codexmark/kram/internal/daemon"
+	"github.com/codexmark/kram/internal/gateway"
+	"github.com/codexmark/kram/internal/providercatalog"
 )
 
 func main() {

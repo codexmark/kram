@@ -3,7 +3,7 @@ package provider
 import (
 	"fmt"
 
-	"github.com/codexmark/kram-gateway/internal/config"
+	"github.com/codexmark/kram/internal/config"
 )
 
 // Build constructs the concrete adapter for a provider config entry.

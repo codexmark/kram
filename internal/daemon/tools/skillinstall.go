@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/codexmark/kram-gateway/internal/kramhome"
+	"github.com/codexmark/kram/internal/kramhome"
 )
 
 // skillInstallTimeout bounds the clone — a public repo that isn't

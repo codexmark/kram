@@ -26,12 +26,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/codexmark/kram-gateway/internal/daemon/compaction"
-	"github.com/codexmark/kram-gateway/internal/daemon/gatewayclient"
-	"github.com/codexmark/kram-gateway/internal/daemon/session"
-	"github.com/codexmark/kram-gateway/internal/daemon/store"
-	"github.com/codexmark/kram-gateway/internal/daemon/tools"
-	"github.com/codexmark/kram-gateway/internal/openai"
+	"github.com/codexmark/kram/internal/daemon/compaction"
+	"github.com/codexmark/kram/internal/daemon/gatewayclient"
+	"github.com/codexmark/kram/internal/daemon/session"
+	"github.com/codexmark/kram/internal/daemon/store"
+	"github.com/codexmark/kram/internal/daemon/tools"
+	"github.com/codexmark/kram/internal/openai"
 )
 
 // ErrNotFound is returned when a session ID doesn't exist.

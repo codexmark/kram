@@ -1,9 +1,9 @@
 package router
 
 import (
-	"github.com/codexmark/kram-gateway/internal/breaker"
-	"github.com/codexmark/kram-gateway/internal/provider"
-	"github.com/codexmark/kram-gateway/internal/telemetry"
+	"github.com/codexmark/kram/internal/breaker"
+	"github.com/codexmark/kram/internal/provider"
+	"github.com/codexmark/kram/internal/telemetry"
 )
 
 // Candidate is one provider eligible to serve a request, decorated with

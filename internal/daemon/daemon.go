@@ -14,14 +14,14 @@ import (
 	"net/http"
 	"path/filepath"
 
-	"github.com/codexmark/kram-gateway/internal/daemon/agent"
-	"github.com/codexmark/kram-gateway/internal/daemon/gatewayclient"
-	"github.com/codexmark/kram-gateway/internal/daemon/server"
-	"github.com/codexmark/kram-gateway/internal/daemon/session"
-	"github.com/codexmark/kram-gateway/internal/daemon/store"
-	"github.com/codexmark/kram-gateway/internal/daemon/tools"
-	"github.com/codexmark/kram-gateway/internal/mcp"
-	"github.com/codexmark/kram-gateway/internal/toolsettings"
+	"github.com/codexmark/kram/internal/daemon/agent"
+	"github.com/codexmark/kram/internal/daemon/gatewayclient"
+	"github.com/codexmark/kram/internal/daemon/server"
+	"github.com/codexmark/kram/internal/daemon/session"
+	"github.com/codexmark/kram/internal/daemon/store"
+	"github.com/codexmark/kram/internal/daemon/tools"
+	"github.com/codexmark/kram/internal/mcp"
+	"github.com/codexmark/kram/internal/toolsettings"
 )
 
 // Config configures one daemon instance.

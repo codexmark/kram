@@ -11,7 +11,7 @@ import (
 	"encoding/hex"
 	"errors"
 
-	"github.com/codexmark/kram-gateway/internal/daemon/store"
+	"github.com/codexmark/kram/internal/daemon/store"
 )
 
 // ErrNotFound is returned when a session ID doesn't exist.

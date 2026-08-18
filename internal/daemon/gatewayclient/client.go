@@ -12,7 +12,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/codexmark/kram-gateway/internal/openai"
+	"github.com/codexmark/kram/internal/openai"
 )
 
 // Client calls a kram-gateway instance's OpenAI-compatible API.

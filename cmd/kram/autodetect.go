@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/codexmark/kram-gateway/internal/config"
-	"github.com/codexmark/kram-gateway/internal/credentials"
-	"github.com/codexmark/kram-gateway/internal/providercatalog"
+	"github.com/codexmark/kram/internal/config"
+	"github.com/codexmark/kram/internal/credentials"
+	"github.com/codexmark/kram/internal/providercatalog"
 )
 
 // loadStoredCredentials exports every key saved via the CLI's accounts

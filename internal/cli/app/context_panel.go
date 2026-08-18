@@ -6,7 +6,7 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/codexmark/kram-gateway/internal/cli/daemonclient"
+	"github.com/codexmark/kram/internal/cli/daemonclient"
 )
 
 // categoryLabel and categoryStyle map the daemon's real context categories

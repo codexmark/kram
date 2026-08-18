@@ -19,12 +19,12 @@ import (
 	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/codexmark/kram-gateway/internal/cli/daemonclient"
-	"github.com/codexmark/kram-gateway/internal/cli/statusclient"
-	"github.com/codexmark/kram-gateway/internal/credentials"
-	"github.com/codexmark/kram-gateway/internal/openai"
-	"github.com/codexmark/kram-gateway/internal/providerping"
-	"github.com/codexmark/kram-gateway/internal/toolsettings"
+	"github.com/codexmark/kram/internal/cli/daemonclient"
+	"github.com/codexmark/kram/internal/cli/statusclient"
+	"github.com/codexmark/kram/internal/credentials"
+	"github.com/codexmark/kram/internal/openai"
+	"github.com/codexmark/kram/internal/providerping"
+	"github.com/codexmark/kram/internal/toolsettings"
 )
 
 const footerHeight = 1   // context/tokens/shortcuts, one line — see view.go's renderFooter

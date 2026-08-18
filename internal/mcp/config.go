@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/codexmark/kram-gateway/internal/kramhome"
+	"github.com/codexmark/kram/internal/kramhome"
 )
 
 // ServerConfig is one entry in an mcpServers map. The shape deliberately

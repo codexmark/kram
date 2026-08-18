@@ -9,7 +9,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/codexmark/kram-gateway/internal/cli/daemonclient"
+	"github.com/codexmark/kram/internal/cli/daemonclient"
 )
 
 // toolToggleItem is one row on the tools/skills screen — a built-in tool

@@ -40,7 +40,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/codexmark/kram-gateway/internal/kramhome"
+	"github.com/codexmark/kram/internal/kramhome"
 )
 
 // cacheTTL bounds how long a cached schema is trusted even if the

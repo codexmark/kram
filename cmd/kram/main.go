@@ -21,12 +21,12 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/codexmark/kram-gateway/internal/cli/app"
-	"github.com/codexmark/kram-gateway/internal/cli/daemonclient"
-	"github.com/codexmark/kram-gateway/internal/cli/statusclient"
-	"github.com/codexmark/kram-gateway/internal/config"
-	"github.com/codexmark/kram-gateway/internal/daemon"
-	"github.com/codexmark/kram-gateway/internal/gateway"
+	"github.com/codexmark/kram/internal/cli/app"
+	"github.com/codexmark/kram/internal/cli/daemonclient"
+	"github.com/codexmark/kram/internal/cli/statusclient"
+	"github.com/codexmark/kram/internal/config"
+	"github.com/codexmark/kram/internal/daemon"
+	"github.com/codexmark/kram/internal/gateway"
 )
 
 // version is set at build time via -ldflags "-X main.version=..."

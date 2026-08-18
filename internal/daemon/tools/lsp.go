@@ -15,7 +15,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/codexmark/kram-gateway/internal/lsp"
+	"github.com/codexmark/kram/internal/lsp"
 )
 
 // lspProvider is the subset of *lsp.Manager the LSP tools need. Defined

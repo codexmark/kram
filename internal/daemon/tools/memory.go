@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/codexmark/kram-gateway/internal/daemon/store"
+	"github.com/codexmark/kram/internal/daemon/store"
 )
 
 // maxScopeMemoryChars caps how much memory one scope can hold. Adapted

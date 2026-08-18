@@ -7,7 +7,7 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/codexmark/kram-gateway/internal/cli/daemonclient"
+	"github.com/codexmark/kram/internal/cli/daemonclient"
 )
 
 // refreshTranscript rebuilds the viewport content from m.messages and

@@ -8,7 +8,7 @@ import (
 	"runtime"
 	"strings"
 
-	"github.com/codexmark/kram-gateway/internal/kramhome"
+	"github.com/codexmark/kram/internal/kramhome"
 )
 
 // langSpec is what's needed to start and talk to one language's server:

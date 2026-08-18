@@ -11,9 +11,9 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/codexmark/kram-gateway/internal/oauthflow"
-	"github.com/codexmark/kram-gateway/internal/providercatalog"
-	"github.com/codexmark/kram-gateway/internal/providerping"
+	"github.com/codexmark/kram/internal/oauthflow"
+	"github.com/codexmark/kram/internal/providercatalog"
+	"github.com/codexmark/kram/internal/providerping"
 )
 
 // accountStatus is what the accounts screen shows for one catalog entry.

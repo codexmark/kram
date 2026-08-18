@@ -8,11 +8,11 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/codexmark/kram-gateway/internal/cli/daemonclient"
-	"github.com/codexmark/kram-gateway/internal/cli/statusclient"
-	"github.com/codexmark/kram-gateway/internal/credentials"
-	"github.com/codexmark/kram-gateway/internal/providercatalog"
-	"github.com/codexmark/kram-gateway/internal/providerping"
+	"github.com/codexmark/kram/internal/cli/daemonclient"
+	"github.com/codexmark/kram/internal/cli/statusclient"
+	"github.com/codexmark/kram/internal/credentials"
+	"github.com/codexmark/kram/internal/providercatalog"
+	"github.com/codexmark/kram/internal/providerping"
 )
 
 type sessionsListMsg struct {

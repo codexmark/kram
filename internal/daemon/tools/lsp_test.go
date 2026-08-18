@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/codexmark/kram-gateway/internal/lsp"
+	"github.com/codexmark/kram/internal/lsp"
 )
 
 // fakeLSPProvider is a scripted stand-in for *lsp.Manager, letting these

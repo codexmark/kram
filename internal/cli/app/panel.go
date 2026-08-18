@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/codexmark/kram-gateway/internal/cli/statusclient"
-	"github.com/codexmark/kram-gateway/internal/openai"
+	"github.com/codexmark/kram/internal/cli/statusclient"
+	"github.com/codexmark/kram/internal/openai"
 )
 
 // renderStrategyPanel draws the end-to-end strategy panel: every provider

@@ -11,8 +11,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/codexmark/kram-gateway/internal/daemon/compaction"
-	"github.com/codexmark/kram-gateway/internal/daemon/store"
+	"github.com/codexmark/kram/internal/daemon/compaction"
+	"github.com/codexmark/kram/internal/daemon/store"
 )
 
 func TestSearchMessagesExcludesCompactionSummaries(t *testing.T) {

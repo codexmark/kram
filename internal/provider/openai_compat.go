@@ -8,7 +8,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/codexmark/kram-gateway/internal/openai"
+	"github.com/codexmark/kram/internal/openai"
 )
 
 // OpenAICompatible talks to any backend that already speaks the OpenAI

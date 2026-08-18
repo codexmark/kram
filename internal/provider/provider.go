@@ -7,7 +7,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/codexmark/kram-gateway/internal/openai"
+	"github.com/codexmark/kram/internal/openai"
 )
 
 // StreamEvent is one normalized increment of a chat completion stream.

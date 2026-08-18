@@ -9,7 +9,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/codexmark/kram-gateway/internal/kramhome"
+	"github.com/codexmark/kram/internal/kramhome"
 )
 
 // Skill is one discovered skill: a folder containing a SKILL.md with a

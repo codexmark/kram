@@ -7,8 +7,8 @@ import (
 	"os/exec"
 	"time"
 
-	"github.com/codexmark/kram-gateway/internal/artifact"
-	"github.com/codexmark/kram-gateway/internal/shell"
+	"github.com/codexmark/kram/internal/artifact"
+	"github.com/codexmark/kram/internal/shell"
 )
 
 const (

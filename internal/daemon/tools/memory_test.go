@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/codexmark/kram-gateway/internal/daemon/store"
+	"github.com/codexmark/kram/internal/daemon/store"
 )
 
 func newMemoryTestStore(t *testing.T) *store.Store {

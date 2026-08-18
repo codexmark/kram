@@ -12,7 +12,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/codexmark/kram-gateway/internal/shell"
+	"github.com/codexmark/kram/internal/shell"
 )
 
 // backgroundMaxOutputBytes caps how much output one process buffers —

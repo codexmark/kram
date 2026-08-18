@@ -10,7 +10,7 @@ import (
 	"log/slog"
 	"os"
 
-	"github.com/codexmark/kram-gateway/internal/daemon"
+	"github.com/codexmark/kram/internal/daemon"
 )
 
 func main() {
