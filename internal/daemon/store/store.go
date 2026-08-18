@@ -124,6 +124,14 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("applying memory schema: %w", err)
 	}
+	if _, err := db.Exec(searchSchema); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("applying search schema: %w", err)
+	}
+	if err := backfillMessagesFTS(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("backfilling message search index: %w", err)
+	}
 
 	return &Store{db: db}, nil
 }
@@ -210,17 +218,29 @@ func scanMessage(row rowScanner) (Message, error) {
 	if err := row.Scan(&m.ID, &m.SessionID, &m.Role, &m.Content, &m.Provider, &toolCallsJSON, &m.ToolCallID, &m.Name, &imagesJSON, &m.CreatedAt); err != nil {
 		return Message{}, fmt.Errorf("scanning message row: %w", err)
 	}
+	if err := decodeMessageJSON(&m, toolCallsJSON, imagesJSON); err != nil {
+		return Message{}, err
+	}
+	return m, nil
+}
+
+// decodeMessageJSON fills in a Message's ToolCalls/Images from their
+// stored JSON-text columns — split out of scanMessage so search.go's
+// SearchMessages, which scans one extra (session title) column that
+// doesn't fit scanMessage's fixed 9-column shape, can reuse the same
+// decoding instead of duplicating it.
+func decodeMessageJSON(m *Message, toolCallsJSON, imagesJSON string) error {
 	if toolCallsJSON != "" {
 		if err := json.Unmarshal([]byte(toolCallsJSON), &m.ToolCalls); err != nil {
-			return Message{}, fmt.Errorf("decoding stored tool_calls: %w", err)
+			return fmt.Errorf("decoding stored tool_calls: %w", err)
 		}
 	}
 	if imagesJSON != "" {
 		if err := json.Unmarshal([]byte(imagesJSON), &m.Images); err != nil {
-			return Message{}, fmt.Errorf("decoding stored images: %w", err)
+			return fmt.Errorf("decoding stored images: %w", err)
 		}
 	}
-	return m, nil
+	return nil
 }
 
 // AppendMessage stores one message and touches the parent session's

@@ -62,9 +62,12 @@ func (r *Registry) SetDelegator(d Delegator) { r.delegator = d }
 // NewRegistry builds the default tool set scoped to workspace — every file
 // and shell tool refuses to operate outside this directory. st, if
 // non-nil, backs the memory_write/memory_search tools (cross-session
-// memory, scoped to this workspace plus store.GlobalScope); passing nil
-// omits those two tools entirely rather than registering ones that would
-// always fail. disabled names every tool (or skill — they share one
+// memory, scoped to this workspace plus store.GlobalScope) and
+// session_search (deterministic full-text search over real conversation
+// history, a distinct concern from curated memory — see
+// internal/daemon/store/search.go); passing nil omits those tools
+// entirely rather than registering ones that would always fail. disabled
+// names every tool (or skill — they share one
 // namespace) turned off via the CLI's tools/skills screen; nil or empty
 // means everything's on. Taking a plain map here rather than importing
 // internal/toolsettings keeps this package from depending on the
@@ -115,7 +118,7 @@ func NewRegistry(workspace string, st *store.Store, disabled map[string]bool) *R
 		newProcessKill(processes),
 	}
 	if st != nil {
-		toolList = append(toolList, newMemoryWrite(st, workspace), newMemorySearch(st, workspace))
+		toolList = append(toolList, newMemoryWrite(st, workspace), newMemorySearch(st, workspace), newSessionSearch(st))
 	}
 	for _, t := range toolList {
 		r.byName[t.Name()] = t
