@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/bubbles/spinner"
+	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
@@ -28,6 +29,14 @@ import (
 
 const footerHeight = 1   // context/tokens/shortcuts, one line — see view.go's renderFooter
 const routeBarHeight = 1 // the route bar is always exactly one line
+// inputHeight is the composer's fixed visible height in rows. A textarea
+// (not textinput) word-wraps a long message across these rows instead of
+// scrolling it off-screen horizontally — the specific bug this fixes.
+// Fixed rather than dynamically growing with content: simpler layout math
+// (syncViewportSize never has to react to how much the user has typed),
+// and 3 rows already comfortably fits several sentences before the
+// textarea's own internal scrolling takes over.
+const inputHeight = 3
 
 // phase tracks which screen the program is showing: the session picker
 // (when launched without an explicit -session), the chat itself, or the
@@ -76,7 +85,7 @@ type Model struct {
 
 	sessionID string
 
-	input    textinput.Model
+	input    textarea.Model // multi-line, word-wraps long messages instead of scrolling off-screen — see inputHeight
 	viewport viewport.Model
 	spin     spinner.Model
 
@@ -177,11 +186,21 @@ type Model struct {
 // New builds the initial model. If sessionID is empty, the program opens
 // on the session picker instead of going straight to chat.
 func New(daemon *daemonclient.Client, gateway *statusclient.Client, sessionID, combo, workspace string) Model {
-	ti := textinput.New()
+	ti := textarea.New()
 	ti.Placeholder = "mensagem…"
-	ti.Focus()
 	ti.CharLimit = 4000
-	ti.Prompt = "› "
+	ti.ShowLineNumbers = false
+	// "› " only on the composer's first visual line, matching the old
+	// single-line prompt; wrapped continuation lines get blank padding of
+	// the same width instead of repeating the arrow on every line.
+	ti.SetPromptFunc(2, func(lineIdx int) string {
+		if lineIdx == 0 {
+			return "› "
+		}
+		return "  "
+	})
+	ti.SetHeight(inputHeight)
+	ti.Focus()
 
 	titleInput := textinput.New()
 	titleInput.Placeholder = "título (opcional, enter pra pular)"
@@ -746,8 +765,7 @@ func (m Model) currentCombo() *statusclient.Combo {
 }
 
 func (m *Model) syncViewportSize() {
-	inputLines := 1
-	reserved := routeBarHeight + footerHeight + inputLines
+	reserved := routeBarHeight + footerHeight + inputHeight
 	if m.active != panelNone {
 		reserved += m.panelHeight()
 	}
@@ -757,7 +775,7 @@ func (m *Model) syncViewportSize() {
 	}
 	m.viewport.Width = m.width
 	m.viewport.Height = h
-	m.input.Width = m.width - 2
+	m.input.SetWidth(m.width - 2)
 }
 
 func (m *Model) panelHeight() int {
