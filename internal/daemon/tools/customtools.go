@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/codexmark/kram-gateway/internal/artifact"
 	"github.com/codexmark/kram-gateway/internal/kramhome"
 	"github.com/codexmark/kram-gateway/internal/shell"
 )
@@ -36,10 +37,17 @@ type toolManifest struct {
 	TimeoutSeconds int             `json:"timeout_seconds"`
 }
 
+// customToolMaxOutputBytes matches bash's inline budget — same rationale
+// (see bash.go): output past this spills to an artifact instead of being
+// truncated and lost, and SpillWriter bounds real memory use, not just
+// the reported size.
+const customToolMaxOutputBytes = 50_000
+
 type customTool struct {
 	workspace string
 	manifest  toolManifest
 	source    string // manifest file path, for error messages
+	artifacts *artifact.Store
 }
 
 func (t *customTool) Name() string { return t.manifest.Name }
@@ -67,12 +75,16 @@ func (t *customTool) Execute(ctx context.Context, raw json.RawMessage) (string, 
 	cmd := shell.Command(cmdCtx, t.workspace, t.manifest.Command)
 	cmd.Stdin = bytes.NewReader(raw)
 
-	var out bytes.Buffer
-	cmd.Stdout = &out
-	cmd.Stderr = &out
+	sw := artifact.NewSpillWriter(customToolMaxOutputBytes)
+	cmd.Stdout = sw
+	cmd.Stderr = sw
 
 	runErr := shell.Run(cmd)
-	result := out.String()
+
+	result, _, spillErr := spillResult(t.artifacts, sw, t.manifest.Name)
+	if spillErr != nil {
+		return fmt.Sprintf("error: command produced %d bytes of output, but saving it as an artifact failed: %v", sw.Total(), spillErr), nil
+	}
 
 	if cmdCtx.Err() == context.DeadlineExceeded {
 		return result + fmt.Sprintf("\n\n[command timed out after %s]", timeout), nil
@@ -97,7 +109,7 @@ func (t *customTool) Execute(ctx context.Context, raw json.RawMessage) (string, 
 // same dual-scope convention as skills. A name declared in both wins
 // from the project side, matching MCP's LoadConfig merge rule, so a repo
 // can override a user's global tool of the same name.
-func discoverCustomTools(workspace string) []*customTool {
+func discoverCustomTools(workspace string, artifacts *artifact.Store) []*customTool {
 	seen := make(map[string]bool)
 	var out []*customTool
 
@@ -108,6 +120,7 @@ func discoverCustomTools(workspace string) []*customTool {
 			}
 			seen[t.manifest.Name] = true
 			t.workspace = workspace
+			t.artifacts = artifacts
 			out = append(out, t)
 		}
 	}

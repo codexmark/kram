@@ -99,6 +99,36 @@ type RunResult struct {
 
 const maxToolResultChars = 4000 // how much of a tool result ToolActivity keeps for display
 
+// maxTurnToolOutputChars bounds the *combined* size of every tool result
+// within one model turn's batch of tool calls — several individually-fine
+// results (each under any single tool's own cap) can still add up to a
+// large chunk of context in one turn. Not the same problem
+// internal/artifact's spill solves (one oversized result); this is
+// several fine-sized ones landing together. Deliberately enforced by
+// truncation-with-notice here rather than retroactively spilling the
+// batch into artifacts: that would mean buffering an entire turn's tool
+// results before persisting any of them, a bigger change to a loop this
+// project has already had one real "goes silent" bug in — see
+// DECISIONS.md.
+const maxTurnToolOutputChars = 180_000
+
+// enforceTurnOutputBudget checks content against the running total
+// (alreadyUsed) of everything already added to this turn's batch, against
+// budget. Never silently drops content — either the full text fits, or
+// it's truncated with an explicit notice explaining why, following the
+// same "never return empty/silent" discipline as bash's exit framing and
+// outputfilter's all-routine case (see DECISIONS.md).
+func enforceTurnOutputBudget(content string, alreadyUsed, budget int) (truncated string, hit bool) {
+	if alreadyUsed >= budget {
+		return fmt.Sprintf("[kram: this turn's combined tool output already reached its %d-character budget; result withheld — call this tool again by itself if you need it]", budget), true
+	}
+	remaining := budget - alreadyUsed
+	if len(content) <= remaining {
+		return content, false
+	}
+	return content[:remaining] + fmt.Sprintf("\n\n[kram: truncated — this turn's combined tool output exceeded its %d-character budget; call this tool again by itself for the rest]", budget), true
+}
+
 // Service runs the agent loop for a workspace.
 type Service struct {
 	store   *store.Store
@@ -478,9 +508,23 @@ func (s *Service) runLoop(ctx context.Context, sessionID, model string, depth in
 			return RunResult{}, fmt.Errorf("persisting assistant tool-call message: %w", err)
 		}
 
+		// turnOutputChars tracks the combined size of every tool result in
+		// *this* batch of tool calls (one model turn can request several).
+		// A per-call cap (bashMaxOutputBytes and friends) bounds any one
+		// result, but several individually-fine results still add up —
+		// see enforceTurnOutputBudget's doc comment.
+		turnOutputChars := 0
 		for _, tc := range callResult.ToolCalls {
 			emit(onEvent, Event{Kind: EventToolStart, ToolName: tc.Function.Name, ToolArgs: tc.Function.Arguments})
 			activity, toolMsg := s.runTool(ctx, tc)
+
+			original := len(toolMsg.Content)
+			if truncated, hit := enforceTurnOutputBudget(toolMsg.Content, turnOutputChars, maxTurnToolOutputChars); hit {
+				toolMsg.Content = truncated
+				activity.Result = truncated
+			}
+			turnOutputChars += original
+
 			emit(onEvent, Event{Kind: EventToolResult, ToolName: tc.Function.Name, ToolResult: activity.Result, ToolOK: activity.OK})
 			result.ToolActivity = append(result.ToolActivity, activity)
 			if _, err := s.store.AppendMessage(sessionID, toolMsg); err != nil {

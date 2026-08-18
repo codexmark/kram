@@ -1,19 +1,28 @@
 package tools
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"os/exec"
 	"time"
 
+	"github.com/codexmark/kram-gateway/internal/artifact"
 	"github.com/codexmark/kram-gateway/internal/shell"
 )
 
 const (
 	bashDefaultTimeout = 30 * time.Second
 	bashMaxTimeout     = 120 * time.Second
+	// bashMaxOutputBytes is the inline budget: output up to this size is
+	// filtered and returned in the tool result as before. Output past it
+	// no longer gets truncated and lost — it spills to an artifact (see
+	// internal/artifact) that the model can read back in bounded slices
+	// via artifact_read, chosen specifically because a bytes.Buffer here
+	// used to accumulate the *entire* command output in memory before this
+	// cap was ever checked, so the cap bounded what was reported but not
+	// what was actually held in RAM while a command ran. SpillWriter
+	// bounds the real memory use, not just the reported size.
 	bashMaxOutputBytes = 50_000
 )
 
@@ -23,9 +32,12 @@ const (
 // (Hermes) settled on to keep a single tool call from wedging the loop.
 type bash struct {
 	workspace string
+	artifacts *artifact.Store
 }
 
-func newBash(workspace string) *bash { return &bash{workspace: workspace} }
+func newBash(workspace string, artifacts *artifact.Store) *bash {
+	return &bash{workspace: workspace, artifacts: artifacts}
+}
 
 func (t *bash) Name() string { return "bash" }
 func (t *bash) Description() string {
@@ -74,26 +86,26 @@ func (t *bash) Execute(ctx context.Context, raw json.RawMessage) (string, error)
 
 	cmd := shell.Command(cmdCtx, t.workspace, args.Command)
 
-	var out bytes.Buffer
-	cmd.Stdout = &out
-	cmd.Stderr = &out
+	sw := artifact.NewSpillWriter(bashMaxOutputBytes)
+	cmd.Stdout = sw
+	cmd.Stderr = sw
 
 	runErr := shell.Run(cmd)
 
-	output := out.String()
-	truncated := false
-	if len(output) > bashMaxOutputBytes {
-		output = output[:bashMaxOutputBytes]
-		truncated = true
+	text, spilled, spillErr := spillResult(t.artifacts, sw, "bash")
+	if spillErr != nil {
+		return fmt.Sprintf("error: command produced %d bytes of output, but saving it as an artifact failed: %v", sw.Total(), spillErr), nil
 	}
 
-	// Deterministic noise filtering, keyed on the command that produced
-	// this output (see outputfilter.go). Applied before the byte cap
-	// below is reported, so what survives the filter is signal rather
-	// than whichever bytes happened to come first.
-	result := filterCommandOutput(args.Command, output)
-	if truncated {
-		result += "\n\n[output truncated]"
+	// Deterministic noise filtering (see outputfilter.go) only applies to
+	// the inline case — a spilled result is already a short preview plus
+	// an artifact reference, not the kind of noisy multi-thousand-line
+	// output the filter exists to compress.
+	var result string
+	if spilled {
+		result = text
+	} else {
+		result = filterCommandOutput(args.Command, text)
 	}
 
 	if cmdCtx.Err() == context.DeadlineExceeded {

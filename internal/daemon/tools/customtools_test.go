@@ -83,7 +83,7 @@ func TestDiscoverCustomToolsFindsProjectManifest(t *testing.T) {
 		Name: "greet", Description: "says hi", Command: "echo hi",
 	})
 
-	tools := discoverCustomTools(workspace)
+	tools := discoverCustomTools(workspace, nil)
 	if len(tools) != 1 || tools[0].Name() != "greet" {
 		t.Fatalf("expected 1 tool named greet, got %+v", tools)
 	}
@@ -104,7 +104,7 @@ func TestDiscoverCustomToolsProjectWinsOverGlobal(t *testing.T) {
 		Name: "shared", Command: "echo project",
 	})
 
-	tools := discoverCustomTools(workspace)
+	tools := discoverCustomTools(workspace, nil)
 	if len(tools) != 1 {
 		t.Fatalf("expected exactly 1 tool named 'shared' (deduped), got %+v", tools)
 	}
@@ -130,7 +130,7 @@ func TestDiscoverCustomToolsSkipsMalformedManifests(t *testing.T) {
 	}
 	writeManifest(t, dir, "valid.json", toolManifest{Name: "valid", Command: "true"})
 
-	tools := discoverCustomTools(workspace)
+	tools := discoverCustomTools(workspace, nil)
 	if len(tools) != 1 || tools[0].Name() != "valid" {
 		t.Fatalf("expected only the valid manifest to register, got %+v", tools)
 	}

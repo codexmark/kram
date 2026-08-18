@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/codexmark/kram-gateway/internal/artifact"
 	"github.com/codexmark/kram-gateway/internal/daemon/store"
 	"github.com/codexmark/kram-gateway/internal/lsp"
 	"github.com/codexmark/kram-gateway/internal/openai"
@@ -41,6 +42,7 @@ type Registry struct {
 	permEval   *permission.Evaluator
 	grants     *permission.GrantStore
 	lspManager *lsp.Manager
+	artifacts  *artifact.Store
 }
 
 // StopBackgroundProcesses kills every process started by run_background —
@@ -108,9 +110,16 @@ func NewRegistry(workspace string, st *store.Store, disabled map[string]bool) *R
 	// MCP servers deliberately don't get (those connect eagerly via
 	// mcp.ConnectAll — language servers must not).
 	lspManager := lsp.NewManager(workspace)
+	// artifact.Open is side-effect free (no directory is created until a
+	// tool result actually spills) — GC is a best-effort disk-hygiene
+	// pass, not correctness-critical, so it runs once per daemon startup
+	// rather than on a timer (see artifact.Store.GC).
+	artifacts := artifact.Open(workspace)
+	artifacts.GC(artifactMaxAge)
 	r := &Registry{
 		workspace: workspace, byName: make(map[string]Tool), disabled: disabled,
 		processes: processes, permEval: permEval, grants: grants, lspManager: lspManager,
+		artifacts: artifacts,
 	}
 	todos := newTodoStore(workspace)
 	toolList := []Tool{
@@ -122,7 +131,7 @@ func NewRegistry(workspace string, st *store.Store, disabled map[string]bool) *R
 		newGlob(workspace),
 		newMoveFile(workspace),
 		newDeleteFile(workspace),
-		newBash(workspace),
+		newBash(workspace, artifacts),
 		newGitStatus(workspace),
 		newGitDiff(workspace),
 		newWebFetch(),
@@ -133,6 +142,7 @@ func NewRegistry(workspace string, st *store.Store, disabled map[string]bool) *R
 		newSkillList(r),
 		newSkillLoad(r),
 		newSkillInstall(),
+		newArtifactRead(artifacts),
 		newRunBackground(processes),
 		newProcessList(processes),
 		newProcessOutput(processes),
@@ -151,7 +161,7 @@ func NewRegistry(workspace string, st *store.Store, disabled map[string]bool) *R
 	// built-in — a user-authored tool named "bash" or "grep" would
 	// otherwise silently change what those names do for every other
 	// project's worth of muscle memory.
-	for _, ct := range discoverCustomTools(workspace) {
+	for _, ct := range discoverCustomTools(workspace, artifacts) {
 		if _, exists := r.byName[ct.Name()]; exists {
 			continue
 		}

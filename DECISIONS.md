@@ -545,6 +545,70 @@ custom or MCP tool's arguments.
 
 ---
 
+## Artifacts
+
+### The producer, not just the reported size, had to be bounded
+
+`bash`/custom tools used to capture output as `var out bytes.Buffer`, and
+only checked a size cap *after* `cmd.Run()` returned. That cap bounded what
+was reported, never what was actually held in memory while the command
+was still producing output — a runaway command could inflate that buffer
+arbitrarily before the cap was ever consulted.
+
+**Fix:** `artifact.SpillWriter` is used directly as `cmd.Stdout`/`Stderr`.
+It buffers up to a threshold, and the moment a write would cross it,
+switches to streaming straight to a temp file for everything after — the
+in-memory buffer provably never exceeds the threshold, at any point during
+the command's entire run, not just at the end.
+
+### Spilled output becomes an artifact, not a truncated-and-lost tail
+
+Where the old cap just cut the output off (`[output truncated]`, the rest
+gone forever), a result that crosses the threshold is now saved whole to
+`.kram/artifacts/<id>.bin` (plus a `.json` sidecar of metadata — session,
+tool, size, sha256), and the tool result becomes a short preview plus an
+`artifact_read`-able reference. Nothing is lost; it's just not inline.
+
+### `artifact_read` resolves ids, never paths
+
+An artifact id (`art_<16 hex chars>`) is validated against a fixed pattern
+before ever being joined into a filesystem path (`Store.paths`) — there is
+deliberately no way to pass a real path through this tool. The model gets
+a reference to something Kram itself created, never an arbitrary-path
+reader.
+
+### Deterministic filtering still runs first — but only on inline results
+
+`filterCommandOutput` (see Tools, above) still applies to output that
+stayed under the spill threshold. A spilled result skips it: filtering
+exists to compress noisy multi-thousand-line output down to signal, and a
+spilled result is already a short preview plus a reference, not something
+that benefits from the same treatment.
+
+### The aggregate per-turn budget is enforced by truncation, not retroactive spill
+
+`maxTurnToolOutputChars` bounds the *combined* size of every tool result
+within one model turn's batch of calls — several individually-fine
+results (each under its own tool's cap) can still add up. This is
+deliberately simpler than what a "spill the largest until under budget"
+approach would need: buffering an entire turn's tool results before
+persisting any of them, a bigger structural change to a loop this project
+has already had one real silent-failure bug in (see Boundaries, "A weak
+model's empty final answer..."). A result that crosses the aggregate
+budget is truncated with an explicit notice — never silently dropped,
+same discipline as everything else in this section.
+
+### GC is best-effort disk hygiene, not correctness
+
+`Store.GC` runs once per daemon startup (registry construction), deleting
+artifacts older than 7 days. Not a background timer, not something a
+long-running daemon needs to schedule — a workspace gets reopened often
+enough in practice that "once at startup" is enough, and a garbage-
+collected artifact simply becomes an unresolvable id if referenced later,
+the same outcome as if it had never spilled.
+
+---
+
 ## Local state
 
 ### The config directory is `kram-gateway`, not `kram`
