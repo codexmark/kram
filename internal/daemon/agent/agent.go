@@ -371,6 +371,11 @@ func (s *Service) runLoop(ctx context.Context, sessionID, model string, depth in
 	ctx = tools.WithDepth(ctx, depth)
 	ctx = tools.WithAsker(ctx, &sessionAsker{svc: s, onEvent: onEvent})
 	ctx = tools.WithApprover(ctx, &sessionApprover{svc: s, onEvent: onEvent})
+	// One opaque ID for this whole run — every model call streamCall
+	// makes below, across every tool round-trip, carries it, so the
+	// gateway's Sticky routing can tell this run apart from a later,
+	// unrelated turn in the same session (see gatewayclient.WithRunID).
+	ctx = gatewayclient.WithRunID(ctx, session.NewID())
 
 	// Memory is snapshotted once per run rather than re-read every turn,
 	// borrowing Hermes Agent's "frozen at session start" idea for the

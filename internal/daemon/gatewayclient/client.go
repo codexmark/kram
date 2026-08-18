@@ -26,6 +26,26 @@ func New(baseURL string) *Client {
 	return &Client{baseURL: baseURL, http: &http.Client{Timeout: 180 * time.Second}}
 }
 
+type ctxKey int
+
+const runIDCtxKey ctxKey = 0
+
+// WithRunID attaches an opaque per-agent-run identifier to ctx. Every
+// gateway call made with the returned context sends it as
+// openai.RunIDHeader, which is what lets kram-gateway's Sticky routing
+// tell one agent run's tool round-trips apart from a later, unrelated
+// turn in the same session — see DECISIONS.md, "Sticky is run-scoped,
+// not session-prefix-scoped". The agent loop calls this once per
+// Service.Run/RunTask; nothing else needs to.
+func WithRunID(ctx context.Context, runID string) context.Context {
+	return context.WithValue(ctx, runIDCtxKey, runID)
+}
+
+func runIDFromContext(ctx context.Context) string {
+	id, _ := ctx.Value(runIDCtxKey).(string)
+	return id
+}
+
 // Result is what a chat completion call actually produced: the reply
 // (text and/or tool calls), which provider served it, the real fallback
 // trail attempted to get there, and token usage for that request.
@@ -60,6 +80,9 @@ func (c *Client) ChatCompletion(ctx context.Context, model string, messages []op
 		return Result{}, fmt.Errorf("building gateway request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+	if runID := runIDFromContext(ctx); runID != "" {
+		httpReq.Header.Set(openai.RunIDHeader, runID)
+	}
 
 	resp, err := c.http.Do(httpReq)
 	if err != nil {

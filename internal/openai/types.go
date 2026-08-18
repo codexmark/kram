@@ -55,6 +55,16 @@ type ToolCallFunction struct {
 	Arguments string `json:"arguments"`
 }
 
+// RunIDHeader is an optional HTTP request header a caller may send on
+// POST /v1/chat/completions: an opaque identifier for one agent run (one
+// user turn plus every tool round-trip it causes) — never one that
+// persists across a later, unrelated turn in the same conversation. It's
+// a kram-gateway extension carried out of band as a header rather than a
+// JSON body field, so standard OpenAI-compatible clients that never send
+// it stay fully compatible (see internal/router.RouteContext.RunKey and
+// DECISIONS.md, "Sticky is run-scoped, not session-prefix-scoped").
+const RunIDHeader = "X-Kram-Run-Id"
+
 // ChatCompletionRequest is the request body for POST /v1/chat/completions.
 type ChatCompletionRequest struct {
 	Model       string        `json:"model"`

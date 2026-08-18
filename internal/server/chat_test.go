@@ -114,7 +114,7 @@ func rankReasons(t *testing.T, rt *router.Router, providerID string) []string {
 	if err := json.Unmarshal([]byte(streamTestBody), &req); err != nil {
 		t.Fatalf("parsing test request: %v", err)
 	}
-	ranked, _, err := rt.Rank("default", req)
+	ranked, _, err := rt.Rank("default", req, "")
 	if err != nil {
 		t.Fatalf("Rank: %v", err)
 	}

@@ -42,7 +42,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ranked, routeCtx, err := s.router.Rank(comboID, req)
+	ranked, routeCtx, err := s.router.Rank(comboID, req, r.Header.Get(openai.RunIDHeader))
 	if err != nil {
 		writeError(w, http.StatusServiceUnavailable, err.Error())
 		return

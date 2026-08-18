@@ -543,16 +543,32 @@ nothing.
 
 The weighted strategy family (not priority/round-robin/prefix-affinity/
 lkgp/p2c) can pin a run to its winning provider across tool round-trips.
-"Run" is identified by `AffinityKey` — the same stable system+first-user-
-message hash `prefix-affinity` already used, moved from
-`server/chat.go` into the router package since sticky needs it too. While
-the pinned provider is still present in the eligible candidate set (not
-circuit-open, still capability-compatible), it leads the ranking
-regardless of score; only losing eligibility, or the ResponseGate/
-StreamGate rejecting its response, moves the pin — and moving it means
-whoever wins the retried request becomes the new pin, via
-`Router.RecordOutcome`, called by the attempt executor once a request
-actually finishes.
+"Run" is identified by `RouteContext.RunKey`, propagated end to end from
+the daemon's `Service.Run`/`RunTask` (one opaque ID per run, generated
+once, sent on every model call it makes as the `X-Kram-Run-Id` header —
+see `gatewayclient.WithRunID`) through to the gateway, which falls back
+to the stable system+first-user-message prefix hash (`AffinityKey`) only
+when a caller sends no header at all — a generic OpenAI-compatible client
+that doesn't know about Kram run IDs. While the pinned provider is still
+present in the eligible candidate set (not circuit-open, still
+capability-compatible), it leads the ranking regardless of score; only
+losing eligibility, or the ResponseGate/StreamGate rejecting its
+response, moves the pin — and moving it means whoever wins the retried
+request becomes the new pin, via `Router.RecordOutcome`, called only once
+a request has *actually* finished (see "Streaming success is decided by
+the terminal event, not the first byte" below).
+
+**Found as a real bug, reported by the user via GitHub issue, after
+shipping Combos v2:** `RunKey` originally *was* `AffinityKey` directly —
+the same key `prefix-affinity`/cache-affinity scoring use. That's stable
+across an entire persisted conversation, not just one run: a later,
+unrelated user turn in the same session still starts with the same
+system+first-user-message prefix, so it inherited the previous run's
+sticky pin instead of getting a fresh initial ranking. `AffinityKey`
+itself is still exactly what prefix-affinity/cache-affinity need — a
+stable prompt-prefix identity across an agent run's tool round-trips —
+and keeps working unchanged; `RunKey` is what had to become a genuinely
+different, narrower-lifetime concept.
 
 **Why this matters for Kram specifically:** a single user turn can be
 many model calls (read a file, grep, edit, run tests, answer) — rotating
@@ -599,11 +615,25 @@ one.
 `strategy_options.exploration` (default 0.03) gives a uniformly random
 eligible candidate a chance to lead instead of the top-ranked one, so
 providers that would otherwise never win don't go forever without fresh
-telemetry. It never overrides a sticky pin (checked first), never fires
-with fewer than two candidates, and never selects a circuit-open or
-capability-incompatible candidate (both already excluded before scoring).
-Deliberately small by default — this is a safety valve against telemetry
-staleness, not a bandit algorithm.
+telemetry. It is skipped entirely whenever Sticky has already pinned a
+leader for this run, never fires with fewer than two candidates, and
+never selects a circuit-open or capability-incompatible candidate (both
+already excluded before scoring). Deliberately small by default — this is
+a safety valve against telemetry staleness, not a bandit algorithm.
+
+**Found as a real bug, reported by the user via GitHub issue:**
+exploration originally ran unconditionally *after* Sticky applied — the
+code comment even claimed "never overrides sticky," but the ordering
+alone didn't guarantee that, since exploration's `moveToFront` ran
+regardless of whether Sticky had already moved a different candidate
+there. With the default 3% rate, a healthy sticky-pinned provider could
+still be randomly displaced on any later model call in the same run,
+churning providers and losing prompt-cache warmth for no reason. The fix
+tracks whether Sticky actually applied and skips exploration entirely
+when it did — Option B from the issue (disable exploration whenever a
+valid pin exists) over reordering the two checks, since it also avoids
+computing an exploration event that could never have affected the
+outcome anyway.
 
 ### Capabilities and breaker state are hard constraints, never scores
 

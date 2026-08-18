@@ -39,11 +39,22 @@ type RouteContext struct {
 	// per-combo state (sticky pins, LKGP).
 	ComboID string
 	// AffinityKey is a stable hash of the request's non-growing prefix
-	// (system messages + first user message — see AffinityKey), used both
-	// by the prefix-affinity strategy and as the sticky-pin key: two
-	// requests sharing the same key are, with high probability, tool
-	// round-trips within the same agent run.
+	// (system messages + first user message — see AffinityKey), used by
+	// the prefix-affinity strategy and the cache_affinity scoring factor.
+	// It is deliberately NOT used for Sticky — see RunKey — because it
+	// stays identical across every later user turn in the same
+	// conversation, not just within one run.
 	AffinityKey string
+	// RunKey identifies one agent run: one user turn plus every tool
+	// round-trip it causes. This is what Sticky actually pins to. It
+	// comes from the caller-supplied openai.RunIDHeader when present
+	// (Kram's own daemon always sends one — see gatewayclient.WithRunID);
+	// a generic OpenAI-compatible caller that never sends the header gets
+	// a best-effort fallback to AffinityKey instead of losing Sticky
+	// altogether, at the cost of the same session-wide leak this field
+	// exists to fix for Kram's own traffic (see DECISIONS.md, "Sticky is
+	// run-scoped, not session-prefix-scoped").
+	RunKey string
 	// NeedsTools and NeedsImages are hard capability constraints: a
 	// candidate lacking one is excluded before scoring ever runs (see
 	// candidate.go's eligibleCandidates).
@@ -54,8 +65,11 @@ type RouteContext struct {
 // NewRouteContext derives a RouteContext from an actual request — the
 // only place capability requirements are decided, so eligibleCandidates'
 // hard filtering and every Strategy always see the same, real picture of
-// what this request needs.
-func NewRouteContext(comboID string, req openai.ChatCompletionRequest) RouteContext {
+// what this request needs. runID is whatever the caller sent via
+// openai.RunIDHeader ("" if it sent nothing), already extracted by the
+// HTTP handler — see RouteContext.RunKey for what happens when it's
+// empty.
+func NewRouteContext(comboID string, req openai.ChatCompletionRequest, runID string) RouteContext {
 	needsImages := false
 	for _, m := range req.Messages {
 		if len(m.Images) > 0 {
@@ -63,9 +77,15 @@ func NewRouteContext(comboID string, req openai.ChatCompletionRequest) RouteCont
 			break
 		}
 	}
+	affinityKey := AffinityKey(req)
+	runKey := runID
+	if runKey == "" {
+		runKey = affinityKey
+	}
 	return RouteContext{
 		ComboID:     comboID,
-		AffinityKey: AffinityKey(req),
+		AffinityKey: affinityKey,
+		RunKey:      runKey,
 		NeedsTools:  len(req.Tools) > 0,
 		NeedsImages: needsImages,
 	}

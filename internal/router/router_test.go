@@ -92,7 +92,7 @@ func TestDeclaredOrderStrategyNeverRotates(t *testing.T) {
 	// autoStrategy — must preserve exact declared order every call.
 	r, _ := newTestRouter(t, "", "a", "b", "c")
 	for i := 0; i < 5; i++ {
-		ranked, _, err := r.Rank("default", reqWithAffinity("same-prefix"))
+		ranked, _, err := r.Rank("default", reqWithAffinity("same-prefix"), "")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -104,7 +104,7 @@ func TestDeclaredOrderStrategyNeverRotates(t *testing.T) {
 
 func TestPriorityAliasSameAsEmpty(t *testing.T) {
 	r, _ := newTestRouter(t, "priority", "a", "b", "c")
-	ranked, _, err := r.Rank("default", reqWithAffinity("x"))
+	ranked, _, err := r.Rank("default", reqWithAffinity("x"), "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,7 +117,7 @@ func TestRoundRobinRotates(t *testing.T) {
 	r, _ := newTestRouter(t, "round-robin", "a", "b", "c")
 	seen := map[string]bool{}
 	for i := 0; i < 6; i++ {
-		ranked, _, err := r.Rank("default", reqWithAffinity(""))
+		ranked, _, err := r.Rank("default", reqWithAffinity(""), "")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -130,12 +130,12 @@ func TestRoundRobinRotates(t *testing.T) {
 
 func TestPrefixAffinityIsStableForTheSameKey(t *testing.T) {
 	r, _ := newTestRouter(t, "prefix-affinity", "a", "b", "c")
-	first, _, err := r.Rank("default", reqWithAffinity("identical prompt prefix"))
+	first, _, err := r.Rank("default", reqWithAffinity("identical prompt prefix"), "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	for i := 0; i < 10; i++ {
-		again, _, err := r.Rank("default", reqWithAffinity("identical prompt prefix"))
+		again, _, err := r.Rank("default", reqWithAffinity("identical prompt prefix"), "")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -149,7 +149,7 @@ func TestPrefixAffinityDiffersAcrossKeys(t *testing.T) {
 	r, _ := newTestRouter(t, "prefix-affinity", "a", "b", "c", "d", "e")
 	leaders := map[string]bool{}
 	for i := 0; i < 20; i++ {
-		ranked, _, err := r.Rank("default", reqWithAffinity(string(rune('a'+i))))
+		ranked, _, err := r.Rank("default", reqWithAffinity(string(rune('a'+i))), "")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -166,7 +166,7 @@ func TestRankSkipsOpenBreaker(t *testing.T) {
 	breakers.ReportFailure("a")
 	breakers.ReportFailure("a") // trips open at the default threshold
 
-	ranked, _, err := r.Rank("default", reqWithAffinity(""))
+	ranked, _, err := r.Rank("default", reqWithAffinity(""), "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -182,14 +182,14 @@ func TestRankErrorsWhenAllBreakersOpen(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		breakers.ReportFailure("a")
 	}
-	if _, _, err := r.Rank("default", reqWithAffinity("")); err == nil {
+	if _, _, err := r.Rank("default", reqWithAffinity(""), ""); err == nil {
 		t.Error("expected an error when every provider in the combo is circuit-open")
 	}
 }
 
 func TestRankUnknownCombo(t *testing.T) {
 	r, _ := newTestRouter(t, "round-robin", "a")
-	if _, _, err := r.Rank("does-not-exist", reqWithAffinity("")); err == nil {
+	if _, _, err := r.Rank("does-not-exist", reqWithAffinity(""), ""); err == nil {
 		t.Error("expected an error for an unknown combo id")
 	}
 }
@@ -215,7 +215,7 @@ func TestRankExcludesProvidersMissingRequiredCapability(t *testing.T) {
 
 	req := reqWithAffinity("x")
 	req.Tools = []openai.Tool{{Type: "function", Function: openai.ToolFunction{Name: "f"}}}
-	ranked, ctx, err := r.Rank("default", req)
+	ranked, ctx, err := r.Rank("default", req, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -230,7 +230,7 @@ func TestRankExcludesProvidersMissingRequiredCapability(t *testing.T) {
 
 	imgReq := reqWithAffinity("y")
 	imgReq.Messages[0].Images = []string{"data:image/png;base64,xx"}
-	ranked, ctx, err = r.Rank("default", imgReq)
+	ranked, ctx, err = r.Rank("default", imgReq, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -242,6 +242,66 @@ func TestRankExcludesProvidersMissingRequiredCapability(t *testing.T) {
 			t.Errorf("a provider without image support must never appear in ranking for an image-carrying request, got %s", rc.Provider.Provider.ID())
 		}
 	}
+}
+
+func TestRouterRunScopedStickySameRunKeepsWinner(t *testing.T) {
+	r, _ := newTestRouter(t, "smart", "a", "b")
+	req := convReq("you are kram", "inspect this repository")
+
+	ranked, ctx, err := r.Rank("default", req, "run-A")
+	if err != nil {
+		t.Fatal(err)
+	}
+	winner := ranked[0].Provider.Provider.ID()
+	r.RecordOutcome("default", ctx, winner, true)
+
+	// A later model call within the same run (a tool round-trip) — same
+	// run ID, same conversation prefix.
+	again, _, err := r.Rank("default", req, "run-A")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasReason(again, winner, "sticky") {
+		t.Errorf("same run ID across calls should keep %s pinned as sticky", winner)
+	}
+}
+
+func TestRouterRunScopedStickyNewRunDoesNotInheritPin(t *testing.T) {
+	r, _ := newTestRouter(t, "smart", "a", "b")
+	// Same system + first user message on both calls — this is exactly
+	// the shape that used to leak: a later user turn in the same
+	// conversation still starts with the same prefix.
+	req := convReq("you are kram", "inspect this repository")
+
+	ranked, ctx, err := r.Rank("default", req, "run-A")
+	if err != nil {
+		t.Fatal(err)
+	}
+	winner := ranked[0].Provider.Provider.ID()
+	r.RecordOutcome("default", ctx, winner, true)
+
+	// A brand-new user turn — same conversation prefix, but a fresh run ID.
+	fresh, _, err := r.Rank("default", req, "run-B")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hasReason(fresh, winner, "sticky") {
+		t.Errorf("a new run ID must not inherit the prior run's sticky pin — this is the AffinityKey-leak the fix addresses")
+	}
+}
+
+func hasReason(ranked []RankedCandidate, providerID, reason string) bool {
+	for _, rc := range ranked {
+		if rc.Provider.Provider.ID() != providerID {
+			continue
+		}
+		for _, r := range rc.Reasons {
+			if r == reason {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func rankedIDs(ranked []RankedCandidate) string {

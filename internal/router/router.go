@@ -130,8 +130,9 @@ func (r *Router) Combos() []ComboInfo {
 // hard constraints (circuit breaker, capability) are applied first (see
 // eligibleCandidates), then the combo's configured Strategy ranks
 // whatever's left. The returned RouteContext should be passed to
-// RecordOutcome once the request finishes.
-func (r *Router) Rank(comboID string, req openai.ChatCompletionRequest) ([]RankedCandidate, RouteContext, error) {
+// RecordOutcome once the request finishes. runID is the caller's
+// openai.RunIDHeader value ("" if absent) — see NewRouteContext.
+func (r *Router) Rank(comboID string, req openai.ChatCompletionRequest, runID string) ([]RankedCandidate, RouteContext, error) {
 	r.mu.RLock()
 	c, ok := r.combos[comboID]
 	r.mu.RUnlock()
@@ -139,7 +140,7 @@ func (r *Router) Rank(comboID string, req openai.ChatCompletionRequest) ([]Ranke
 		return nil, RouteContext{}, fmt.Errorf("unknown combo %q", comboID)
 	}
 
-	ctx := NewRouteContext(comboID, req)
+	ctx := NewRouteContext(comboID, req, runID)
 	candidates := eligibleCandidates(c.providers, r.qualityHints, r.breakers, r.telemetry, ctx)
 	if len(candidates) == 0 {
 		return nil, ctx, fmt.Errorf("combo %q: no eligible providers (all circuit-open, or none support what this request needs)", comboID)

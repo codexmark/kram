@@ -48,6 +48,9 @@ func (c *Client) ChatCompletionStream(ctx context.Context, model string, message
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Accept", "text/event-stream")
+	if runID := runIDFromContext(ctx); runID != "" {
+		httpReq.Header.Set(openai.RunIDHeader, runID)
+	}
 
 	resp, err := c.http.Do(httpReq)
 	if err != nil {

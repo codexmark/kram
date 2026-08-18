@@ -16,9 +16,11 @@ type stickyEntry struct {
 	lastUsed time.Time
 }
 
-// stickyStore pins a run — identified by AffinityKey, the same stable
-// prefix hash prefix-affinity routing already uses — to its winning
-// provider across tool round-trips. See DECISIONS.md, "Smart Sticky":
+// stickyStore pins a run — identified by RouteContext.RunKey, not the
+// prompt-prefix AffinityKey prefix-affinity routing uses (see RunKey's
+// doc comment for why those two had to stop being the same thing) — to
+// its winning provider across tool round-trips. See DECISIONS.md, "Smart
+// Sticky":
 // trading provider diversity for prompt-cache economics and predictable
 // behavior within a single agent run, which is exactly what an agent
 // loop's tool round-trips want.

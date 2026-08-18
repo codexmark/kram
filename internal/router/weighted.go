@@ -93,12 +93,14 @@ func (s *weightedStrategy) Rank(ctx RouteContext, candidates []Candidate) []Rank
 	// Sticky: while the run's pinned winner is still in this eligible
 	// set, it leads regardless of score — a hard preference, not a
 	// nudge. See DECISIONS.md, "Smart Sticky."
+	stickyApplied := false
 	if s.sticky != nil {
-		if pinned := s.sticky.get(ctx.AffinityKey); pinned != "" {
+		if pinned := s.sticky.get(ctx.RunKey); pinned != "" {
 			for i, rc := range ranked {
 				if rc.Provider.Provider.ID() == pinned {
 					ranked[i].Reasons = append(ranked[i].Reasons, "sticky")
 					ranked = moveToFront(ranked, i)
+					stickyApplied = true
 					break
 				}
 			}
@@ -107,10 +109,14 @@ func (s *weightedStrategy) Rank(ctx RouteContext, candidates []Candidate) []Rank
 
 	// Exploration: with small probability, promote a uniformly random
 	// eligible candidate instead of the top-ranked one, so non-winners
-	// still occasionally get real telemetry. Never overrides sticky
-	// (already applied above) and never fires with fewer than two
+	// still occasionally get real telemetry. Skipped entirely once Sticky
+	// has already pinned a leader — Sticky is a stronger, authoritative
+	// preference for this run and must never be probabilistically
+	// displaced (a prior version of this check ran unconditionally after
+	// Sticky and could still promote a different candidate to the front,
+	// silently overriding it). Also never fires with fewer than two
 	// candidates — there's nothing to explore.
-	if s.opts.exploration > 0 && len(ranked) > 1 && s.rand.Float64() < s.opts.exploration {
+	if !stickyApplied && s.opts.exploration > 0 && len(ranked) > 1 && s.rand.Float64() < s.opts.exploration {
 		i := s.rand.Intn(len(ranked))
 		ranked[i].Reasons = append(ranked[i].Reasons, "explore")
 		ranked = moveToFront(ranked, i)
@@ -128,7 +134,7 @@ func (s *weightedStrategy) RecordOutcome(ctx RouteContext, winner string, ok boo
 	}
 	s.lkgp.set(ctx.ComboID, winner)
 	if s.sticky != nil {
-		s.sticky.set(ctx.AffinityKey, winner)
+		s.sticky.set(ctx.RunKey, winner)
 	}
 }
 
