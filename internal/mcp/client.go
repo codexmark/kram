@@ -224,6 +224,97 @@ func (c *Client) CallTool(ctx context.Context, name string, args json.RawMessage
 	return b.String(), nil
 }
 
+// ListResources fetches every resource this server currently exposes.
+// Unlike Tools (cached at connect time), this is fetched fresh on every
+// call — a server's resource list can be large or change, and Kram has
+// no reason to hold a stale copy of it in memory between calls.
+func (c *Client) ListResources(ctx context.Context) ([]Resource, error) {
+	var out []Resource
+	cursor := ""
+	for {
+		params := map[string]any{}
+		if cursor != "" {
+			params["cursor"] = cursor
+		}
+		var res listResourcesResult
+		if err := c.call(ctx, "resources/list", params, &res); err != nil {
+			return nil, err
+		}
+		out = append(out, res.Resources...)
+		if res.NextCursor == "" {
+			return out, nil
+		}
+		cursor = res.NextCursor
+	}
+}
+
+// ReadResource fetches one resource's content by URI and flattens it to
+// text, same convention CallTool uses — a binary resource (Blob) is
+// reported as a placeholder rather than decoded, since Kram's tool
+// results are text-only end to end.
+func (c *Client) ReadResource(ctx context.Context, uri string) (string, error) {
+	var res readResourceResult
+	if err := c.call(ctx, "resources/read", readResourceParams{URI: uri}, &res); err != nil {
+		return "", err
+	}
+	var b strings.Builder
+	for i, content := range res.Contents {
+		if i > 0 {
+			b.WriteString("\n")
+		}
+		if content.Text != "" {
+			b.WriteString(content.Text)
+		} else if content.Blob != "" {
+			fmt.Fprintf(&b, "(binary resource, %s — not renderable as text)", content.MimeType)
+		}
+	}
+	if b.Len() == 0 {
+		return "(empty resource)", nil
+	}
+	return b.String(), nil
+}
+
+// ListPrompts fetches every prompt template this server currently
+// exposes, same on-demand-not-cached reasoning as ListResources.
+func (c *Client) ListPrompts(ctx context.Context) ([]Prompt, error) {
+	var out []Prompt
+	cursor := ""
+	for {
+		params := map[string]any{}
+		if cursor != "" {
+			params["cursor"] = cursor
+		}
+		var res listPromptsResult
+		if err := c.call(ctx, "prompts/list", params, &res); err != nil {
+			return nil, err
+		}
+		out = append(out, res.Prompts...)
+		if res.NextCursor == "" {
+			return out, nil
+		}
+		cursor = res.NextCursor
+	}
+}
+
+// GetPrompt resolves one named prompt template with the given arguments
+// and flattens its messages to text — Kram surfaces this as a tool
+// result for the model to read and act on, not as literal conversation
+// messages injected into history.
+func (c *Client) GetPrompt(ctx context.Context, name string, arguments map[string]string) (string, error) {
+	var res getPromptResult
+	if err := c.call(ctx, "prompts/get", getPromptParams{Name: name, Arguments: arguments}, &res); err != nil {
+		return "", err
+	}
+	var b strings.Builder
+	if res.Description != "" {
+		b.WriteString(res.Description + "\n\n")
+	}
+	for _, m := range res.Messages {
+		fmt.Fprintf(&b, "[%s] %s\n", m.Role, m.Content.Text)
+	}
+	return b.String(), nil
+}
+
 // Close shuts the server down.
 func (c *Client) Close() error {
 	c.closeOnce.Do(func() { _ = c.transport.Close() })

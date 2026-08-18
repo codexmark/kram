@@ -497,8 +497,13 @@ Honest list of what Kram still doesn't have, as of this writing:
   schema}`, stdin-in/stdout-out) let anyone add a tool without touching
   Go. Pluggable memory providers or terminal backends (Hermes has both)
   are still open — narrower, lower priority.
-- **MCP beyond tools.** Resources, prompts, and elicitation are all
-  deferred. Only `tools/*` is implemented.
+- ~~MCP beyond tools.~~ Resources and prompts closed
+  (`mcp_resource_list`/`read`, `mcp_prompt_list`/`get` — cross-cutting
+  tools taking a server name, not one registered tool per item, since a
+  server's resource set is unbounded and can change). Elicitation is
+  still deferred — it needs the same turn-pausing plumbing
+  `ask_question` required, and no server in real use has forced building
+  it yet.
 - ~~Test coverage.~~ Closed for now: 7 packages covered beyond the
   agent-loop smoke tests (credentials, toolsettings, providercatalog,
   router, memory store + tool, skills parser, mcp). Still nothing for

@@ -105,6 +105,75 @@ type callToolResult struct {
 	IsError bool           `json:"isError"`
 }
 
+// --- resources ---
+
+// Resource is one piece of server-exposed readable data, identified by
+// URI — a file, a database row, whatever the server wants to expose.
+type Resource struct {
+	URI         string `json:"uri"`
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	MimeType    string `json:"mimeType,omitempty"`
+}
+
+type listResourcesResult struct {
+	Resources  []Resource `json:"resources"`
+	NextCursor string     `json:"nextCursor,omitempty"`
+}
+
+type readResourceParams struct {
+	URI string `json:"uri"`
+}
+
+type resourceContent struct {
+	URI      string `json:"uri"`
+	MimeType string `json:"mimeType,omitempty"`
+	Text     string `json:"text,omitempty"`
+	Blob     string `json:"blob,omitempty"` // base64 binary — surfaced as a placeholder, not decoded
+}
+
+type readResourceResult struct {
+	Contents []resourceContent `json:"contents"`
+}
+
+// --- prompts ---
+
+// Prompt is a server-defined, parameterized prompt template.
+type Prompt struct {
+	Name        string           `json:"name"`
+	Description string           `json:"description,omitempty"`
+	Arguments   []PromptArgument `json:"arguments,omitempty"`
+}
+
+type PromptArgument struct {
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	Required    bool   `json:"required,omitempty"`
+}
+
+type listPromptsResult struct {
+	Prompts    []Prompt `json:"prompts"`
+	NextCursor string   `json:"nextCursor,omitempty"`
+}
+
+type getPromptParams struct {
+	Name      string            `json:"name"`
+	Arguments map[string]string `json:"arguments,omitempty"`
+}
+
+type promptMessage struct {
+	Role    string `json:"role"`
+	Content struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	} `json:"content"`
+}
+
+type getPromptResult struct {
+	Description string          `json:"description,omitempty"`
+	Messages    []promptMessage `json:"messages"`
+}
+
 // contentBlock covers the block types a tool result can carry. Kram's
 // tool protocol is text-only (every tool returns a string), so non-text
 // blocks are rendered as a short placeholder rather than dropped

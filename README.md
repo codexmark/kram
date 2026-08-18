@@ -674,3 +674,20 @@ with the same name, same merge rule MCP's config uses.
 Deliberately not a Go plugin (`.so` files are fragile and break the
 static-binary goal) and not an embedded scripting language — just a
 manifest and a process.
+
+## MCP resources and prompts
+
+Beyond `tools/*`, the MCP client now also supports:
+
+- **Resources** (`resources/list`, `resources/read`) — server-exposed
+  readable data by URI. Surfaced as two tools, `mcp_resource_list` and
+  `mcp_resource_read`, rather than one tool per resource (a server can
+  expose an unbounded number of resources; two fixed tools scale, N
+  dynamic ones don't).
+- **Prompts** (`prompts/list`, `prompts/get`) — server-defined,
+  parameterized prompt templates. Surfaced the same way:
+  `mcp_prompt_list` / `mcp_prompt_get`.
+
+Elicitation is still deferred — it needs the same kind of turn-pausing
+plumbing `ask_question` required (a live event channel, a way to resume a
+blocked call), and no server in real use yet has forced building it.

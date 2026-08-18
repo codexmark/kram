@@ -197,6 +197,108 @@ func TestClientCallReturnsPromptlyOnCanceledContext(t *testing.T) {
 	}
 }
 
+func TestClientListResourcesPagination(t *testing.T) {
+	calls := 0
+	c, _ := newTestClient(func(method string, id *int64, params json.RawMessage) (any, bool) {
+		if method != "resources/list" {
+			t.Fatalf("unexpected method %q", method)
+		}
+		calls++
+		if calls == 1 {
+			return listResourcesResult{Resources: []Resource{{URI: "file:///a"}}, NextCursor: "p2"}, false
+		}
+		return listResourcesResult{Resources: []Resource{{URI: "file:///b"}}}, false
+	})
+	defer c.Close()
+
+	resources, err := c.ListResources(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resources) != 2 {
+		t.Fatalf("expected resources from both pages, got %+v", resources)
+	}
+}
+
+func TestClientReadResourceFlattensText(t *testing.T) {
+	c, _ := newTestClient(func(method string, id *int64, params json.RawMessage) (any, bool) {
+		if method != "resources/read" {
+			t.Fatalf("unexpected method %q", method)
+		}
+		var p readResourceParams
+		_ = json.Unmarshal(params, &p)
+		if p.URI != "file:///x" {
+			t.Errorf("uri = %q, want file:///x", p.URI)
+		}
+		return readResourceResult{Contents: []resourceContent{{URI: p.URI, Text: "file contents"}}}, false
+	})
+	defer c.Close()
+
+	out, err := c.ReadResource(context.Background(), "file:///x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != "file contents" {
+		t.Errorf("got %q, want %q", out, "file contents")
+	}
+}
+
+func TestClientReadResourceBinaryPlaceholder(t *testing.T) {
+	c, _ := newTestClient(func(method string, id *int64, params json.RawMessage) (any, bool) {
+		return readResourceResult{Contents: []resourceContent{{MimeType: "image/png", Blob: "base64=="}}}, false
+	})
+	defer c.Close()
+
+	out, err := c.ReadResource(context.Background(), "file:///x.png")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "image/png") || !strings.Contains(out, "not renderable") {
+		t.Errorf("expected a binary placeholder mentioning the mime type, got %q", out)
+	}
+}
+
+func TestClientListPromptsAndGetPrompt(t *testing.T) {
+	c, _ := newTestClient(func(method string, id *int64, params json.RawMessage) (any, bool) {
+		switch method {
+		case "prompts/list":
+			return listPromptsResult{Prompts: []Prompt{{Name: "greeting", Description: "says hi"}}}, false
+		case "prompts/get":
+			var p getPromptParams
+			_ = json.Unmarshal(params, &p)
+			if p.Arguments["name"] != "Mark" {
+				t.Errorf("expected arguments to be forwarded, got %+v", p.Arguments)
+			}
+			return getPromptResult{
+				Description: "a greeting",
+				Messages: []promptMessage{{Role: "user", Content: struct {
+					Type string `json:"type"`
+					Text string `json:"text"`
+				}{Type: "text", Text: "Hello, Mark!"}}},
+			}, false
+		}
+		t.Fatalf("unexpected method %q", method)
+		return nil, false
+	})
+	defer c.Close()
+
+	prompts, err := c.ListPrompts(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(prompts) != 1 || prompts[0].Name != "greeting" {
+		t.Fatalf("expected one prompt named greeting, got %+v", prompts)
+	}
+
+	out, err := c.GetPrompt(context.Background(), "greeting", map[string]string{"name": "Mark"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "Hello, Mark!") {
+		t.Errorf("expected the resolved prompt message, got %q", out)
+	}
+}
+
 func TestClientDisconnectUnblocksPendingCalls(t *testing.T) {
 	tr := &fakeTransport{in: make(chan message, 1)}
 	c := &Client{name: "x", transport: tr, pending: make(map[int64]chan message)}
