@@ -173,6 +173,7 @@ var scenarios = []scenario{
 			for _, want := range []string{
 				"ask_question", "memory_write", "skill_list", "delegate_task",
 				"run_background", "artifact_read", "session_search", "lsp_diagnostics",
+				"snapshot_create",
 			} {
 				if !names[want] {
 					missing = append(missing, want)
