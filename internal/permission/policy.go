@@ -108,6 +108,76 @@ func LoadConfig(workspace string) PolicyFile {
 	return pf
 }
 
+// SavePolicy writes pf as JSON to path, creating parent directories as
+// needed and replacing any existing file atomically (temp file + rename,
+// same shape as config.Save — see its doc comment for why the pre-rename
+// os.Remove exists: os.Rename fails over an existing file on Windows).
+func SavePolicy(pf PolicyFile, path string) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(pf, "", "  ")
+	if err != nil {
+		return err
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+		return err
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		os.Remove(tmp)
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
+// RecommendedPolicy asks before the handful of operations that are
+// genuinely hard to undo (recursive delete, force-pushing, removing or
+// moving a file) and otherwise allows everyday work — the first-run
+// wizard's suggested default.
+func RecommendedPolicy() PolicyFile {
+	return PolicyFile{
+		Default: Allow,
+		Rules: []Rule{
+			{Tool: "bash", Pattern: "rm -rf *", Decision: Ask},
+			{Tool: "bash", Pattern: "git push*", Decision: Ask},
+			{Tool: "delete_file", Pattern: "*", Decision: Ask},
+			{Tool: "move_file", Pattern: "*", Decision: Ask},
+		},
+	}
+}
+
+// StrictPolicy asks before anything not explicitly allow-listed —
+// because Default is Ask, this includes every tool call this policy
+// doesn't otherwise mention, MCP tools included, not just the tool
+// *names* enumerated here.
+func StrictPolicy() PolicyFile {
+	return PolicyFile{
+		Default: Ask,
+		Rules: []Rule{
+			{Tool: "read_file", Pattern: "*", Decision: Allow},
+			{Tool: "bash", Pattern: "git status*", Decision: Allow},
+			{Tool: "bash", Pattern: "rm -rf *", Decision: Deny},
+			{Tool: "delete_file", Pattern: "*", Decision: Deny},
+		},
+	}
+}
+
+// AutonomousPolicy allows everything except recursive deletes rooted at
+// an absolute path ("rm -rf /*" is a prefix match, so it catches
+// "rm -rf /", "rm -rf /home/x", etc. — anything relative, like
+// "rm -rf node_modules", still runs unprompted). This is one guardrail
+// against catastrophic mistakes, not a broad safety net — callers/UI
+// copy presenting this preset should say so.
+func AutonomousPolicy() PolicyFile {
+	return PolicyFile{
+		Default: Allow,
+		Rules: []Rule{
+			{Tool: "bash", Pattern: "rm -rf /*", Decision: Deny},
+		},
+	}
+}
+
 func mergeConfigFile(into *PolicyFile, path string) {
 	data, err := os.ReadFile(path)
 	if err != nil {

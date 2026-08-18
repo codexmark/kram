@@ -1,0 +1,53 @@
+package onboarding
+
+import "testing"
+
+func isolate(t *testing.T) {
+	t.Helper()
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+}
+
+func TestFreshStateNeedsSetup(t *testing.T) {
+	isolate(t)
+	s, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !s.NeedsSetup() {
+		t.Error("a state with no saved file should need setup")
+	}
+}
+
+func TestSaveRoundTrip(t *testing.T) {
+	isolate(t)
+
+	if err := Save(State{ProjectsRoot: "/home/x/projects", LastWorkspace: "/home/x/projects/foo"}); err != nil {
+		t.Fatal(err)
+	}
+
+	reloaded, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reloaded.NeedsSetup() {
+		t.Error("a saved state should not need setup")
+	}
+	if reloaded.ProjectsRoot != "/home/x/projects" || reloaded.LastWorkspace != "/home/x/projects/foo" {
+		t.Errorf("ProjectsRoot/LastWorkspace did not round-trip: %+v", reloaded)
+	}
+	if reloaded.Version != currentVersion {
+		t.Errorf("Version = %d, want %d", reloaded.Version, currentVersion)
+	}
+}
+
+func TestOlderVersionNeedsSetupAgain(t *testing.T) {
+	isolate(t)
+	if err := Save(State{}); err != nil {
+		t.Fatal(err)
+	}
+	reloaded, _ := Load()
+	reloaded.Version = currentVersion - 1
+	if !reloaded.NeedsSetup() {
+		t.Error("a state saved under an older wizard version should need setup again")
+	}
+}

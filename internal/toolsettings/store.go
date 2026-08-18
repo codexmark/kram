@@ -71,6 +71,20 @@ func (s *Store) SetDisabled(name string, disabled bool) error {
 	return s.save()
 }
 
+// SetAllDisabled turns every name in names on or off in one persisted
+// write — the tools/skills screen's bulk "enable all"/"disable all"
+// keys, so toggling a whole section doesn't fire a save per item.
+func (s *Store) SetAllDisabled(names []string, disabled bool) error {
+	for _, n := range names {
+		if disabled {
+			s.disabled[n] = true
+		} else {
+			delete(s.disabled, n)
+		}
+	}
+	return s.save()
+}
+
 func (s *Store) save() error {
 	if err := os.MkdirAll(filepath.Dir(s.path), 0o700); err != nil {
 		return err

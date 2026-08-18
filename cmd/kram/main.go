@@ -27,6 +27,9 @@ import (
 	"github.com/codexmark/kram/internal/config"
 	"github.com/codexmark/kram/internal/daemon"
 	"github.com/codexmark/kram/internal/gateway"
+	"github.com/codexmark/kram/internal/kramhome"
+	"github.com/codexmark/kram/internal/onboarding"
+	"github.com/codexmark/kram/internal/permission"
 )
 
 // version is set at build time via -ldflags "-X main.version=..."
@@ -47,6 +50,7 @@ func main() {
 	gatewayPort := flag.Int("gateway-port", 0, "gateway port (0 = pick a free port)")
 	daemonPort := flag.Int("daemon-port", 0, "daemon port (0 = pick a free port)")
 	showVersion := flag.Bool("version", false, "print the version and exit")
+	setup := flag.Bool("setup", false, "re-run the first-run setup wizard even if it already completed")
 	flag.Parse()
 
 	if *showVersion {
@@ -54,10 +58,22 @@ func main() {
 		return
 	}
 
+	// flag.Visit only visits flags actually present on the command line —
+	// this is how the wizard knows whether to ask about the workspace
+	// directory at all, versus respecting an explicit -workspace as
+	// already decided (see cmd/kram/main.go's run() and
+	// internal/cli/app.RunWizard).
+	workspaceExplicit := false
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == "workspace" {
+			workspaceExplicit = true
+		}
+	})
+
 	if err := run(runOptions{
-		workspace: *workspace, gatewayConfigPath: *gatewayConfigPath, combo: *combo,
+		workspace: *workspace, workspaceExplicit: workspaceExplicit, gatewayConfigPath: *gatewayConfigPath, combo: *combo,
 		sessionID: *sessionID, title: *title, maxTurns: *maxTurns,
-		gatewayPort: *gatewayPort, daemonPort: *daemonPort, strategy: *strategy,
+		gatewayPort: *gatewayPort, daemonPort: *daemonPort, strategy: *strategy, setup: *setup,
 	}); err != nil {
 		fmt.Fprintln(os.Stderr, "kram:", err)
 		os.Exit(1)
@@ -66,6 +82,7 @@ func main() {
 
 type runOptions struct {
 	workspace         string
+	workspaceExplicit bool
 	gatewayConfigPath string
 	combo             string
 	sessionID         string
@@ -74,10 +91,79 @@ type runOptions struct {
 	gatewayPort       int
 	daemonPort        int
 	strategy          string
+	setup             bool
 }
 
 func run(opts runOptions) error {
-	absWorkspace, err := filepath.Abs(opts.workspace)
+	// The wizard's trigger is purely onboarding state, not whether a
+	// provider happens to already be configured — someone with
+	// ANTHROPIC_API_KEY already exported still gets asked about routing/
+	// permissions/tools once, otherwise they'd never see any of it. -setup
+	// forces it back open regardless of Completed. Skipped entirely when
+	// an explicit -config is given: that file already fully decides the
+	// gateway's configuration, so there's nothing for the wizard to
+	// produce.
+	onboardState, _ := onboarding.Load() // zero value (NeedsSetup() == true) on any load error — same "missing file is normal" convention every local store here uses
+	workspace := opts.workspace
+	wizardCompleted := false
+	var wizardResult app.WizardResult
+
+	if (opts.setup || onboardState.NeedsSetup()) && opts.gatewayConfigPath == "" {
+		result, err := app.RunWizard(workspace, opts.workspaceExplicit)
+		if err != nil {
+			return fmt.Errorf("running setup wizard: %w", err)
+		}
+		wizardResult = result
+		if !result.Cancelled {
+			workspace = result.Workspace
+			loadStoredCredentials() // pick up whatever the wizard's provider step just saved, before building the config below
+
+			cfgToSave, err := detectGatewayConfig(result.Strategy)
+			if err != nil {
+				return fmt.Errorf("building config after setup: %w", err)
+			}
+			// A safe default for a brand-new install, not something to
+			// silently retrofit onto an existing hand-written config —
+			// detectGatewayConfig never sets this on its own.
+			for i := range cfgToSave.Combos {
+				cfgToSave.Combos[i].Response = config.ResponseGateConfig{RejectEmpty: true, RequireTerminal: true}
+			}
+			cfgPath, err := kramhome.Path("config.yaml")
+			if err != nil {
+				return fmt.Errorf("resolving global config path: %w", err)
+			}
+			if err := config.Save(cfgToSave, cfgPath); err != nil {
+				return fmt.Errorf("saving generated config: %w", err)
+			}
+
+			permPath, err := kramhome.Path("permissions.json")
+			if err != nil {
+				return fmt.Errorf("resolving global permissions path: %w", err)
+			}
+			pf := permission.RecommendedPolicy()
+			switch result.PermPreset {
+			case "strict":
+				pf = permission.StrictPolicy()
+			case "autonomous":
+				pf = permission.AutonomousPolicy()
+			}
+			if err := permission.SavePolicy(pf, permPath); err != nil {
+				return fmt.Errorf("saving generated permissions: %w", err)
+			}
+
+			// Best-effort: a failure here means the wizard may simply run
+			// again next time, which is annoying but never destructive —
+			// not worth failing the whole run over.
+			_ = onboarding.Save(onboarding.State{ProjectsRoot: result.ProjectsRoot, LastWorkspace: workspace})
+			wizardCompleted = true
+		}
+		// Cancelled: fall through with the original workspace/opts
+		// untouched — loadOrDetectGatewayConfig below reproduces exactly
+		// today's "no provider configured" error if nothing was ever
+		// saved, unchanged from before this wizard existed.
+	}
+
+	absWorkspace, err := filepath.Abs(workspace)
 	if err != nil {
 		return fmt.Errorf("resolving workspace: %w", err)
 	}
@@ -100,10 +186,11 @@ func run(opts runOptions) error {
 	// into this process's own environment before autodetection runs — a
 	// real, already-exported env var always wins (checked first, never
 	// overwritten), so this only fills gaps rather than overriding what
-	// the user explicitly set in their shell.
+	// the user explicitly set in their shell. Harmless to repeat if the
+	// wizard already called this above.
 	loadStoredCredentials()
 
-	gwCfg, err := loadOrDetectGatewayConfig(opts.gatewayConfigPath, opts.gatewayPort, opts.strategy)
+	gwCfg, err := loadOrDetectGatewayConfig(opts.gatewayConfigPath, opts.gatewayPort, opts.strategy, absWorkspace)
 	if err != nil {
 		return err
 	}
@@ -164,7 +251,10 @@ func run(opts runOptions) error {
 		sid = sess.ID
 	}
 
-	m := app.New(daemonC, gatewayC, sid, opts.combo, absWorkspace)
+	// app.New itself prioritizes an explicit sid over openOnToolsPreset, so
+	// passing wizardCompleted here is safe even if -title also created a
+	// session in the same run.
+	m := app.New(daemonC, gatewayC, sid, opts.combo, absWorkspace, wizardCompleted, wizardResult)
 	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
 	_, cliErr := p.Run()
 
@@ -223,7 +313,7 @@ func freePort() (int, error) {
 // replaces the auto-detected combo's strategy (see -strategy); ignored
 // when an explicit -config file is given, since that file already picks
 // its own strategy per combo.
-func loadOrDetectGatewayConfig(path string, port int, strategyOverride string) (*config.Config, error) {
+func loadOrDetectGatewayConfig(path string, port int, strategyOverride string, workspace string) (*config.Config, error) {
 	if path != "" {
 		cfg, err := config.Load(path)
 		if err != nil {
@@ -235,11 +325,51 @@ func loadOrDetectGatewayConfig(path string, port int, strategyOverride string) (
 		return cfg, nil
 	}
 
+	// Two auto-discovered file tiers between an explicit -config and pure
+	// env-var autodetection: a workspace-local config.yaml (a per-project
+	// override someone can hand-write or, later, generate) beats the
+	// wizard's own global one. Neither is the "I want a stable port"
+	// signal an explicit -config is, so both get a fresh ephemeral port
+	// (freePort) whenever -gateway-port wasn't explicitly given — reusing
+	// whatever port happens to be written in the file would let two
+	// workspace-local kram instances collide trying to bind the same one.
+	if workspaceCfg, ok, err := loadConfigIfExists(filepath.Join(workspace, ".kram", "config.yaml")); err != nil {
+		return nil, err
+	} else if ok {
+		return finalizeFileConfig(workspaceCfg, port)
+	}
+	if globalPath, err := kramhome.Path("config.yaml"); err == nil {
+		if globalCfg, ok, err := loadConfigIfExists(globalPath); err != nil {
+			return nil, err
+		} else if ok {
+			return finalizeFileConfig(globalCfg, port)
+		}
+	}
+
 	cfg, err := detectGatewayConfig(strategyOverride)
 	if err != nil {
 		return nil, err
 	}
+	return finalizeFileConfig(cfg, port)
+}
+
+// loadConfigIfExists loads path if it exists, reporting ok=false (not an
+// error) when it simply doesn't — the normal case for both auto-
+// discovered tiers, which are optional by nature.
+func loadConfigIfExists(path string) (cfg *config.Config, ok bool, err error) {
+	if _, statErr := os.Stat(path); statErr != nil {
+		return nil, false, nil
+	}
+	cfg, err = config.Load(path)
+	if err != nil {
+		return nil, false, fmt.Errorf("loading gateway config %s: %w", path, err)
+	}
+	return cfg, true, nil
+}
+
+func finalizeFileConfig(cfg *config.Config, port int) (*config.Config, error) {
 	if port == 0 {
+		var err error
 		port, err = freePort()
 		if err != nil {
 			return nil, fmt.Errorf("picking a gateway port: %w", err)

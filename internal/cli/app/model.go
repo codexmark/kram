@@ -7,6 +7,7 @@
 package app
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"time"
@@ -49,6 +50,19 @@ const (
 	phaseChat
 	phaseAccounts
 	phaseTools
+	// Stage 1 (pre-daemon, standalone wizard program) — see wizard.go.
+	// phaseAccounts is reused for the provider step (wizardMode gates its
+	// differing copy/keybindings) rather than adding a third phase here.
+	phaseWizardEnvironment
+	phaseWizardProjects
+	phaseWizardRouting
+	phaseWizardPermissions
+	// Stage 2 (post-daemon, normal program) — reached only right after a
+	// successful wizard run. phaseTools is reused for the "custom" branch
+	// of the tools/skills preset step.
+	phaseWizardToolsPreset
+	phaseWizardSystemCheck
+	phaseWizardSummary
 )
 
 // panel identifies which (if any) of the two on-demand panels is open.
@@ -152,6 +166,11 @@ type Model struct {
 	accountsStatus       string
 	accountsOAuthPending bool
 	accountsOAuthURL     string
+	// accountsOAuthCancel stops the pending flow's callback listener the
+	// instant the user backs out (esc/ctrl+c) instead of leaving it
+	// running detached for up to callbackTimeout — set when the OAuth
+	// wait begins (oauthURLMsg), cleared once it resolves either way.
+	accountsOAuthCancel context.CancelFunc
 	// accountsPings holds the most recent real connectivity/auth check per
 	// account (keyed by EnvVar — see providerping.Ping), and
 	// accountsPinging is true while a batch is in flight. Never simulated:
@@ -167,6 +186,40 @@ type Model struct {
 	toolsLoading bool
 	toolsErr     error
 	toolsStatus  string
+
+	// wizard (first-run setup) state — see wizard.go. wizardMode is true
+	// only for the Stage-1 standalone program RunWizard runs before the
+	// daemon/gateway exist; the Stage-2 continuation (tools preset/system
+	// check/summary) runs in the normal post-daemon program instead, with
+	// wizardMode left false, since it needs a live daemon connection.
+	wizardMode              bool
+	wizardWorkspaceLocked   bool // true when -workspace was passed explicitly; skips the workspace question
+	wizardStep              int  // 1..8, drives the shared "N/8 Title" header
+	wizardCWD               string
+	wizardHasGit            bool
+	wizardHomeDir           string
+	wizardProjectsRootInput textinput.Model
+	wizardWorkspaceInput    textinput.Model
+	wizardProjectsField     int // 0 = editing projects root, 1 = editing workspace
+	wizardWorkspaceErr      error
+	wizardChosenWorkspace   string
+	wizardProjectsRoot      string
+	wizardRoutingCursor     int
+	wizardChosenStrategy    string // "" (Auto), "smart", "round-robin"
+	wizardPermCursor        int
+	wizardChosenPermPreset  string // "recommended", "strict", "autonomous"
+	wizardDone              bool
+	wizardCancelled         bool
+
+	// Stage-2 continuation (post-daemon) — reached only right after a
+	// successful Stage-1 wizard run.
+	wizardToolsPresetCursor int
+	wizardChosenToolsPreset string // "recommended", "minimal", "custom"
+	// wizardWelcomeSession is set right before creating the wizard's
+	// final session, so the very first (empty) transcript render can show
+	// a one-time, client-side-only welcome banner — never persisted as a
+	// message, never mistaken for a real model reply (see wizard.go).
+	wizardWelcomeSession bool
 
 	// question is set while an ask_question tool call is pausing the
 	// current turn — see ask.go. Nil the rest of the time.
@@ -184,8 +237,17 @@ type Model struct {
 }
 
 // New builds the initial model. If sessionID is empty, the program opens
-// on the session picker instead of going straight to chat.
-func New(daemon *daemonclient.Client, gateway *statusclient.Client, sessionID, combo, workspace string) Model {
+// on the session picker instead of going straight to chat — unless
+// openOnToolsPreset is true, meaning the first-run wizard just completed
+// successfully in a separate program moments ago (see wizard.go,
+// cmd/kram/main.go), in which case it opens on the wizard's Stage-2
+// continuation (tools/skills preset) instead, so the setup flow feels
+// continuous instead of dropping into an empty picker. wizard carries
+// Stage 1's choices purely for Stage-2's summary screen to display —
+// this Model is a separate process/program from Stage 1's, so it has no
+// other way to know what an earlier program's user picked; ignored
+// (pass a zero WizardResult) when openOnToolsPreset is false.
+func New(daemon *daemonclient.Client, gateway *statusclient.Client, sessionID, combo, workspace string, openOnToolsPreset bool, wizard WizardResult) Model {
 	ti := textarea.New()
 	ti.Placeholder = "mensagem…"
 	ti.CharLimit = 4000
@@ -207,12 +269,7 @@ func New(daemon *daemonclient.Client, gateway *statusclient.Client, sessionID, c
 	titleInput.CharLimit = 100
 	titleInput.Prompt = "› "
 
-	keyInput := textinput.New()
-	keyInput.Placeholder = "sk-…"
-	keyInput.CharLimit = 400
-	keyInput.Prompt = "› "
-	keyInput.EchoMode = textinput.EchoPassword
-	keyInput.EchoCharacter = '•'
+	keyInput := newAccountsKeyInput()
 
 	answerInput := textinput.New()
 	answerInput.Placeholder = "resposta…"
@@ -231,11 +288,18 @@ func New(daemon *daemonclient.Client, gateway *statusclient.Client, sessionID, c
 		viewport: viewport.New(80, 20), spin: sp,
 		credStore: credStore, toolSettings: toolSettings,
 	}
-	if sessionID == "" {
+	switch {
+	case sessionID != "":
+		m.phase = phaseChat
+	case openOnToolsPreset:
+		m.phase = phaseWizardToolsPreset
+		m.wizardStep = 6
+		m.toolsLoading = true
+		m.wizardChosenStrategy = wizard.Strategy
+		m.wizardChosenPermPreset = wizard.PermPreset
+	default:
 		m.phase = phasePicker
 		m.pickerBusy = true
-	} else {
-		m.phase = phaseChat
 	}
 	return m
 }
@@ -246,8 +310,16 @@ func New(daemon *daemonclient.Client, gateway *statusclient.Client, sessionID, c
 // context-usage fetch so the footer icon has real data as soon as the
 // screen draws.
 func (m Model) Init() tea.Cmd {
-	if m.phase == phasePicker {
+	switch {
+	case m.phase == phasePicker:
 		return tea.Batch(listSessionsCmd(m.daemon), m.spin.Tick)
+	case m.phase == phaseWizardToolsPreset:
+		return fetchToolsCmd(m.daemon)
+	case m.wizardMode:
+		// Stage 1 of the first-run wizard runs in its own standalone
+		// program before the daemon/gateway exist — nothing here can
+		// query them yet (see wizard.go, RunWizard).
+		return textinput.Blink
 	}
 	return m.enterChatCmds()
 }
@@ -268,6 +340,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 		m.ready = true
+		if m.wizardMode {
+			// Stage 1's standalone program never renders the chat
+			// viewport/composer/markdown — syncViewportSize would size a
+			// textarea that newWizardModel deliberately never
+			// textarea.New()'d (wizard mode has no message composer),
+			// which panics on a zero-value textarea.Model.
+			return m, nil
+		}
 		m.syncViewportSize()
 		if m.mdRenderer == nil || m.mdWidth != m.width {
 			m.mdRenderer = newMarkdownRenderer(m.width)
@@ -354,10 +434,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.accountsOAuthURL = msg.url
 		openBrowser(msg.url)
-		return m, waitOpenRouterOAuthCmd(msg.wait)
+		ctx, cancel := context.WithCancel(context.Background())
+		m.accountsOAuthCancel = cancel
+		return m, waitOpenRouterOAuthCmd(ctx, msg.wait)
 
 	case oauthResultMsg:
 		m.accountsOAuthPending = false
+		if m.accountsOAuthCancel != nil {
+			m.accountsOAuthCancel()
+			m.accountsOAuthCancel = nil
+		}
 		if msg.err != nil {
 			m.accountsStatus = "oauth falhou: " + msg.err.Error()
 			return m, nil
@@ -365,8 +451,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.credStore != nil {
 			if err := m.credStore.Set("OPENROUTER_API_KEY", msg.key); err != nil {
 				m.accountsStatus = "erro ao salvar: " + err.Error()
-			} else {
-				m.accountsStatus = "OpenRouter conectado — reinicie o kram pra usar."
+				return m, nil
+			}
+			m.accountsStatus = "OpenRouter conectado — reinicie o kram pra usar."
+			if m.wizardMode {
+				m.accountsPinging = true
+				return m, pingAccountsCmd(m.credStore)
 			}
 		}
 		return m, nil
@@ -409,6 +499,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if msg.String() == "ctrl+c" {
+		if m.accountsOAuthPending && m.accountsOAuthCancel != nil {
+			m.accountsOAuthCancel()
+		}
+		if m.wizardMode {
+			m.wizardCancelled = true
+		}
 		return m, tea.Quit
 	}
 	if m.phase == phasePicker {
@@ -419,6 +515,27 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	if m.phase == phaseTools {
 		return m.handleToolsKey(msg)
+	}
+	if m.phase == phaseWizardEnvironment {
+		return m.handleWizardEnvironmentKey(msg)
+	}
+	if m.phase == phaseWizardProjects {
+		return m.handleWizardProjectsKey(msg)
+	}
+	if m.phase == phaseWizardRouting {
+		return m.handleWizardRoutingKey(msg)
+	}
+	if m.phase == phaseWizardPermissions {
+		return m.handleWizardPermissionsKey(msg)
+	}
+	if m.phase == phaseWizardToolsPreset {
+		return m.handleWizardToolsPresetKey(msg)
+	}
+	if m.phase == phaseWizardSystemCheck {
+		return m.handleWizardSystemCheckKey(msg)
+	}
+	if m.phase == phaseWizardSummary {
+		return m.handleWizardSummaryKey(msg)
 	}
 	if m.question != nil {
 		return m.handleQuestionKey(msg)

@@ -89,13 +89,18 @@ func (m Model) renderToolsToggle() string {
 	if m.toolsStatus != "" {
 		b.WriteString(styleHint.Render(m.toolsStatus) + "\n\n")
 	}
-	b.WriteString(styleHint.Render("↑↓ escolher · espaço/enter liga/desliga · esc volta (reinicie o kram pra aplicar)"))
+	b.WriteString(styleHint.Render("↑↓ escolher · espaço/enter liga/desliga · a liga tudo · d desliga tudo · esc volta (reinicie o kram pra aplicar)"))
 	return b.String()
 }
 
 func (m Model) handleToolsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc":
+		if m.wizardChosenToolsPreset == "custom" {
+			m.phase = phaseWizardSystemCheck
+			m.wizardStep = 7
+			return m, nil
+		}
 		m.phase = phasePicker
 		return m, nil
 	case "up":
@@ -121,8 +126,29 @@ func (m Model) handleToolsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		} else {
 			m.toolsStatus = it.name + ": ligado."
 		}
+	case "a", "d":
+		if m.toolSettings == nil {
+			return m, nil
+		}
+		names := toolToggleNames(m.toolToggleItems())
+		disable := msg.String() == "d"
+		if err := m.toolSettings.SetAllDisabled(names, disable); err != nil {
+			m.toolsStatus = "erro ao salvar: " + err.Error()
+		} else if disable {
+			m.toolsStatus = fmt.Sprintf("%d desligados.", len(names))
+		} else {
+			m.toolsStatus = fmt.Sprintf("%d ligados.", len(names))
+		}
 	}
 	return m, nil
+}
+
+func toolToggleNames(items []toolToggleItem) []string {
+	names := make([]string, len(items))
+	for i, it := range items {
+		names[i] = it.name
+	}
+	return names
 }
 
 type toolsListMsg struct {

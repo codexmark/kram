@@ -14,6 +14,11 @@ import (
 // scrolls to the bottom — called any time messages change.
 func (m *Model) refreshTranscript() {
 	var b strings.Builder
+	if len(m.messages) == 0 && m.wizardWelcomeSession {
+		m.viewport.SetContent(m.renderWizardWelcomeBanner())
+		m.viewport.GotoBottom()
+		return
+	}
 	for i, msg := range m.messages {
 		if i > 0 {
 			b.WriteString("\n\n")
@@ -97,6 +102,27 @@ func (m Model) View() string {
 	}
 	if m.phase == phaseTools {
 		return m.renderToolsToggle()
+	}
+	if m.phase == phaseWizardEnvironment {
+		return m.renderWizardEnvironment()
+	}
+	if m.phase == phaseWizardProjects {
+		return m.renderWizardProjects()
+	}
+	if m.phase == phaseWizardRouting {
+		return m.renderWizardRouting()
+	}
+	if m.phase == phaseWizardPermissions {
+		return m.renderWizardPermissions()
+	}
+	if m.phase == phaseWizardToolsPreset {
+		return m.renderWizardToolsPreset()
+	}
+	if m.phase == phaseWizardSystemCheck {
+		return m.renderWizardSystemCheck()
+	}
+	if m.phase == phaseWizardSummary {
+		return m.renderWizardSummary()
 	}
 
 	var b strings.Builder

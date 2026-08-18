@@ -50,7 +50,7 @@ func run(daemonURL, gatewayURL, sessionID, title, combo, workspace string) error
 		sessionID = sess.ID
 	}
 
-	m := app.New(daemon, gateway, sessionID, combo, workspace)
+	m := app.New(daemon, gateway, sessionID, combo, workspace, false, app.WizardResult{})
 	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
 	_, err := p.Run()
 	return err

@@ -27,6 +27,32 @@ type accountStatus struct {
 	storedSet bool
 }
 
+// newAccountsKeyInput builds the masked textinput.Model used for pasting
+// an API key — shared by the normal accounts screen (New) and the
+// wizard's own model constructor (newWizardModel), so the two never
+// drift apart.
+func newAccountsKeyInput() textinput.Model {
+	keyInput := textinput.New()
+	keyInput.Placeholder = "sk-…"
+	keyInput.CharLimit = 400
+	keyInput.Prompt = "› "
+	keyInput.EchoMode = textinput.EchoPassword
+	keyInput.EchoCharacter = '•'
+	return keyInput
+}
+
+// wizardHasProvider reports whether at least one catalog account is
+// configured (env or stored) — the gate the wizard's provider step uses
+// before letting "n" advance to the next step.
+func (m *Model) wizardHasProvider() bool {
+	for _, row := range m.accountRows() {
+		if row.envSet || row.storedSet {
+			return true
+		}
+	}
+	return false
+}
+
 func (m *Model) accountRows() []accountStatus {
 	rows := make([]accountStatus, len(providercatalog.Accounts))
 	for i, a := range providercatalog.Accounts {
@@ -44,7 +70,13 @@ func (m *Model) accountRows() []accountStatus {
 // in-progress OAuth flow.
 func (m Model) renderAccounts() string {
 	var b strings.Builder
-	b.WriteString(styleBody.Render("contas") + "\n\n")
+	if m.wizardMode {
+		b.WriteString(renderWizardHeader(3, "Providers") + "\n\n")
+		b.WriteString(styleHint.Render("configure pelo menos um provedor para usar o gateway e os combos.") + "\n")
+		b.WriteString(styleHint.Render("mais rápido: escolha OpenRouter e pressione \"o\" — autoriza no navegador, sem cartão, grátis.") + "\n\n")
+	} else {
+		b.WriteString(styleBody.Render("contas") + "\n\n")
+	}
 
 	rows := m.accountRows()
 	for i, a := range providercatalog.Accounts {
@@ -57,6 +89,9 @@ func (m Model) renderAccounts() string {
 		}
 		dot := pingDot(m, a.EnvVar, rows[i].envSet || rows[i].storedSet)
 		line := fmt.Sprintf("%s %-30s %s", dot, a.Label, status)
+		if a.SupportsOAuth {
+			line += "  " + styleHint.Render("(o: autorizar no navegador)")
+		}
 		if detail := pingDetail(m, a.EnvVar); detail != "" {
 			line += "  " + styleHint.Render(detail)
 		}
@@ -67,6 +102,10 @@ func (m Model) renderAccounts() string {
 		}
 	}
 	b.WriteString("\n")
+
+	if m.wizardMode {
+		b.WriteString(wizardGatewayModeLine(rows) + "\n\n")
+	}
 
 	if m.accountsEditing {
 		b.WriteString(styleMeta.Render("cole a API key:") + "\n")
@@ -90,9 +129,43 @@ func (m Model) renderAccounts() string {
 	if m.accountsCursor < len(providercatalog.Accounts) && providercatalog.Accounts[m.accountsCursor].SupportsOAuth {
 		hint += " · o conecta via oauth"
 	}
-	hint += " · d remove chave salva · r verifica de novo · esc volta"
+	if m.wizardMode {
+		hint += " · r verifica de novo"
+		if m.wizardHasProvider() {
+			hint += " · n continua"
+		}
+		if m.wizardWorkspaceLocked {
+			hint += " · esc cancela"
+		} else {
+			hint += " · esc volta"
+		}
+	} else {
+		hint += " · d remove chave salva · r verifica de novo · esc volta"
+	}
 	b.WriteString(styleHint.Render(hint))
 	return b.String()
+}
+
+// wizardGatewayModeLine reports how much real fallback the configured
+// accounts actually buy — deliberately counting deduplicated accounts,
+// not providercatalog.Providers entries: OpenRouter contributes 3 free-
+// model routes from one account, and those must never be presented as 3
+// independent upstreams.
+func wizardGatewayModeLine(rows []accountStatus) string {
+	n := 0
+	for _, r := range rows {
+		if r.envSet || r.storedSet {
+			n++
+		}
+	}
+	switch {
+	case n == 0:
+		return styleHint.Render("Gateway mode: —  (nenhum provedor configurado ainda)")
+	case n == 1:
+		return styleBadgeWarn.Render("Gateway mode: BASIC") + styleHint.Render("  · 1 upstream configurado — fallback multi-provider fica limitado")
+	default:
+		return styleBadgeOK.Render("Gateway mode: RESILIENT") + styleHint.Render(fmt.Sprintf("  · %d upstreams independentes", n))
+	}
 }
 
 // pingDot renders one account's real, current status as a small colored
@@ -159,8 +232,15 @@ func (m Model) handleAccountsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if m.credStore != nil {
 				if err := m.credStore.Set(acct.EnvVar, key); err != nil {
 					m.accountsStatus = "erro ao salvar: " + err.Error()
-				} else {
-					m.accountsStatus = acct.Label + ": chave salva — reinicie o kram pra usar."
+					return m, nil
+				}
+				m.accountsStatus = acct.Label + ": chave salva — reinicie o kram pra usar."
+				if m.wizardMode {
+					// Validate immediately rather than waiting for a manual
+					// "r" — the wizard's whole point is real feedback as the
+					// user goes, not a key that might silently fail later.
+					m.accountsPinging = true
+					return m, pingAccountsCmd(m.credStore)
 				}
 			}
 			return m, nil
@@ -173,12 +253,24 @@ func (m Model) handleAccountsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.accountsOAuthPending {
 		if msg.String() == "esc" {
 			m.accountsOAuthPending = false
+			if m.accountsOAuthCancel != nil {
+				m.accountsOAuthCancel()
+				m.accountsOAuthCancel = nil
+			}
 		}
 		return m, nil
 	}
 
 	switch msg.String() {
 	case "esc":
+		if m.wizardMode {
+			if m.wizardWorkspaceLocked {
+				m.wizardCancelled = true
+				return m, tea.Quit
+			}
+			m.phase = phaseWizardProjects
+			return m, nil
+		}
 		m.phase = phasePicker
 		return m, nil
 	case "up":
@@ -196,6 +288,9 @@ func (m Model) handleAccountsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.accountsKeyInput.Focus()
 		return m, textinput.Blink
 	case "d":
+		if m.wizardMode {
+			return m, nil // no deletion during setup — nothing to undo yet
+		}
 		acct := providercatalog.Accounts[m.accountsCursor]
 		if m.credStore != nil {
 			_ = m.credStore.Delete(acct.EnvVar)
@@ -212,6 +307,15 @@ func (m Model) handleAccountsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.accountsPinging = true
 		m.accountsStatus = ""
 		return m, pingAccountsCmd(m.credStore)
+	case "n":
+		if m.wizardMode && m.wizardHasProvider() {
+			m.phase = phaseWizardRouting
+			m.wizardStep = 4
+			return m, nil
+		}
+		if m.wizardMode {
+			m.accountsStatus = "configure ao menos um provedor antes de continuar."
+		}
 	}
 	return m, nil
 }
@@ -238,9 +342,9 @@ type oauthResultMsg struct {
 	err error
 }
 
-func waitOpenRouterOAuthCmd(wait func(ctx context.Context) (string, error)) tea.Cmd {
+func waitOpenRouterOAuthCmd(ctx context.Context, wait func(ctx context.Context) (string, error)) tea.Cmd {
 	return func() tea.Msg {
-		key, err := wait(context.Background())
+		key, err := wait(ctx)
 		return oauthResultMsg{key: key, err: err}
 	}
 }

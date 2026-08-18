@@ -74,3 +74,47 @@ func TestMultipleDisabledNamesShareOneNamespace(t *testing.T) {
 		t.Error("tool and skill names should coexist in the same disabled set")
 	}
 }
+
+func TestSetAllDisabled(t *testing.T) {
+	isolate(t)
+	s, _ := Load()
+	names := []string{"bash", "grep", "read_file"}
+
+	if err := s.SetAllDisabled(names, true); err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range names {
+		if !s.IsDisabled(n) {
+			t.Errorf("%s should be disabled after SetAllDisabled(true)", n)
+		}
+	}
+
+	reloaded, _ := Load()
+	for _, n := range names {
+		if !reloaded.IsDisabled(n) {
+			t.Errorf("%s disabled state should persist across Load", n)
+		}
+	}
+
+	if err := reloaded.SetAllDisabled(names, false); err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range names {
+		if reloaded.IsDisabled(n) {
+			t.Errorf("%s should be enabled again after SetAllDisabled(false)", n)
+		}
+	}
+}
+
+func TestSetAllDisabledLeavesOtherNamesAlone(t *testing.T) {
+	isolate(t)
+	s, _ := Load()
+	_ = s.SetDisabled("bash", true)
+
+	if err := s.SetAllDisabled([]string{"grep", "read_file"}, true); err != nil {
+		t.Fatal(err)
+	}
+	if !s.IsDisabled("bash") {
+		t.Error("SetAllDisabled should not touch names outside its own list")
+	}
+}
