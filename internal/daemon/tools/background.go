@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/codexmark/kram-gateway/internal/shell"
 )
 
 // backgroundMaxOutputBytes caps how much output one process buffers —
@@ -83,14 +85,19 @@ func (m *processManager) start(command string) (*backgroundProcess, error) {
 	id := "bg" + strconv.Itoa(m.nextID)
 	m.mu.Unlock()
 
-	cmd := exec.Command("sh", "-c", command)
-	cmd.Dir = m.workspace
+	// Background processes are daemon-lifetime, not request-lifetime (see
+	// DECISIONS.md) — there's no per-call context to bound them with, so
+	// this uses context.Background() rather than a timeout. Going through
+	// shell.Command still matters here: it's what makes process-tree
+	// cleanup (killAll, process_kill) reach children the command spawns,
+	// not just the shell itself.
+	cmd := shell.Command(context.Background(), m.workspace, command)
 
 	p := &backgroundProcess{id: id, command: command, cmd: cmd, running: true, started: time.Now()}
 	cmd.Stdout = writerFunc(p.write)
 	cmd.Stderr = writerFunc(p.write)
 
-	if err := cmd.Start(); err != nil {
+	if err := shell.Start(cmd); err != nil {
 		return nil, err
 	}
 
@@ -99,7 +106,7 @@ func (m *processManager) start(command string) (*backgroundProcess, error) {
 	m.mu.Unlock()
 
 	go func() {
-		waitErr := cmd.Wait()
+		waitErr := shell.Wait(cmd)
 		p.mu.Lock()
 		p.running = false
 		p.ended = time.Now()
@@ -133,12 +140,15 @@ func (m *processManager) list() []*backgroundProcess {
 
 // killAll is called on daemon shutdown so a background dev server doesn't
 // outlive the daemon that started it as an orphaned, untracked process.
+// Goes through shell.KillTree rather than Process.Kill() so a tracked
+// process's children (a `npm start` that forked `node`, say) are killed
+// too, not just the shell that was directly started.
 func (m *processManager) killAll() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for _, p := range m.procs {
 		if p.cmd.Process != nil {
-			_ = p.cmd.Process.Kill()
+			_ = shell.KillTree(p.cmd)
 		}
 	}
 }
@@ -293,7 +303,11 @@ func (t *processKill) Execute(ctx context.Context, raw json.RawMessage) (string,
 	if p.cmd.Process == nil {
 		return "error: process has no PID yet", nil
 	}
-	if err := p.cmd.Process.Kill(); err != nil {
+	// KillTree, not Process.Kill(): a background command that forked
+	// children (a dev server's own worker processes, a backgrounded
+	// `sleep &`) would otherwise leave them running as orphans after
+	// "killing" the process that's tracked here.
+	if err := shell.KillTree(p.cmd); err != nil {
 		return fmt.Sprintf("error: %v", err), nil
 	}
 	return fmt.Sprintf("killed %s", args.ID), nil

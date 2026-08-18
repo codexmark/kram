@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/codexmark/kram-gateway/internal/kramhome"
+	"github.com/codexmark/kram-gateway/internal/shell"
 )
 
 // customToolDefaultTimeout matches bash's default — a custom tool is
@@ -63,15 +64,14 @@ func (t *customTool) Execute(ctx context.Context, raw json.RawMessage) (string, 
 	cmdCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(cmdCtx, "sh", "-c", t.manifest.Command)
-	cmd.Dir = t.workspace
+	cmd := shell.Command(cmdCtx, t.workspace, t.manifest.Command)
 	cmd.Stdin = bytes.NewReader(raw)
 
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &out
 
-	runErr := cmd.Run()
+	runErr := shell.Run(cmd)
 	result := out.String()
 
 	if cmdCtx.Err() == context.DeadlineExceeded {
