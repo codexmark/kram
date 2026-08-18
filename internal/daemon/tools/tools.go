@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/codexmark/kram-gateway/internal/daemon/store"
+	"github.com/codexmark/kram-gateway/internal/lsp"
 	"github.com/codexmark/kram-gateway/internal/openai"
 	"github.com/codexmark/kram-gateway/internal/permission"
 )
@@ -32,13 +33,14 @@ type Tool interface {
 
 // Registry holds every tool available to the agent loop for one workspace.
 type Registry struct {
-	workspace string
-	byName    map[string]Tool
-	delegator Delegator
-	disabled  map[string]bool
-	processes *processManager
-	permEval  *permission.Evaluator
-	grants    *permission.GrantStore
+	workspace  string
+	byName     map[string]Tool
+	delegator  Delegator
+	disabled   map[string]bool
+	processes  *processManager
+	permEval   *permission.Evaluator
+	grants     *permission.GrantStore
+	lspManager *lsp.Manager
 }
 
 // StopBackgroundProcesses kills every process started by run_background —
@@ -47,6 +49,18 @@ type Registry struct {
 func (r *Registry) StopBackgroundProcesses() {
 	if r.processes != nil {
 		r.processes.killAll()
+	}
+}
+
+// StopLSPServers shuts down every language server this registry's LSP
+// tools started, if any — called on daemon shutdown for the same reason
+// as StopBackgroundProcesses: a language server is a subprocess Kram
+// started, so it's Kram's job to make sure it doesn't outlive the daemon
+// as an orphan. A workspace that never called an lsp_* tool never started
+// any server, so this is a no-op in the common case.
+func (r *Registry) StopLSPServers() {
+	if r.lspManager != nil {
+		r.lspManager.Close()
 	}
 }
 
@@ -87,9 +101,16 @@ func NewRegistry(workspace string, st *store.Store, disabled map[string]bool) *R
 		grants = nil
 	}
 	permEval := permission.NewEvaluator(permission.LoadConfig(workspace), grants.Rules())
+	// lsp.NewManager is side-effect free — it starts no process and reads
+	// no config file until the first lsp_* tool call for a given
+	// language, so building it here at registry-construction time (i.e.
+	// daemon startup) costs nothing and starts nothing, same invariant
+	// MCP servers deliberately don't get (those connect eagerly via
+	// mcp.ConnectAll — language servers must not).
+	lspManager := lsp.NewManager(workspace)
 	r := &Registry{
 		workspace: workspace, byName: make(map[string]Tool), disabled: disabled,
-		processes: processes, permEval: permEval, grants: grants,
+		processes: processes, permEval: permEval, grants: grants, lspManager: lspManager,
 	}
 	todos := newTodoStore(workspace)
 	toolList := []Tool{
@@ -116,6 +137,9 @@ func NewRegistry(workspace string, st *store.Store, disabled map[string]bool) *R
 		newProcessList(processes),
 		newProcessOutput(processes),
 		newProcessKill(processes),
+		newLSPDiagnostics(workspace, lspManager),
+		newLSPDefinition(workspace, lspManager),
+		newLSPReferences(workspace, lspManager),
 	}
 	if st != nil {
 		toolList = append(toolList, newMemoryWrite(st, workspace), newMemorySearch(st, workspace), newSessionSearch(st))
