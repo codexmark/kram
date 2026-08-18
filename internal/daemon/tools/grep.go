@@ -96,6 +96,10 @@ func (t *grep) Execute(ctx context.Context, raw json.RawMessage) (string, error)
 		}
 		defer f.Close()
 
+		if looksBinary(f) {
+			return nil // e.g. a .db/.png/.wasm the ignoredDirs list didn't happen to cover
+		}
+
 		rel, _ := filepath.Rel(t.workspace, path)
 		scanner := bufio.NewScanner(f)
 		scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
@@ -110,6 +114,13 @@ func (t *grep) Execute(ctx context.Context, raw json.RawMessage) (string, error)
 				}
 			}
 		}
+		// A "line" longer than the scanner's 1MB buffer (routine in
+		// binary data) makes Scan stop with bufio.ErrTooLong — silently,
+		// unless checked, which would just look like the file had no
+		// more matches rather than that the scan gave up partway through.
+		if err := scanner.Err(); err != nil {
+			matches = append(matches, fmt.Sprintf("%s: (skipped rest of file: %v)", rel, err))
+		}
 		return nil
 	})
 	if walkErr != nil && walkErr != filepath.SkipAll {
@@ -119,9 +130,28 @@ func (t *grep) Execute(ctx context.Context, raw json.RawMessage) (string, error)
 	if len(matches) == 0 {
 		return "(no matches)", nil
 	}
+	return finishGrep(matches), nil
+}
+
+// looksBinary sniffs the first 8KB for a NUL byte — the same heuristic
+// git and most text tools use — and rewinds the file afterward so the
+// real scan starts from the top.
+func looksBinary(f *os.File) bool {
+	buf := make([]byte, 8192)
+	n, _ := f.Read(buf)
+	_, _ = f.Seek(0, 0)
+	for _, b := range buf[:n] {
+		if b == 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func finishGrep(matches []string) string {
 	out := strings.Join(matches, "\n")
 	if len(matches) >= grepMaxMatches {
 		out += fmt.Sprintf("\n\n[truncated at %d matches]", grepMaxMatches)
 	}
-	return out, nil
+	return out
 }

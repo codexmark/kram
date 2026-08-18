@@ -421,6 +421,50 @@ worth the dependency. It does handle block scalars (`>` and `|`) —
 **added after** a real external skill using `description: >` silently
 produced an empty description.
 
+### A weak model's empty final answer gets one retry, then a visible fallback
+
+**Found reproducing a real report:** the user described Kram "stopping
+silently" — no error, no quota message, just nothing. The daemon's own
+logs showed every turn completing normally, with real telemetry (provider,
+latency, token counts) and a persisted assistant message. So the backend
+was not failing. The persisted message's content was an empty string.
+
+**What actually happened:** `bash` reported a normal, expected non-zero
+exit (`grep` finding no matches) as `[exit error: exit status 1]`. A
+free-tier model reading that tool result interpreted "error" literally,
+and instead of explaining or retrying, returned a genuinely empty
+completion as its final answer — no text, no tool calls. Kram persisted
+and displayed exactly that: nothing. Confirmed against the real
+combination of providers in use (`openrouter-gptoss`), not just the mock.
+
+**Two fixes, not one:**
+
+1. `bash`'s error framing no longer editorializes. A non-zero exit is
+   reported as `[exit code N]`, not `[exit error: ...]` — grep's "no
+   matches", diff's "files differ", and a failing test's non-zero exit
+   are all *normal outcomes* of running those commands, and telling a
+   model "error" when nothing actually broke is what triggered the
+   give-up behavior in the first place.
+2. The loop itself no longer treats an empty final answer as done. One
+   retry, with an explicit system nudge telling the model its previous
+   response was empty; if it happens twice in a row, the user gets a
+   clear message instead of silence. This is the actual fix for "stops
+   silently" — even in the case where a model just does this regardless
+   of what triggered it, the user now always sees *something*.
+
+**A second, independent bug found along the way:** `grep` was walking
+into `.kram/` — the daemon's own live SQLite database — and returning
+binary garbage (control bytes) as search matches, exactly the kind of
+confusing tool result that can contribute to a model giving up. `.kram`
+is now in the same ignore list as `.git`/`node_modules`, and `grep`
+additionally sniffs for a NUL byte in the first 8KB of any file outside
+the ignored directories, so an explicit path to some other binary file
+doesn't hit the same problem.
+
+`devtools/mock-provider` gained an `-empty-replies N` flag to make this
+class of failure reproducible on demand rather than only when a specific
+free-tier model happens to misbehave.
+
 ---
 
 ## Known gaps

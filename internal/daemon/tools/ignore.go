@@ -12,6 +12,12 @@ var ignoredDirs = map[string]bool{
 	".turbo":       true,
 	".next":        true,
 	"target":       true,
+	// .kram holds the daemon's own live SQLite database and logs —
+	// scanning it as text was a real, observed bug: grep walked into a
+	// binary database file mid-write and returned garbage control-byte
+	// matches, which is exactly the kind of confusing tool result that
+	// can derail a weak model's next turn.
+	".kram": true,
 }
 
 func isIgnoredName(name string) bool {

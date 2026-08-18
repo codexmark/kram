@@ -95,7 +95,17 @@ func (t *bash) Execute(ctx context.Context, raw json.RawMessage) (string, error)
 		return result + fmt.Sprintf("\n\n[command timed out after %s]", timeout), nil
 	}
 	if runErr != nil {
-		return result + fmt.Sprintf("\n\n[exit error: %v]", runErr), nil
+		// "error" framing here is misleading for anything that uses a
+		// non-zero exit as a normal outcome (grep: no matches, diff:
+		// files differ, test runners: assertions failed) — a weak model
+		// reading "[exit error: ...]" reads it as "something broke" and
+		// can give up on the whole turn instead of just reading the
+		// output. Report the fact (the exit code) without editorializing
+		// about whether it's bad; the output itself says what happened.
+		if exitErr, ok := runErr.(*exec.ExitError); ok {
+			return result + fmt.Sprintf("\n\n[exit code %d]", exitErr.ExitCode()), nil
+		}
+		return result + fmt.Sprintf("\n\n[failed to run: %v]", runErr), nil
 	}
 	if result == "" {
 		return "(no output)", nil

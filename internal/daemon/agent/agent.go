@@ -275,6 +275,17 @@ func (s *Service) runLoop(ctx context.Context, sessionID, model string, depth in
 	result := RunResult{ImageNotice: imageNotice}
 	compactions := 0
 	graceUsed := false
+	// emptyRetryUsed guards against a real, observed failure mode of weak
+	// free-tier models: after a tool result that reads like a failure (an
+	// "[exit error: ...]" from a command whose non-zero exit is actually
+	// normal — grep finding nothing, say), the model sometimes gives up
+	// and returns a genuinely empty final answer instead of explaining or
+	// retrying. Without this, that dead-ends the turn silently — the
+	// daemon reports "done" with real telemetry, so nothing looks wrong,
+	// but the user sees no response at all. One retry with an explicit
+	// nudge; if it happens twice in a row, say so instead of persisting
+	// blank content.
+	emptyRetryUsed := false
 
 	for turn := 0; turn < s.cfg.MaxTurns; turn++ {
 		all, err := s.store.ListMessages(sessionID)
@@ -323,6 +334,14 @@ func (s *Service) runLoop(ctx context.Context, sessionID, model string, depth in
 			preamble = append(preamble, memoryMsg)
 		}
 		modelMessages := append(preamble, toModelMessages(effective)...)
+		if emptyRetryUsed {
+			// Only true on the turn right after an empty final answer —
+			// see the ToolCalls==0 branch below for where this is set.
+			modelMessages = append(modelMessages, openai.ChatMessage{
+				Role:    "system",
+				Content: "Your previous response was empty. Answer the user directly in plain text now — do not return another empty response.",
+			})
+		}
 
 		nearBudget := turn == s.cfg.MaxTurns-1
 		toolDefs := s.tools.Definitions()
@@ -345,8 +364,16 @@ func (s *Service) runLoop(ctx context.Context, sessionID, model string, depth in
 		result.Usage = sumUsage(result.Usage, callResult.Usage)
 
 		if len(callResult.ToolCalls) == 0 {
+			if strings.TrimSpace(callResult.Content) == "" && !emptyRetryUsed {
+				emptyRetryUsed = true
+				continue // one retry with a nudge (added to the preamble above) before giving up
+			}
+			content := callResult.Content
+			if strings.TrimSpace(content) == "" {
+				content = "(no response — the model returned nothing twice in a row; try rephrasing, or check whether the provider is degraded)"
+			}
 			assistantMsg, err := s.store.AppendMessage(sessionID, store.Message{
-				Role: "assistant", Content: callResult.Content, Provider: callResult.Provider,
+				Role: "assistant", Content: content, Provider: callResult.Provider,
 			})
 			if err != nil {
 				return RunResult{}, fmt.Errorf("persisting assistant message: %w", err)
