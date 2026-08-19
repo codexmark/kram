@@ -23,9 +23,16 @@ import (
 	"time"
 )
 
-const (
+// openRouterAuthURL and openRouterExchangeURL are vars, not consts, so
+// tests can point this flow's HTTP calls at an httptest.Server instead
+// of the real OpenRouter endpoints — nothing in production ever
+// reassigns them.
+var (
 	openRouterAuthURL     = "https://openrouter.ai/auth"
 	openRouterExchangeURL = "https://openrouter.ai/api/v1/auth/keys"
+)
+
+const (
 	// callbackTimeout is how long the local server waits for the user to
 	// finish the browser flow before giving up — generous, since it's a
 	// human clicking through a login page, but bounded so a session

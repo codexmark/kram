@@ -2227,6 +2227,144 @@ mocked one in tests, and that it now produces this without the v0.2.1
 patch's hand-written lines, which were removed outright rather than
 kept as a redundant fallback.
 
+## Test coverage push: closing the zero- and weak-coverage packages
+
+Prompted by a direct question about the repo's current test coverage
+(`go test ./... -cover`): aggregate was 44.1%, and a handful of packages
+carrying real logic — not just thin glue — sat at 0%: `internal/daemon/
+compaction`, `internal/daemon/server`, `internal/daemon/session`,
+`internal/cli/daemonclient`, `internal/cli/statusclient`,
+`internal/kramhome`, `internal/telemetry`. `internal/oauthflow` sat at
+3.5% (only its PKCE math was tested — every actual browser-login flow
+was untouched). `internal/provider` and `internal/daemon/gatewayclient`
+were both at ~46%, healthy on their most-exercised paths (Anthropic/
+Gemini/OpenAI-compat streaming, the Gateway Round retry's structured
+error) but with `openai_responses.go`, `factory.go`, `sse.go`,
+`toolcalls.go`, `ChatCompletionStream`, and `Status`/`ComboSupportsImages`
+never touched at all.
+
+Went package by package, adding tests without changing behavior anywhere
+except one deliberate, narrow exception (below):
+
+- **`internal/provider`**: new `toolcalls_test.go`, `sse_test.go`,
+  `factory_test.go`, `openai_responses_test.go` — the accumulator's
+  index-ordering and stale-fragment-doesn't-overwrite-name/ID behavior,
+  `scanSSEData`'s line-skipping and early-stop, `Build`'s full kind ×
+  auth-mode matrix, and `OpenAIResponses.ChatCompletion` (text deltas,
+  function-call assembly across `output_item.added` +
+  `function_call_arguments.delta`, HTTP error, resolve-error
+  propagation, the resolved token actually landing in the `Authorization`
+  header). 45.9% → 68.9%.
+- **`internal/daemon/gatewayclient`**: new `status_test.go`,
+  `stream_test.go` — `Status()` decode/error paths, `ComboSupportsImages`
+  true/false/unknown-combo, `ChatCompletionStream`'s text-delta assembly,
+  tool-call-on-finish, `finish_reason: "error"` → `StreamDelta.Err`,
+  malformed-chunk skipping, plus `ChatCompletion`'s no-choices/decode-
+  error/non-JSON-error-body paths the existing `client_test.go` didn't
+  reach. 45.9% → 84.7%.
+- **`internal/daemon/compaction`** (new): `EstimateTokens`,
+  `EffectiveHistory` (marker-seeking, ignoring same-role-different-name
+  system messages), `NeedsCompaction`'s default-budget fallback,
+  `PruneForModel` (protected tail, tool-only, size threshold, and —
+  worth calling out — a mutation test proving it never touches the
+  caller's slice in place, which is the whole reason the CLI/audit trail
+  can show real tool output after a session compacts), and `Compact`
+  against a real `gatewayclient.Client` pointed at an `httptest.Server`,
+  confirming the reference-only wrapping this package's own doc comment
+  exists specifically to prevent (see the opencode/Crush re-execution
+  bug this package was built to avoid). 0% → 97.4%.
+- **`internal/daemon/session`** (new): `Create`/`List`/`Get` (found and
+  `ErrNotFound`), `NewID`'s prefix and uniqueness. 0% → 86.7%.
+- **`internal/kramhome`** (new): `Dir()`'s `XDG_CONFIG_HOME` vs.
+  `$HOME/.config` fallback, the deliberate `kram-gateway` (not `kram`)
+  naming this file's own doc comment explains, `Path()`'s joining. 0% →
+  81.8%.
+- **`internal/telemetry`** (new): every counter (`RecordAttempt/Failure/
+  Usage/Latency`), `Snapshot`'s average-latency and success-rate math
+  including the zero-request divide-by-zero guard, per-provider
+  independence, snapshot-is-a-copy-not-a-live-view, and a 50-goroutine
+  concurrent-access test under `-race` — the actual point of this
+  package's separate per-counters mutex. 0% → 97.7%.
+- **`internal/cli/statusclient`** (new): `Fetch` success/non-2xx/decode-
+  error/unreachable-gateway. 0% → 92.9%.
+- **`internal/cli/daemonclient`** (new): every JSON method
+  (`CreateSession`/`ListSessions`/`GetSession`/`ListTools`/`GetContext`/
+  `AnswerQuestion`/`AnswerApproval`), `doJSON`'s error-body-vs-plain-
+  status fallback, and `SendMessageStream`/`MessageStream.Next` — SSE
+  delta/done parsing, malformed-event skipping, EOF-without-`[DONE]`
+  reporting done, and images being included in the posted body when
+  present. 0% → 86.9%.
+- **`internal/daemon/server`** (new): every HTTP handler exercised
+  through a real `Server` wired to a real `session.Service` and
+  `agent.Service` (mirroring `promptassembly_test.go`'s
+  `newTestService` pattern, extended with a scripted `httptest` gateway)
+  — health, session CRUD, 404s, the full SSE send-message stream ending
+  in `[DONE]`, answer/approve 404-and-400 branches, `/tools`, and
+  `recoverMiddleware` actually turning a handler panic into a 500
+  instead of taking the daemon down (the literal invariant this file's
+  own package doc comment states). 0% → 75.9%.
+
+**`internal/oauthflow` needed one narrow, deliberate production change**
+to become testable at all: `anthropicOAuthBase`/`anthropicAPIBase`
+(anthropic.go), `openAIAuthBase` (openai.go), and `openRouterAuthURL`/
+`openRouterExchangeURL` (openrouter.go) were `const`, hardcoded to the
+real Anthropic/OpenAI/OpenRouter hosts — meaning every token-exchange
+call was untestable without either hitting the real internet or never
+exercising the decode/error-branching logic at all. Changed to package-
+level `var`s with the same default values; nothing in production code
+ever reassigns them, only tests do, via a save-and-`t.Cleanup`-restore
+helper per file. This is the same class of change as `NewRegistry`
+already taking a plain `disabled map[string]bool` instead of importing
+`internal/toolsettings` (see "Tool Semantics Registry" above) —
+substitutability added at the exact seam a test needs it, nothing more.
+
+With that seam in place: full PKCE round trips for all three providers
+— `Authorize()` → a real HTTP GET to the returned local callback URL
+(standing in for the browser redirect, not a real browser) → `wait()`
+→ the exchange call landing on an `httptest.Server` — plus each
+provider's callback-handler error branches (state mismatch, denied/
+error param, missing code) and each exchange function's success/
+provider-rejection/no-error-field/decode-failure paths.
+`TestOpenAIAuthorizeFullRoundTrip` binds the real fixed port 1455 this
+flow requires (see openai.go's own doc comment on why it can't be
+ephemeral) — verified stable across `-race -count=3`, since a leaked
+listener from an earlier test would otherwise make every later one on
+that port flake. 3.5% → 80.5%.
+
+**`internal/cli/app`** (the terminal UI) got a narrower, explicitly-
+scoped pass: `helpers_test.go` covers every genuinely pure function that
+could be found — `formatAge`, `formatTokens`, `contextBar`'s proportional
+segment math, `providerKindForEnvVar`, `accountByID`,
+`wizardGatewayModeLine`'s three-tier threshold, `pingDot`/`pingDetail`,
+`badgeForProvider`'s breaker-open/unstable/healthy states,
+`suggestedProjectsRoot`, `expandTilde`, `lastAssistantTokens`, and
+`wizardHasProvider`/`wizardHavePaidProvider` (deterministic only because
+the test explicitly clears every `providercatalog.Accounts` env var
+first — these two read the real process environment, so a test that
+didn't would depend on whatever's set on the machine running it). 15.9%
+→ 21.7%, most of the remaining 78% being `View()`/`Update()` rendering
+and `tea.Cmd` closures that make real daemon/gateway/OAuth calls — the
+honest ceiling for this scope. A test that renders a lipgloss string and
+asserts "non-empty" verifies almost nothing; this package's actual
+golden-path coverage comes from running it in a real terminal (this
+session's own live-verification discipline, applied earlier in this
+document to the daemon/gateway/CLI wiring), not from asserting on ANSI
+byte soup. Deeper `Update()`/`Cmd` coverage — feeding real `tea.Msg`
+values into a `Model` and asserting on state transitions, without a
+rendering terminal — is a real, separate follow-up if this package's
+bug rate ever justifies the investment; not attempted here.
+
+Net result: aggregate coverage 44.1% → 53.3%
+(`go tool cover -func` over the whole module). Every package that had
+real, untested logic at 0% now has substantive coverage; the packages
+still at 0% (`cmd/kram`, `cmd/gateway`, `cmd/daemon`, `cmd/cli`,
+`devtools/*`, `evals`) are thin `main()` entry points or dev-only
+tooling with nothing to unit-test that isn't already covered where the
+real logic lives. Verified with the same baseline as every other change
+in this document: `gofmt -l .` clean, `go vet ./...` clean,
+`go test ./... -race` green across every package, and a Windows
+cross-compile of `cmd/kram` still succeeding.
+
 ## Boundaries
 
 Several things were deliberately not built. Recording them so they don't

@@ -11,8 +11,12 @@ import (
 	"time"
 )
 
+// openAIAuthBase is a var, not a const, so tests can point this flow's
+// HTTP calls at an httptest.Server instead of the real OpenAI endpoint —
+// nothing in production ever reassigns it.
+var openAIAuthBase = "https://auth.openai.com"
+
 const (
-	openAIAuthBase = "https://auth.openai.com"
 	// openAIClientID is OpenAI's own public OAuth client for "log in with
 	// ChatGPT" — confirmed by extracting it directly from a real shipping
 	// opencode build (same client_id, same endpoints, same flow shape

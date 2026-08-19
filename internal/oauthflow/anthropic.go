@@ -39,11 +39,17 @@ import (
 	"time"
 )
 
-const (
+// anthropicOAuthBase and anthropicAPIBase are vars, not consts, so tests
+// can point this flow's HTTP calls at an httptest.Server instead of the
+// real Anthropic endpoints — nothing in production ever reassigns them.
+var (
 	anthropicOAuthBase = "https://console.anthropic.com"
 	anthropicAPIBase   = "https://api.anthropic.com"
-	anthropicClientID  = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
-	anthropicScope     = "org:create_api_key user:profile user:inference"
+)
+
+const (
+	anthropicClientID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+	anthropicScope    = "org:create_api_key user:profile user:inference"
 )
 
 // AnthropicAuthorize starts the local callback listener and returns the
