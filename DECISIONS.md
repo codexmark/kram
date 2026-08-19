@@ -1866,10 +1866,180 @@ Also covered by two new table-driven-style tests in
 SSE server: one for each field name, so a regression in either direction
 gets caught without needing a live server.
 
+## Phase 1 hardening: making the fallback/retry story actually true end to end
+
+A deep architectural review (prompted directly by the two fixes above —
+the model-swap crash and the reasoning-field bug — reading as symptoms
+of a pattern, not two unrelated bugs) found the promise "Kram falls back
+across providers" broke down in several concrete, verified places. Every
+claim below was checked against the real code before acting on it — some
+turned out to be stale (an earlier `BoundedPeek` overall-time-ceiling the
+review cited had already been removed the same session) or need
+refining (a specific rejection path needed its own classification rather
+than reusing the generic one), which is itself worth recording: a review
+this size is worth verifying line by line, not applying wholesale.
+
+**The core problem**: every internal agent→gateway model call went
+through the streaming path (`ChatCompletionStream`), which commits to
+one candidate the instant `router.BoundedPeek` sees a meaningful first
+signal — HTTP headers go out, and if that candidate then dies mid-stream
+there is no more fallback for that request, full stop. Meanwhile
+kram-gateway's own *non-streaming* branch already tried every ranked
+candidate to completion before ever writing a byte back to its caller —
+a fully resilient path that already existed and was simply never the
+default. Fixed by flipping the default: `internal/daemon/agent`'s
+`callModel` now calls the buffered `ChatCompletion` unless
+`Config.PreferStreaming` opts back in. This also just restored what the
+package's own doc comment always claimed ("tool execution waits for a
+complete, non-streaming model response") — the streaming-only
+implementation had quietly drifted from its own documented design.
+Losing live per-token deltas risked the CLI's stall-warning misfiring on
+a longer buffered wait, but `model.go`'s stall clock already resets on
+*any* event type unconditionally, so a new payload-free `EventHeartbeat`
+ticking during the wait was enough — zero CLI changes needed. Live-
+verified against real gateway+daemon processes: a 9s buffered call
+produced 2 heartbeats (matching the interval) before the real
+`route_done`.
+
+**No retry existed anywhere.** One failed pass through a combo's ranked
+candidates was final — a 429 that would likely succeed a moment later
+got the exact same treatment as a permanently broken configuration.
+Fixed with `callModelWithRetry` (`internal/daemon/agent/retry.go`): up
+to `MaxGatewayRounds` (default 3) full fresh attempts, backoff+jitter
+between them (floored by a real `Retry-After` when the upstream sent
+one), gated on a new `FailureClass` taxonomy (`internal/openai/failure.go`)
+so a non-retryable failure (400, cancelled) fails immediately instead of
+burning rounds pointlessly. Runs entirely inside one turn-loop iteration
+— it never touches `MaxTurns`, since no new model decision happened.
+Re-ranking between rounds needed zero new gateway code: every
+`ChatCompletion` call already re-ranks fresh server-side, so a provider
+that tripped open in round 1 is automatically reflected in round 2.
+Live-verified: 2 real 500s from `mock-provider` produced visible retry
+notices with real exponential backoff (467ms, 954ms) before a real
+round-3 success.
+
+**The all-failed response was a flat string.** `"all providers in combo
+%q failed, last error: %v"` gave a caller no way to tell a `429` from a
+`400` without parsing English prose. `ErrorBody` gained `Combo,
+Retryable, RetryAfterMS, Cause, Attempts` (kram-gateway extensions,
+ignored by any standard OpenAI client), and `gatewayclient` decodes them
+into a typed `GatewayError` — falling back to the old flat-string
+behavior for any non-Kram OpenAI-compatible server's plain error, so
+`ChatCompletion` keeps working against those too.
+
+**A Kram-caused bug could poison a perfectly healthy provider's circuit
+breaker.** The real historical case: the Gemini `role:"function"` bug
+(see above) produced a `400`, and `markFailure` reported that to the
+breaker exactly like a genuine `500` would — a bug in Kram's own request
+construction taking a healthy upstream out of rotation. `FailureClass`
+distinguishes `ClassInvalidRequest` (Kram's fault, doesn't count) from
+real transport instability (does count) — with one refinement found by
+reading `chat.go` directly rather than trusting the review's framing: a
+`BoundedPeek` timeout or a `ResponseGate` rejection are *not* transport
+failures either (no real HTTP status, a synthetic wrapped reason
+string), so they get their own `markRejection` path, classified
+`ClassContentRejected` directly rather than run through `Classify` at
+all — running them through `Classify(0, err)` would have misclassified
+them as network failures. Live-verified: 4 consecutive real 400s from
+`mock-provider` left `breaker_open=false` in `/admin/status`; a genuine
+500 still trips it after 3.
+
+**The circuit breaker's half-open state wasn't actually single-flight.**
+The code's own comment claimed "only one trial in flight at a time" —
+`Allow`'s `halfOpen` case just returned `true` unconditionally for every
+caller. Fixed with a real `trialAt` gate (`internal/breaker/breaker.go`,
+which had zero test coverage before this — first test file added along
+with the fix), including a timeout safety net for a trial whose outcome
+never gets reported. The regression test spins 50 concurrent goroutines
+during half-open and asserts exactly one is admitted.
+
+**`BoundedPeek` was blind to tool-call progress.** All three provider
+adapters (not just the one originally suspected — `openai_compat.go`,
+`anthropic.go`, and `gemini.go` all had the identical bug) accumulate
+tool-call argument fragments into an internal buffer with zero matching
+`StreamEvent`. A provider streaming a long tool call's arguments with no
+leading text looked like dead silence and could get killed as stalled
+mid-work. New `StreamEvent.ToolCallProgress` gets the same treatment
+`Reasoning` already has — resets the idle timer *and* is exempt from
+`streamPeekMaxEvents`, not just counted (a naive fix that only reset the
+counter would still exhaust the budget on a long enough tool-call-only
+stream).
+
+**A `config.yaml` written once stayed frozen forever.** Once that file
+existed, `detectGatewayConfig` — the only function that re-scans
+`customprovider.Store`/credentials for anything added since — never ran
+again; a provider or account connected via the Accounts UI afterward was
+invisible until the file was hand-edited or deleted. `reconcileLiveProviders`
+(`cmd/kram/autodetect.go`) now additively merges anything new into a
+loaded file on every boot: appends missing providers by ID, appends them
+to the *end* of `DefaultCombo`'s list (lowest priority, so a hand-tuned
+ordering is never reshuffled), and touches nothing else. Live-verified:
+a hand-written config.yaml declaring only `anthropic`, plus a
+`custom_providers.json` entry absent from it, produced "reconciled
+newly-configured provider" log lines and a gateway with every live-
+credentialed provider actually built and routable.
+
+**A custom provider with no pinned model silently corrupted its own
+requests.** `req.Model` at the point any provider adapter reads it is
+always the *combo ID* for a Kram-originated call (`agent.Config.Model`'s
+own doc comment says so) — never a real upstream model name. The
+documented "passthrough" option (empty `Model` = forward whatever was
+asked) therefore never actually worked for any caller; it silently sent
+something like `{"model":"default"}` upstream. There is no real
+architecture anywhere that carries a genuine "requested upstream model"
+distinct from the combo selector, so building one wasn't in scope for a
+hardening pass — `customprovider.Store.Add` now requires a model, same
+as it already requires a name and URL. `SupportsTools` was also
+hardcoded `true` for every custom provider with no way to override it;
+now a real field (default `true`, matching today's behavior for the
+common case — most OpenAI-compatible local servers do support tool
+calling) with a toggle in the Accounts UI form.
+
+Also added along the way: `devtools/mock-provider` gained `-fail-status`,
+`-fail-first-n`, and `-retry-after-s` flags — every live-verification
+step above needed at least one of them, and building the knobs once up
+front avoided re-touching that file piecemeal per fix.
+
 ## Boundaries
 
 Several things were deliberately not built. Recording them so they don't
 get quietly re-litigated.
+
+### Phase 2 hardening items, deferred from the pass above
+
+All confirmed real during the same review, all explicitly pushed out to
+keep that pass reviewable and honor its own feature freeze (no new UI
+surface, no bigger architecture changes than the fixes strictly needed):
+
+- **Real `/models`-based capability verification for custom providers**
+  (parsing `providerping`'s already-issued `GET /models` response body,
+  a picker in the Accounts UI). The Model-required fix above already
+  closes the actual safety hole by construction; this would only be UX
+  polish on top of an already-safe baseline, and a picker is a new UI
+  surface the freeze rules out.
+- **`Retry-After` header parsing for `anthropic.go`/`gemini.go`** — only
+  `openai_compat.go` got it (Chunk 4), since that's the adapter behind
+  every free-tier/rate-limited provider Kram actually talks to in
+  practice. The other two degrade to computed backoff, a missed
+  optimization, not a correctness gap.
+- **Per-round `RouteTrace` detail.** Only the *last* Gateway Round's
+  attempts feed the structured route trace UI; earlier rounds are still
+  fully visible via `EventNotice`s and logs, just not in that view.
+  Concatenating every round's attempts with a round-boundary marker is a
+  real, reasonable follow-up, not a correctness fix.
+- **Smart telemetry rewrite** (EWMA/prior-smoothed reliability instead of
+  raw cumulative success rate, splitting TTFT from true end-to-end
+  latency instead of comparing streaming and buffered candidates on the
+  same number) — real, confirmed, but a ranking-quality improvement, not
+  a P0.
+- **OpenRouter account-level failure domains** in the breaker (three
+  catalog entries share one `OPENROUTER_API_KEY`, three independent
+  breaker keys) — real, confirmed, genuinely lower urgency than the P0s
+  above.
+- **A `scripts/verify.sh` regression harness** enforced pre-push. Every
+  fix in the pass above was still hand-run through `gofmt`/`go
+  vet`/`go test -race`/Windows cross-compile plus a live check each
+  time; automating that sequence is process tooling, not a code fix.
 
 ### No account rotation or provider evasion
 
