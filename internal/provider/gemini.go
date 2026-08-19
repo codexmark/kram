@@ -51,6 +51,9 @@ type geminiPart struct {
 	InlineData   *geminiInlineData   `json:"inlineData,omitempty"`
 	FunctionCall *geminiFunctionCall `json:"functionCall,omitempty"`
 	FunctionResp *geminiFunctionResp `json:"functionResponse,omitempty"`
+	// ThoughtSignature sits alongside FunctionCall, not inside it — see
+	// openai.ToolCall.GeminiThoughtSignature for why this exists at all.
+	ThoughtSignature string `json:"thoughtSignature,omitempty"`
 }
 
 type geminiInlineData struct {
@@ -91,8 +94,10 @@ type geminiRequest struct {
 
 // buildGeminiContents translates Kram's normalized messages into Gemini's
 // role/parts shape. Assistant tool calls become functionCall parts; tool
-// results (Kram's role:"tool") become a "function" role message carrying a
-// functionResponse part.
+// results (Kram's role:"tool") become a functionResponse part on a
+// "user" role message — confirmed live against the real API: "function"
+// is not a valid content role (Gemini rejects it outright), despite
+// matching the role name Kram's own normalized "tool" message uses.
 func buildGeminiContents(msgs []openai.ChatMessage) (system *geminiContent, out []geminiContent) {
 	for _, m := range msgs {
 		switch m.Role {
@@ -113,7 +118,7 @@ func buildGeminiContents(msgs []openai.ChatMessage) (system *geminiContent, out 
 				response = map[string]any{"result": m.Content}
 			}
 			out = append(out, geminiContent{
-				Role:  "function",
+				Role:  "user",
 				Parts: []geminiPart{{FunctionResp: &geminiFunctionResp{Name: m.Name, Response: response}}},
 			})
 
@@ -127,7 +132,10 @@ func buildGeminiContents(msgs []openai.ChatMessage) (system *geminiContent, out 
 				if len(args) == 0 {
 					args = json.RawMessage("{}")
 				}
-				parts = append(parts, geminiPart{FunctionCall: &geminiFunctionCall{Name: tc.Function.Name, Args: args}})
+				parts = append(parts, geminiPart{
+					FunctionCall:     &geminiFunctionCall{Name: tc.Function.Name, Args: args},
+					ThoughtSignature: tc.GeminiThoughtSignature,
+				})
 			}
 			out = append(out, geminiContent{Role: "model", Parts: parts})
 
@@ -258,6 +266,7 @@ func (p *Gemini) ChatCompletion(ctx context.Context, req openai.ChatCompletionRe
 								Name:      part.FunctionCall.Name,
 								Arguments: string(args),
 							},
+							GeminiThoughtSignature: part.ThoughtSignature,
 						})
 					}
 				}

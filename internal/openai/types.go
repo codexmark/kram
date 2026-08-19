@@ -45,6 +45,18 @@ type ToolCall struct {
 	ID       string           `json:"id"`
 	Type     string           `json:"type"` // always "function"
 	Function ToolCallFunction `json:"function"`
+	// GeminiThoughtSignature is opaque provider-specific state Gemini's
+	// thinking-enabled models attach to a function call — it must be
+	// echoed back verbatim on this exact call when the conversation
+	// continues, or Gemini rejects the request outright ("Function call
+	// is missing a thought_signature"). Empty for every other provider,
+	// and for Gemini responses from a non-thinking model. Kept on the
+	// shared ToolCall (rather than a Gemini-only side channel) because
+	// tool calls already round-trip through the daemon's session storage
+	// and back out to whichever provider serves the next turn — the
+	// value must survive that round-trip intact to be replayed, and
+	// there's nowhere else in the pipeline that would preserve it.
+	GeminiThoughtSignature string `json:"gemini_thought_signature,omitempty"`
 }
 
 // ToolCallFunction names the tool and carries its arguments as a raw JSON

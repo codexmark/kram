@@ -1656,6 +1656,49 @@ generation-capable liveness check per candidate model, not just
 presence in a catalog response, or it would inherit exactly this bug in
 a more automated, harder-to-notice form.
 
+### Gemini's tool-calling protocol had two more real bugs, both found from a real "all providers failed" log after the fixes above
+
+Reviewing a fresh real session log (after the fixes above had already
+shipped) showed a *different* Gemini failure — `400 Bad Request`, no
+longer the 404 from the retired model. Traced the same way as
+everything else in this section: reproduce the exact wire request the
+real conversation would have sent, against the real API.
+
+**`role: "function"` isn't valid.** `buildGeminiContents` sent tool
+results as `{"role": "function", ...}`, matching Kram's own internal
+"tool" role name — Gemini's real API rejects it outright: `"Role
+'function' is not supported... USER, ... MODEL."` Fixed to `"user"`,
+which is what Google's documented convention actually is; confirmed
+live, and confirmed separate (non-grouped) turns per tool result — one
+`user`-role content per result, matching Kram's existing per-message
+structure — are structurally accepted, so no restructuring was needed
+beyond the role name itself.
+
+**Thinking-enabled models require their `thoughtSignature` echoed
+back.** Past that, a second, different 400 appeared:
+`"Function call is missing a thought_signature."` Gemini's newer
+"thinking" models (the "latest" aliases pinned above default to this)
+attach an opaque signed blob to each `functionCall` part they emit, and
+require it echoed back unchanged on that exact call in later turns —
+skip it and the request is rejected outright. This is genuinely new
+provider-specific state with nowhere to live in Kram's existing
+pipeline, so `openai.ToolCall` gained a `GeminiThoughtSignature` field
+— it round-trips for free through the daemon's session storage, which
+already `json.Marshal`s `[]openai.ToolCall` directly with no
+intermediate stripped-down type. `gemini.go` now captures it off each
+streamed `functionCall` part and re-attaches it when rebuilding history
+for the next request.
+
+Both were live-verified with the real wire format before writing any
+Go — first via direct `curl` reproduction with a real, previously-issued
+signature (confirmed a real `200` only once the role was `user` *and*
+the real signature was echoed back correctly), then via the actual
+built binary: a fresh session, forced onto a Gemini-only combo, given a
+prompt that triggers three genuinely parallel tool calls
+(`list_dir`/`git_status`/`read_file`) — all three ran and Gemini
+correctly synthesized the final answer from their results, the exact
+shape of turn that used to 400 on every attempt.
+
 ## Boundaries
 
 Several things were deliberately not built. Recording them so they don't
