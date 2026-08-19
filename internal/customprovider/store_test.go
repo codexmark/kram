@@ -30,7 +30,7 @@ func TestAddGetRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	p, err := s.Add("Meu Servidor", "http://192.168.1.50:8080/v1", "llama-3")
+	p, err := s.Add("Meu Servidor", "http://192.168.1.50:8080/v1", "llama-3", true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -51,37 +51,57 @@ func TestAddGetRoundTrip(t *testing.T) {
 	}
 }
 
-func TestAddRequiresNameAndBaseURL(t *testing.T) {
+func TestAddRequiresNameBaseURLAndModel(t *testing.T) {
 	isolate(t)
 	s, _ := Load()
-	if _, err := s.Add("", "http://x", ""); err == nil {
+	if _, err := s.Add("", "http://x", "m", true); err == nil {
 		t.Error("expected an error for an empty name")
 	}
-	if _, err := s.Add("x", "", ""); err == nil {
+	if _, err := s.Add("x", "", "m", true); err == nil {
 		t.Error("expected an error for an empty base URL")
+	}
+	if _, err := s.Add("x", "http://x", "", true); err == nil {
+		t.Error("expected an error for an empty model — passthrough doesn't actually work (see Provider.Model's doc comment), so this must be rejected, not silently accepted")
 	}
 }
 
-func TestAddModelIsOptional(t *testing.T) {
+// TestSupportsToolsDefaultsTrueWhenNeverSet is the migration case: an
+// entry from before this field existed (or one loaded from raw JSON
+// without the key) must read as true, not false — the field's zero
+// value must never silently disable tool calling for an existing
+// registration.
+func TestSupportsToolsDefaultsTrueWhenNeverSet(t *testing.T) {
+	var p Provider
+	if !p.SupportsToolsOrDefault() {
+		t.Error("a Provider with SupportsTools never set should default to true")
+	}
+}
+
+func TestSupportsToolsExplicitFalseIsRespected(t *testing.T) {
 	isolate(t)
 	s, _ := Load()
-	p, err := s.Add("Local", "http://localhost:9099/v1", "")
+	p, err := s.Add("NoTools", "http://x", "m", false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if p.Model != "" {
-		t.Errorf("Model = %q, want empty (passthrough)", p.Model)
+	if p.SupportsToolsOrDefault() {
+		t.Error("explicitly setting supportsTools=false should be respected, not defaulted back to true")
+	}
+
+	reloaded, _ := Load()
+	if got := reloaded.All()[0]; got.SupportsToolsOrDefault() {
+		t.Error("supports_tools=false should survive a reload")
 	}
 }
 
 func TestDuplicateNamesGetDedupedIDs(t *testing.T) {
 	isolate(t)
 	s, _ := Load()
-	a, err := s.Add("Servidor", "http://a", "")
+	a, err := s.Add("Servidor", "http://a", "m", true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, err := s.Add("Servidor", "http://b", "")
+	b, err := s.Add("Servidor", "http://b", "m", true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -101,7 +121,7 @@ func TestDuplicateNamesGetDedupedIDs(t *testing.T) {
 func TestSlugifyHandlesSymbolsAndSpaces(t *testing.T) {
 	isolate(t)
 	s, _ := Load()
-	p, err := s.Add("LM Studio (casa) — GPU #1!", "http://x", "")
+	p, err := s.Add("LM Studio (casa) — GPU #1!", "http://x", "m", true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -113,7 +133,7 @@ func TestSlugifyHandlesSymbolsAndSpaces(t *testing.T) {
 func TestSlugifyFallsBackWhenNameHasNoAlnum(t *testing.T) {
 	isolate(t)
 	s, _ := Load()
-	p, err := s.Add("!!!", "http://x", "")
+	p, err := s.Add("!!!", "http://x", "m", true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -125,7 +145,7 @@ func TestSlugifyFallsBackWhenNameHasNoAlnum(t *testing.T) {
 func TestDelete(t *testing.T) {
 	isolate(t)
 	s, _ := Load()
-	p, _ := s.Add("Temp", "http://x", "")
+	p, _ := s.Add("Temp", "http://x", "m", true)
 	if err := s.Delete(p.ID); err != nil {
 		t.Fatal(err)
 	}
@@ -150,7 +170,7 @@ func TestDeleteUnknownIDIsNotAnError(t *testing.T) {
 func TestAllReturnsACopy(t *testing.T) {
 	isolate(t)
 	s, _ := Load()
-	_, _ = s.Add("A", "http://a", "")
+	_, _ = s.Add("A", "http://a", "m", true)
 
 	all := s.All()
 	all[0].Name = "tampered"
@@ -163,7 +183,7 @@ func TestAllReturnsACopy(t *testing.T) {
 func TestFilePermissions(t *testing.T) {
 	dir := isolate(t)
 	s, _ := Load()
-	if _, err := s.Add("A", "http://a", ""); err != nil {
+	if _, err := s.Add("A", "http://a", "m", true); err != nil {
 		t.Fatal(err)
 	}
 

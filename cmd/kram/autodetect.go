@@ -48,7 +48,7 @@ func loadStoredCredentials() {
 // existence in that store *is* the "configured" signal, since its API
 // key is optional (most local/LAN servers have no auth) and there's no
 // env var whose presence would otherwise say "use this one".
-func detectGatewayConfig(strategyOverride string, credStore *credentials.Store) (*config.Config, error) {
+func detectGatewayConfig(strategyOverride string, credStore *credentials.Store, logger *slog.Logger) (*config.Config, error) {
 	var providers []config.ProviderConfig
 	var ids []string
 
@@ -67,7 +67,13 @@ func detectGatewayConfig(strategyOverride string, credStore *credentials.Store) 
 
 	if customStore, err := customprovider.Load(); err == nil {
 		for _, cp := range customStore.All() {
-			pc := customProviderConfig(cp)
+			pc, ok := customProviderConfig(cp)
+			if !ok {
+				if logger != nil {
+					logger.Warn("skipping custom provider with no model configured", "id", cp.ID, "name", cp.Name)
+				}
+				continue
+			}
 			providers = append(providers, pc)
 			ids = append(ids, pc.ID)
 		}
@@ -116,15 +122,24 @@ func catalogProviderConfig(p providercatalog.Provider, credStore *credentials.St
 }
 
 // customProviderConfig builds the config.ProviderConfig for one
-// registered custom provider — unconditional, unlike a catalog entry:
-// existence in the store *is* the "configured" signal (see
-// detectGatewayConfig's doc comment). Shared with reconcileLiveProviders
-// for the same reason catalogProviderConfig is.
-func customProviderConfig(cp customprovider.Provider) config.ProviderConfig {
+// registered custom provider — ok is false only for a custom provider
+// with no model configured. That's no longer possible to create through
+// customprovider.Store.Add (it now requires one — see Provider.Model's
+// doc comment), but this stays defensive for an entry saved before that
+// validation existed: skipping it is far safer than forwarding a
+// combo's internal routing ID upstream as a fake model name, which is
+// what used to happen silently. Otherwise unconditional, unlike a
+// catalog entry: existence in the store *is* the "configured" signal
+// (see detectGatewayConfig's doc comment). Shared with
+// reconcileLiveProviders for the same reason catalogProviderConfig is.
+func customProviderConfig(cp customprovider.Provider) (config.ProviderConfig, bool) {
+	if cp.Model == "" {
+		return config.ProviderConfig{}, false
+	}
 	return config.ProviderConfig{
 		ID: "custom-" + cp.ID, Kind: "openai-compat", BaseURL: cp.BaseURL, APIKeyEnv: cp.EnvVar,
-		Model: cp.Model, SupportsTools: true, KeyOptional: true,
-	}
+		Model: cp.Model, SupportsTools: cp.SupportsToolsOrDefault(), KeyOptional: true,
+	}, true
 }
 
 // reconcileLiveProviders additively merges any providercatalog entry now
@@ -167,7 +182,11 @@ func reconcileLiveProviders(cfg *config.Config, credStore *credentials.Store, lo
 			if existing[id] {
 				continue
 			}
-			added = append(added, customProviderConfig(cp))
+			if pc, ok := customProviderConfig(cp); ok {
+				added = append(added, pc)
+			} else if logger != nil {
+				logger.Warn("skipping custom provider with no model configured", "id", cp.ID, "name", cp.Name)
+			}
 		}
 	}
 	if len(added) == 0 {

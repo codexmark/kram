@@ -1,11 +1,14 @@
 package main
 
 import (
+	"encoding/json"
 	"log/slog"
+	"os"
 	"testing"
 
 	"github.com/codexmark/kram/internal/config"
 	"github.com/codexmark/kram/internal/customprovider"
+	"github.com/codexmark/kram/internal/kramhome"
 	"github.com/codexmark/kram/internal/providercatalog"
 )
 
@@ -34,7 +37,7 @@ func TestReconcileLiveProvidersAddsNewCustomProvider(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cp, err := customStore.Add("lab", "http://127.0.0.1:9999/v1", "some-model")
+	cp, err := customStore.Add("lab", "http://127.0.0.1:9999/v1", "some-model", true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,6 +131,60 @@ func TestReconcileLiveProvidersAddsCatalogProviderWithNewCredential(t *testing.T
 	}
 	if !found {
 		t.Fatalf("expected anthropic to be reconciled in now that its env var is set, got %+v", got.Providers)
+	}
+}
+
+// TestCustomProviderConfigSkipsEmptyModel is the defense-in-depth case:
+// customprovider.Store.Add rejects an empty model today, but an entry
+// saved before that validation existed could still have one on disk —
+// customProviderConfig (shared by detectGatewayConfig and
+// reconcileLiveProviders) must skip it rather than build a
+// ProviderConfig that would forward a bogus model name upstream.
+func TestCustomProviderConfigSkipsEmptyModel(t *testing.T) {
+	_, ok := customProviderConfig(customprovider.Provider{ID: "legacy", Name: "legacy", BaseURL: "http://x", Model: ""})
+	if ok {
+		t.Error("expected a custom provider with no model configured to be skipped")
+	}
+}
+
+// TestReconcileLiveProvidersSkipsCustomProviderWithNoModel confirms the
+// same defense-in-depth skip applies through the reconciliation path,
+// not just the fresh-build path — with a warning, not a fatal error.
+func TestReconcileLiveProvidersSkipsCustomProviderWithNoModel(t *testing.T) {
+	isolateReconcileTest(t)
+	customStore, err := customprovider.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Add a valid entry, then hand-corrupt it to simulate a pre-validation
+	// legacy record with no model — Store.Add itself no longer allows
+	// creating one.
+	if _, err := customStore.Add("legacy", "http://x", "placeholder", true); err != nil {
+		t.Fatal(err)
+	}
+	entries := customStore.All()
+	entries[0].Model = ""
+	corrupted, err := json.Marshal(entries)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path, err := kramhome.Path("custom_providers.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, corrupted, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.Config{
+		Providers:    []config.ProviderConfig{{ID: "anthropic", Kind: "anthropic", APIKeyEnv: "ANTHROPIC_API_KEY"}},
+		Combos:       []config.ComboConfig{{ID: "default", Strategy: "priority", Providers: []string{"anthropic"}}},
+		DefaultCombo: "default",
+	}
+	got := reconcileLiveProviders(cfg, nil, slog.New(slog.DiscardHandler))
+
+	if len(got.Providers) != 1 {
+		t.Errorf("expected the model-less custom provider to be skipped, got %d providers: %+v", len(got.Providers), got.Providers)
 	}
 }
 

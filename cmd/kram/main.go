@@ -127,7 +127,7 @@ func run(opts runOptions) error {
 			workspace = result.Workspace
 			loadStoredCredentials() // pick up whatever the wizard's provider step just saved, before building the config below
 
-			cfgToSave, err := detectGatewayConfig(result.Strategy, credStore)
+			cfgToSave, err := detectGatewayConfig(result.Strategy, credStore, nil) // no logger yet this early in run() — see the one further down for why nil is safe here
 			if err != nil {
 				return fmt.Errorf("building config after setup: %w", err)
 			}
@@ -391,7 +391,7 @@ func loadOrDetectGatewayConfig(path string, port int, strategyOverride string, w
 		}
 	}
 
-	cfg, err := detectGatewayConfig(strategyOverride, credStore)
+	cfg, err := detectGatewayConfig(strategyOverride, credStore, logger)
 	if err != nil {
 		return nil, err
 	}

@@ -257,9 +257,9 @@ func (m Model) renderAccounts() string {
 	return b.String()
 }
 
-// customFormLabels are the four fields of the "add custom provider" form,
-// in cursor order.
-var customFormLabels = []string{"nome", "url", "api key (opcional)", "modelo (opcional)"}
+// customFormLabels are the fields of the "add custom provider" form, in
+// cursor order.
+var customFormLabels = []string{"nome", "url", "api key (opcional)", "modelo", "aceita tool calling? (s/n)"}
 
 // renderCustomProviderForm draws the "+ add custom" form — a plain
 // multi-field prompt in the same spirit as the single-field key-paste
@@ -543,11 +543,34 @@ func newCustomProviderFormInputs() []textinput.Model {
 	key := newAccountsKeyInput()
 
 	model := textinput.New()
-	model.Placeholder = "(vazio = repassa o que for pedido)"
+	model.Placeholder = "llama-3, gpt-oss-20b, etc."
 	model.CharLimit = 200
 	model.Prompt = "› "
 
-	return []textinput.Model{name, url, key, model}
+	// SupportsTools defaults to true (most OpenAI-compat local servers —
+	// llama.cpp, LM Studio, vLLM, Ollama — do support tool calling), so
+	// this field starts pre-filled "s" (sim) rather than empty — a user
+	// who wants the common case just tabs past it.
+	tools := textinput.New()
+	tools.SetValue("s")
+	tools.CharLimit = 3
+	tools.Prompt = "› "
+
+	return []textinput.Model{name, url, key, model, tools}
+}
+
+// parseSupportsToolsInput reads the custom-provider form's "aceita tool
+// calling?" field leniently — empty or anything starting with "s"/"y"
+// (sim/yes) is true, anything starting with "n" (não/no) is false;
+// unrecognized input also defaults true, matching the field's own
+// pre-filled default rather than silently disabling tool calling on a
+// typo.
+func parseSupportsToolsInput(s string) bool {
+	s = strings.ToLower(strings.TrimSpace(s))
+	if strings.HasPrefix(s, "n") {
+		return false
+	}
+	return true
 }
 
 // handleCustomProviderFormKey drives the "+ add custom" form: tab/shift+tab
@@ -576,12 +599,13 @@ func (m Model) handleCustomProviderFormKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) 
 		url := strings.TrimSpace(m.customFormInputs[1].Value())
 		key := strings.TrimSpace(m.customFormInputs[2].Value())
 		model := strings.TrimSpace(m.customFormInputs[3].Value())
+		supportsTools := parseSupportsToolsInput(m.customFormInputs[4].Value())
 
 		if m.customStore == nil {
 			m.accountsStatus = "erro: armazenamento local indisponível."
 			return m, nil
 		}
-		cp, err := m.customStore.Add(name, url, model)
+		cp, err := m.customStore.Add(name, url, model, supportsTools)
 		if err != nil {
 			m.accountsStatus = err.Error()
 			return m, nil

@@ -96,7 +96,7 @@ func TestDeleteKeyRemovesCustomProvider(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cp, err := customStore.Add("lab", "http://192.168.0.4:20128/v1", "omni.codexmark")
+	cp, err := customStore.Add("lab", "http://192.168.0.4:20128/v1", "omni.codexmark", true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -137,7 +137,7 @@ func TestDeleteKeyOnAddRowIsANoOp(t *testing.T) {
 	isolateAccountsTest(t)
 	credStore, _ := credentials.Load()
 	customStore, _ := customprovider.Load()
-	cp, _ := customStore.Add("lab", "http://x", "")
+	cp, _ := customStore.Add("lab", "http://x", "m", true)
 	_ = credStore.Set(cp.EnvVar, "sk-lab")
 
 	staticCount := len(providercatalog.Accounts)
@@ -187,7 +187,7 @@ func TestDeleteKeyOnCustomProviderWorksDuringWizardSetup(t *testing.T) {
 	isolateAccountsTest(t)
 	credStore, _ := credentials.Load()
 	customStore, _ := customprovider.Load()
-	cp, _ := customStore.Add("lab", "http://x", "")
+	cp, _ := customStore.Add("lab", "http://x", "m", true)
 	_ = credStore.Set(cp.EnvVar, "sk-lab")
 
 	staticCount := len(providercatalog.Accounts)
@@ -200,5 +200,70 @@ func TestDeleteKeyOnCustomProviderWorksDuringWizardSetup(t *testing.T) {
 
 	if len(got.customProviders) != 0 {
 		t.Error("a custom provider added mid-wizard should be deletable mid-wizard too")
+	}
+}
+
+// TestCustomProviderFormRejectsEmptyModel is the live-UI counterpart of
+// customprovider.Store.Add's own validation: submitting the "+ add
+// custom" form with the model field left blank must show a visible
+// error and must not register a broken provider, matching the
+// underlying store's now-required model.
+func TestCustomProviderFormRejectsEmptyModel(t *testing.T) {
+	isolateAccountsTest(t)
+	customStore, err := customprovider.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := Model{
+		customStore: customStore, accountsAddingCustom: true,
+		customFormInputs: newCustomProviderFormInputs(), customFormCursor: 0,
+	}
+	m.customFormInputs[0].SetValue("lab")
+	m.customFormInputs[1].SetValue("http://127.0.0.1:9099/v1")
+	// field 3 (model) left blank on purpose
+
+	next, _ := m.handleAccountsKey(keyMsg("enter"))
+	got := next.(Model)
+
+	if !got.accountsAddingCustom {
+		t.Error("the form should stay open after a validation error, not close as if it succeeded")
+	}
+	if got.accountsStatus == "" {
+		t.Error("expected a visible validation error for the empty model field")
+	}
+	if len(customStore.All()) != 0 {
+		t.Errorf("expected no provider to be registered, got %d", len(customStore.All()))
+	}
+}
+
+// TestCustomProviderFormRespectsSupportsToolsToggle confirms the new
+// fifth field actually reaches the store, in both directions.
+func TestCustomProviderFormRespectsSupportsToolsToggle(t *testing.T) {
+	isolateAccountsTest(t)
+	customStore, err := customprovider.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := Model{
+		customStore: customStore, accountsAddingCustom: true,
+		customFormInputs: newCustomProviderFormInputs(), customFormCursor: 0,
+	}
+	m.customFormInputs[0].SetValue("lab")
+	m.customFormInputs[1].SetValue("http://127.0.0.1:9099/v1")
+	m.customFormInputs[3].SetValue("some-model")
+	m.customFormInputs[4].SetValue("n") // não — this server can't do tool calling
+
+	next, _ := m.handleAccountsKey(keyMsg("enter"))
+	got := next.(Model)
+	if got.accountsAddingCustom {
+		t.Fatalf("expected the form to close after a valid submission, status: %q", got.accountsStatus)
+	}
+
+	all := customStore.All()
+	if len(all) != 1 {
+		t.Fatalf("expected 1 registered provider, got %d", len(all))
+	}
+	if all[0].SupportsToolsOrDefault() {
+		t.Error("expected SupportsTools=false to be respected from the form's 'n' input")
 	}
 }

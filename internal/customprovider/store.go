@@ -33,10 +33,31 @@ type Provider struct {
 	BaseURL string `json:"base_url"` // e.g. "http://192.168.1.50:8080/v1"
 	EnvVar  string `json:"env_var"`  // lookup key into credentials.Store for the (optional) API key
 	// Model pins the upstream model ID, matching every other catalog
-	// provider's DefaultModel — empty means passthrough (the request's
-	// own "model" field is forwarded as-is), useful when the server only
-	// ever serves whatever single model it has loaded.
-	Model string `json:"model,omitempty"`
+	// provider's DefaultModel. Required, unlike a catalog provider's
+	// DefaultModel (which is always populated by Kram itself) — Add
+	// rejects an empty value. Genuine passthrough (forwarding whatever
+	// the request's own "model" field says) doesn't actually work today:
+	// that field is the *combo ID* for any Kram-originated call, never a
+	// real upstream model name, so an unpinned custom provider used to
+	// silently receive something like "default" as its model — a real
+	// bug, not a supported mode. See DECISIONS.md.
+	Model string `json:"model"`
+	// SupportsTools records whether this server accepts tool/function
+	// definitions — a pointer so "never explicitly set" (every entry
+	// created before this field existed) is distinguishable from "set to
+	// false", matching AttemptInfo.Score's pattern elsewhere in this
+	// codebase. Defaults to true (see SupportsToolsOrDefault) since most
+	// OpenAI-compatible local servers (llama.cpp, LM Studio, vLLM,
+	// Ollama) do support tool calling — this exists so a user whose
+	// server genuinely can't has a way to say so, instead of Kram
+	// silently sending tool definitions a server can't handle.
+	SupportsTools *bool `json:"supports_tools,omitempty"`
+}
+
+// SupportsToolsOrDefault reports p.SupportsTools' value, or true if it
+// was never explicitly set — see that field's doc comment.
+func (p Provider) SupportsToolsOrDefault() bool {
+	return p.SupportsTools == nil || *p.SupportsTools
 }
 
 // Store holds every registered custom provider, in registration order.
@@ -75,25 +96,32 @@ func (s *Store) All() []Provider {
 }
 
 // Add registers a new custom provider, deriving a stable ID (and the
-// credentials-store EnvVar that goes with it) from name. name and
-// baseURL are required; model is optional. Persists immediately.
-func (s *Store) Add(name, baseURL, model string) (Provider, error) {
+// credentials-store EnvVar that goes with it) from name. name, baseURL
+// and model are all required — see Provider.Model's doc comment for why
+// an empty model isn't a supported "passthrough" mode. Persists
+// immediately.
+func (s *Store) Add(name, baseURL, model string, supportsTools bool) (Provider, error) {
 	name = strings.TrimSpace(name)
 	baseURL = strings.TrimSpace(baseURL)
+	model = strings.TrimSpace(model)
 	if name == "" {
 		return Provider{}, fmt.Errorf("custom provider name is required")
 	}
 	if baseURL == "" {
 		return Provider{}, fmt.Errorf("custom provider URL is required")
 	}
+	if model == "" {
+		return Provider{}, fmt.Errorf("custom provider model is required — Kram cannot forward the combo's internal routing id upstream as a substitute")
+	}
 
 	id := s.uniqueID(slugify(name))
 	p := Provider{
-		ID:      id,
-		Name:    name,
-		BaseURL: baseURL,
-		EnvVar:  envVarFor(id),
-		Model:   strings.TrimSpace(model),
+		ID:            id,
+		Name:          name,
+		BaseURL:       baseURL,
+		EnvVar:        envVarFor(id),
+		Model:         model,
+		SupportsTools: &supportsTools,
 	}
 	s.entries = append(s.entries, p)
 	if err := s.save(); err != nil {
