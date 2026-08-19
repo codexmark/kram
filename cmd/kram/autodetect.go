@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 
 	"github.com/codexmark/kram/internal/config"
@@ -53,23 +54,12 @@ func detectGatewayConfig(strategyOverride string, credStore *credentials.Store) 
 
 	havePaid := false
 	for _, p := range providercatalog.Providers {
-		key := os.Getenv(p.EnvVar)
-		authMode := ""
-		if key == "" {
-			if credStore == nil {
-				continue
-			}
-			if _, ok := credStore.GetOAuth(p.EnvVar); !ok {
-				continue
-			}
-			authMode = "oauth"
+		pc, ok := catalogProviderConfig(p, credStore)
+		if !ok {
+			continue
 		}
-		providers = append(providers, config.ProviderConfig{
-			ID: p.ID, Kind: p.Kind, BaseURL: p.BaseURL, APIKeyEnv: p.EnvVar,
-			Model: p.DefaultModel, SupportsImages: p.SupportsImages, SupportsTools: p.SupportsTools,
-			AuthMode: authMode,
-		})
-		ids = append(ids, p.ID)
+		providers = append(providers, pc)
+		ids = append(ids, pc.ID)
 		if !p.FreeTier {
 			havePaid = true
 		}
@@ -77,12 +67,9 @@ func detectGatewayConfig(strategyOverride string, credStore *credentials.Store) 
 
 	if customStore, err := customprovider.Load(); err == nil {
 		for _, cp := range customStore.All() {
-			id := "custom-" + cp.ID
-			providers = append(providers, config.ProviderConfig{
-				ID: id, Kind: "openai-compat", BaseURL: cp.BaseURL, APIKeyEnv: cp.EnvVar,
-				Model: cp.Model, SupportsTools: true, KeyOptional: true,
-			})
-			ids = append(ids, id)
+			pc := customProviderConfig(cp)
+			providers = append(providers, pc)
+			ids = append(ids, pc.ID)
 		}
 	}
 
@@ -100,6 +87,113 @@ func detectGatewayConfig(strategyOverride string, credStore *credentials.Store) 
 		Combos:       []config.ComboConfig{{ID: "default", Strategy: strategy, Providers: ids}},
 		DefaultCombo: "default",
 	}, nil
+}
+
+// catalogProviderConfig builds the config.ProviderConfig for one catalog
+// entry if it currently has a real credential available (a real env var,
+// or a refreshable OAuth token in credStore) — ok is false if neither is
+// present, meaning this provider isn't currently usable and shouldn't be
+// added anywhere. Shared between detectGatewayConfig (the fresh-build
+// path) and reconcileLiveProviders (the additive-merge path for an
+// already-loaded config.yaml), so both stay in sync automatically.
+func catalogProviderConfig(p providercatalog.Provider, credStore *credentials.Store) (config.ProviderConfig, bool) {
+	key := os.Getenv(p.EnvVar)
+	authMode := ""
+	if key == "" {
+		if credStore == nil {
+			return config.ProviderConfig{}, false
+		}
+		if _, ok := credStore.GetOAuth(p.EnvVar); !ok {
+			return config.ProviderConfig{}, false
+		}
+		authMode = "oauth"
+	}
+	return config.ProviderConfig{
+		ID: p.ID, Kind: p.Kind, BaseURL: p.BaseURL, APIKeyEnv: p.EnvVar,
+		Model: p.DefaultModel, SupportsImages: p.SupportsImages, SupportsTools: p.SupportsTools,
+		AuthMode: authMode,
+	}, true
+}
+
+// customProviderConfig builds the config.ProviderConfig for one
+// registered custom provider — unconditional, unlike a catalog entry:
+// existence in the store *is* the "configured" signal (see
+// detectGatewayConfig's doc comment). Shared with reconcileLiveProviders
+// for the same reason catalogProviderConfig is.
+func customProviderConfig(cp customprovider.Provider) config.ProviderConfig {
+	return config.ProviderConfig{
+		ID: "custom-" + cp.ID, Kind: "openai-compat", BaseURL: cp.BaseURL, APIKeyEnv: cp.EnvVar,
+		Model: cp.Model, SupportsTools: true, KeyOptional: true,
+	}
+}
+
+// reconcileLiveProviders additively merges any providercatalog entry now
+// backed by a real credential, and any registered internal/customprovider
+// entry, that isn't already present in cfg's Providers by ID, into cfg —
+// without touching any field on a Provider entry that's already there,
+// and without touching Strategy, StrategyOptions, Response, or any combo
+// besides appending to DefaultCombo's own Providers list. This is what
+// makes an account or custom provider added via the Accounts UI *after*
+// a config.yaml already existed actually take effect on the next boot,
+// instead of staying invisible until the file is hand-edited or deleted
+// — the bug this function exists to fix. Every newly-added provider is
+// appended to the *end* of DefaultCombo's list (lowest priority), a
+// deliberately conservative choice: it can only ever win once every
+// hand-configured provider in that combo is unhealthy, so a hand-tuned
+// priority ordering is never silently reshuffled. If cfg has nothing new
+// to add, cfg is returned unchanged (no spurious copy, no log lines).
+//
+// Not called for the pure-autodetect fallback tier (no file was loaded
+// at all) — that path already calls detectGatewayConfig fresh on every
+// boot and has nothing stale to reconcile against.
+func reconcileLiveProviders(cfg *config.Config, credStore *credentials.Store, logger *slog.Logger) *config.Config {
+	existing := make(map[string]bool, len(cfg.Providers))
+	for _, pc := range cfg.Providers {
+		existing[pc.ID] = true
+	}
+
+	var added []config.ProviderConfig
+	for _, p := range providercatalog.Providers {
+		if existing[p.ID] {
+			continue
+		}
+		if pc, ok := catalogProviderConfig(p, credStore); ok {
+			added = append(added, pc)
+		}
+	}
+	if customStore, err := customprovider.Load(); err == nil {
+		for _, cp := range customStore.All() {
+			id := "custom-" + cp.ID
+			if existing[id] {
+				continue
+			}
+			added = append(added, customProviderConfig(cp))
+		}
+	}
+	if len(added) == 0 {
+		return cfg
+	}
+
+	reconciled := *cfg
+	reconciled.Providers = append(append([]config.ProviderConfig{}, cfg.Providers...), added...)
+	reconciled.Combos = append([]config.ComboConfig{}, cfg.Combos...)
+	for i, combo := range reconciled.Combos {
+		if combo.ID != reconciled.DefaultCombo {
+			continue
+		}
+		ids := append([]string{}, combo.Providers...)
+		for _, pc := range added {
+			ids = append(ids, pc.ID)
+		}
+		reconciled.Combos[i].Providers = ids
+	}
+
+	if logger != nil {
+		for _, pc := range added {
+			logger.Info("reconciled newly-configured provider into existing config.yaml", "id", pc.ID, "kind", pc.Kind)
+		}
+	}
+	return &reconciled
 }
 
 // autoStrategy picks how the auto-built combo routes, and the two cases

@@ -199,7 +199,7 @@ func run(opts runOptions) error {
 	// wizard already called this above.
 	loadStoredCredentials()
 
-	gwCfg, err := loadOrDetectGatewayConfig(opts.gatewayConfigPath, opts.gatewayPort, opts.strategy, absWorkspace, credStore)
+	gwCfg, err := loadOrDetectGatewayConfig(opts.gatewayConfigPath, opts.gatewayPort, opts.strategy, absWorkspace, credStore, logger)
 	if err != nil {
 		return err
 	}
@@ -348,12 +348,22 @@ func freePort() (int, error) {
 // replaces the auto-detected combo's strategy (see -strategy); ignored
 // when an explicit -config file is given, since that file already picks
 // its own strategy per combo.
-func loadOrDetectGatewayConfig(path string, port int, strategyOverride string, workspace string, credStore *credentials.Store) (*config.Config, error) {
+//
+// Every branch that loads an existing file (explicit -config, workspace-
+// local, or global) runs it through reconcileLiveProviders first: a
+// config.yaml written once by an earlier wizard run would otherwise stay
+// frozen forever — a provider or account added via the Accounts UI
+// afterward is invisible until the file is hand-edited or deleted. The
+// pure-autodetect fallback below doesn't need this: it already calls
+// detectGatewayConfig fresh on every boot, so there's nothing stale to
+// reconcile against.
+func loadOrDetectGatewayConfig(path string, port int, strategyOverride string, workspace string, credStore *credentials.Store, logger *slog.Logger) (*config.Config, error) {
 	if path != "" {
 		cfg, err := config.Load(path)
 		if err != nil {
 			return nil, fmt.Errorf("loading gateway config: %w", err)
 		}
+		cfg = reconcileLiveProviders(cfg, credStore, logger)
 		if port != 0 {
 			cfg.Port = port
 		}
@@ -371,13 +381,13 @@ func loadOrDetectGatewayConfig(path string, port int, strategyOverride string, w
 	if workspaceCfg, ok, err := loadConfigIfExists(filepath.Join(workspace, ".kram", "config.yaml")); err != nil {
 		return nil, err
 	} else if ok {
-		return finalizeFileConfig(workspaceCfg, port)
+		return finalizeFileConfig(reconcileLiveProviders(workspaceCfg, credStore, logger), port)
 	}
 	if globalPath, err := kramhome.Path("config.yaml"); err == nil {
 		if globalCfg, ok, err := loadConfigIfExists(globalPath); err != nil {
 			return nil, err
 		} else if ok {
-			return finalizeFileConfig(globalCfg, port)
+			return finalizeFileConfig(reconcileLiveProviders(globalCfg, credStore, logger), port)
 		}
 	}
 
