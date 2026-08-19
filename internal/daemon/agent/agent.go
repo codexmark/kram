@@ -61,6 +61,13 @@ type Config struct {
 	// Workspace is the project root — used to load AGENTS.md/CLAUDE.md as
 	// persistent project context, injected into every turn.
 	Workspace string
+	// MaxGatewayRounds bounds how many times callModelWithRetry retries a
+	// whole gateway call (a fresh ranked-candidate pass) after a
+	// retryable GatewayError, before giving up — see retry.go. Runs
+	// entirely inside one iteration of runLoop's turn loop, so retrying
+	// never consumes MaxTurns: no new logical decision by the model
+	// happened, just another attempt at the same one. Default 3.
+	MaxGatewayRounds int
 	// PreferStreaming opts a session back into the streaming gateway
 	// call path (see streamCall) instead of the buffered default (see
 	// bufferedCall). Streaming commits to one candidate the moment
@@ -85,6 +92,9 @@ func (c Config) withDefaults() Config {
 	}
 	if c.MaxContextTokens <= 0 {
 		c.MaxContextTokens = compaction.DefaultMaxTokens
+	}
+	if c.MaxGatewayRounds <= 0 {
+		c.MaxGatewayRounds = defaultMaxGatewayRounds
 	}
 	return c
 }
@@ -493,7 +503,7 @@ func (s *Service) runLoop(ctx context.Context, sessionID, model string, depth in
 		}
 
 		emit(onEvent, Event{Kind: EventRouteStart})
-		callResult, err := s.callModel(ctx, model, modelMessages, toolDefs, onEvent)
+		callResult, err := s.callModelWithRetry(ctx, model, modelMessages, toolDefs, onEvent)
 		if err != nil {
 			return RunResult{}, fmt.Errorf("gateway call failed: %w", err)
 		}
