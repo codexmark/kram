@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/codexmark/kram/internal/breaker"
 	"github.com/codexmark/kram/internal/config"
@@ -348,6 +349,78 @@ func TestResponseGateRejectionStillPoisonsBreaker(t *testing.T) {
 
 	if !breakers.IsOpen("p1") {
 		t.Error("a ResponseGate rejection (RequireTerminal, no Done ever seen) should still poison the breaker after breakerFailureThreshold rejections")
+	}
+}
+
+// TestAllProvidersFailedReturnsStructuredGatewayError is the regression
+// test for the old flat-string-only error: a caller must be able to
+// decode Combo/Retryable/Cause/Attempts, not just parse an English
+// sentence, to make a real retry decision.
+func TestAllProvidersFailedReturnsStructuredGatewayError(t *testing.T) {
+	s, _ := newBufferedTestServer(t, []provider.StreamEvent{
+		{Err: &provider.HTTPError{Provider: "p1", StatusCode: 500, Status: "500 Internal Server Error"}},
+	})
+
+	rec := postBufferedChat(t, s)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadGateway)
+	}
+	var errResp openai.ErrorResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &errResp); err != nil {
+		t.Fatalf("decoding error response: %v", err)
+	}
+	if errResp.Error.Combo != "default" {
+		t.Errorf("Combo = %q, want %q", errResp.Error.Combo, "default")
+	}
+	if !errResp.Error.Retryable {
+		t.Error("Retryable = false, want true for a 500 (ClassServerError)")
+	}
+	if errResp.Error.Cause != openai.ClassServerError {
+		t.Errorf("Cause = %q, want %q", errResp.Error.Cause, openai.ClassServerError)
+	}
+	if len(errResp.Error.Attempts) != 1 {
+		t.Fatalf("Attempts = %d entries, want 1: %+v", len(errResp.Error.Attempts), errResp.Error.Attempts)
+	}
+	if errResp.Error.Attempts[0].HTTPStatus != 500 {
+		t.Errorf("Attempts[0].HTTPStatus = %d, want 500", errResp.Error.Attempts[0].HTTPStatus)
+	}
+}
+
+// TestAllProvidersFailedWithInvalidRequestIsNotRetryable confirms the
+// "last attempt's class wins" rule produces the right verdict for a
+// non-retryable terminal failure.
+func TestAllProvidersFailedWithInvalidRequestIsNotRetryable(t *testing.T) {
+	s, _ := newBufferedTestServer(t, []provider.StreamEvent{
+		{Err: &provider.HTTPError{Provider: "p1", StatusCode: 400, Status: "400 Bad Request"}},
+	})
+
+	rec := postBufferedChat(t, s)
+	var errResp openai.ErrorResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &errResp); err != nil {
+		t.Fatalf("decoding error response: %v", err)
+	}
+	if errResp.Error.Retryable {
+		t.Error("Retryable = true, want false for a 400 (ClassInvalidRequest)")
+	}
+	if errResp.Error.Cause != openai.ClassInvalidRequest {
+		t.Errorf("Cause = %q, want %q", errResp.Error.Cause, openai.ClassInvalidRequest)
+	}
+}
+
+// TestAllProvidersFailedCarriesRetryAfter confirms a real Retry-After
+// from the upstream survives all the way to the wire response.
+func TestAllProvidersFailedCarriesRetryAfter(t *testing.T) {
+	s, _ := newBufferedTestServer(t, []provider.StreamEvent{
+		{Err: &provider.HTTPError{Provider: "p1", StatusCode: 429, Status: "429 Too Many Requests", RetryAfter: 7 * time.Second}},
+	})
+
+	rec := postBufferedChat(t, s)
+	var errResp openai.ErrorResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &errResp); err != nil {
+		t.Fatalf("decoding error response: %v", err)
+	}
+	if errResp.Error.RetryAfterMS != 7000 {
+		t.Errorf("RetryAfterMS = %d, want 7000", errResp.Error.RetryAfterMS)
 	}
 }
 

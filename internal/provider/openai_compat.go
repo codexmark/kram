@@ -6,10 +6,28 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/codexmark/kram/internal/openai"
 )
+
+// parseRetryAfter reads the seconds form of a Retry-After header value
+// (e.g. "30") into a duration — the HTTP-date form ("Wed, 21 Oct 2015
+// 07:28:00 GMT") is rare enough from the OpenAI-compatible providers
+// Kram actually talks to that it's deliberately not handled here; an
+// empty or unparseable value returns zero, and callers already treat
+// zero as "no hint, use a computed backoff instead."
+func parseRetryAfter(header string) time.Duration {
+	if header == "" {
+		return 0
+	}
+	seconds, err := strconv.Atoi(header)
+	if err != nil || seconds < 0 {
+		return 0
+	}
+	return time.Duration(seconds) * time.Second
+}
 
 // OpenAICompatible talks to any backend that already speaks the OpenAI
 // chat-completions wire format: OpenAI itself, OpenRouter, opencode zen,
@@ -106,7 +124,10 @@ func (p *OpenAICompatible) ChatCompletion(ctx context.Context, req openai.ChatCo
 	}
 	if resp.StatusCode >= 400 {
 		defer resp.Body.Close()
-		return nil, &HTTPError{Provider: p.id, StatusCode: resp.StatusCode, Status: resp.Status}
+		return nil, &HTTPError{
+			Provider: p.id, StatusCode: resp.StatusCode, Status: resp.Status,
+			RetryAfter: parseRetryAfter(resp.Header.Get("Retry-After")),
+		}
 	}
 
 	events := make(chan StreamEvent, 16)

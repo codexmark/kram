@@ -6,6 +6,7 @@ package provider
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/codexmark/kram/internal/openai"
 )
@@ -71,6 +72,12 @@ type HTTPError struct {
 	Provider   string
 	StatusCode int
 	Status     string
+	// RetryAfter is parsed from the upstream response's Retry-After
+	// header (seconds form only — the rarer HTTP-date form isn't worth
+	// the parsing complexity for the providers Kram actually talks to).
+	// Zero when absent or unparseable; a caller deciding on a Gateway
+	// Round retry then falls back to its own computed backoff.
+	RetryAfter time.Duration
 }
 
 func (e *HTTPError) Error() string {

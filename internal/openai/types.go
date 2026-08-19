@@ -250,4 +250,24 @@ type ErrorBody struct {
 	Message string `json:"message"`
 	Type    string `json:"type"`
 	Code    string `json:"code,omitempty"`
+
+	// Combo, Retryable, RetryAfterMS, Cause and Attempts are kram-gateway
+	// extensions, populated only when every candidate in a combo failed
+	// (see internal/server/chat.go's writeGatewayError) — a standard
+	// OpenAI client ignores unknown fields; internal/daemon/gatewayclient
+	// decodes them into a typed GatewayError instead of treating this as
+	// a flat message string, so a caller can actually decide whether
+	// retrying is worth it instead of guessing from prose. Combo being
+	// non-empty is the signal this response came from kram-gateway's own
+	// all-failed path, as opposed to some other OpenAI-compatible
+	// server's plain error body.
+	Combo string `json:"combo,omitempty"`
+	// Retryable and Cause reflect the *last* attempt in the fallback
+	// trail — the one that actually ended the request — not "any attempt
+	// was retryable". A combo whose final candidate failed with a 400
+	// isn't worth retrying even if an earlier candidate hit a 429.
+	Retryable    bool          `json:"retryable,omitempty"`
+	RetryAfterMS int64         `json:"retry_after_ms,omitempty"`
+	Cause        FailureClass  `json:"cause,omitempty"`
+	Attempts     []AttemptInfo `json:"attempts,omitempty"`
 }

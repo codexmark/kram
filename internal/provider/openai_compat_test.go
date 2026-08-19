@@ -2,10 +2,12 @@ package provider
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/codexmark/kram/internal/openai"
 )
@@ -77,5 +79,48 @@ func TestOpenAICompatCapturesReasoningContentField(t *testing.T) {
 
 	if len(got) < 1 || got[0].Reasoning != "The user wants..." {
 		t.Fatalf("expected first event to carry the reasoning_content fragment, got %+v", got)
+	}
+}
+
+// TestOpenAICompatParsesRetryAfterHeader confirms a real Retry-After
+// header from a 429 response survives into the returned *HTTPError, so
+// a Gateway Round retry can honor it instead of guessing a backoff.
+func TestOpenAICompatParsesRetryAfterHeader(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Retry-After", "12")
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer srv.Close()
+
+	p := NewOpenAICompatible("test", srv.URL, "", "", capabilities{})
+	_, err := p.ChatCompletion(context.Background(), openai.ChatCompletionRequest{})
+
+	var httpErr *HTTPError
+	if !errors.As(err, &httpErr) {
+		t.Fatalf("expected a *HTTPError, got %T: %v", err, err)
+	}
+	if httpErr.RetryAfter != 12*time.Second {
+		t.Errorf("RetryAfter = %v, want 12s", httpErr.RetryAfter)
+	}
+}
+
+// TestOpenAICompatMissingRetryAfterIsZero confirms the absent case
+// degrades to zero (caller falls back to a computed backoff), not a
+// parse panic or a bogus non-zero value.
+func TestOpenAICompatMissingRetryAfterIsZero(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	p := NewOpenAICompatible("test", srv.URL, "", "", capabilities{})
+	_, err := p.ChatCompletion(context.Background(), openai.ChatCompletionRequest{})
+
+	var httpErr *HTTPError
+	if !errors.As(err, &httpErr) {
+		t.Fatalf("expected a *HTTPError, got %T: %v", err, err)
+	}
+	if httpErr.RetryAfter != 0 {
+		t.Errorf("RetryAfter = %v, want 0 when the header is absent", httpErr.RetryAfter)
 	}
 }

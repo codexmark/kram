@@ -161,7 +161,36 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.router.RecordOutcome(comboID, routeCtx, "", false)
-	writeError(w, http.StatusBadGateway, fmt.Sprintf("all providers in combo %q failed, last error: %v", comboID, lastErr))
+	writeGatewayError(w, comboID, trail, lastErr)
+}
+
+// writeGatewayError is the terminal response when every ranked candidate
+// in a combo failed — the structured counterpart to a flat message
+// string. Retryable/RetryAfterMS/Cause reflect the *last* attempt in
+// trail (the one that actually ended the request), a deliberate
+// simplification over trying to merge every attempt's class into one
+// verdict: a combo whose final candidate failed non-retryably isn't
+// worth retrying even if an earlier candidate hit a transient error.
+func writeGatewayError(w http.ResponseWriter, comboID string, trail []openai.AttemptInfo, lastErr error) {
+	body := openai.ErrorBody{
+		Message:  fmt.Sprintf("all providers in combo %q failed, last error: %v", comboID, lastErr),
+		Type:     "kram_gateway_error",
+		Combo:    comboID,
+		Attempts: trail,
+	}
+	if len(trail) > 0 {
+		last := trail[len(trail)-1]
+		body.Cause = last.Class
+		body.Retryable = last.Class.Retryable()
+	}
+	var httpErr *provider.HTTPError
+	if errors.As(lastErr, &httpErr) && httpErr.RetryAfter > 0 {
+		body.RetryAfterMS = httpErr.RetryAfter.Milliseconds()
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusBadGateway)
+	_ = json.NewEncoder(w).Encode(openai.ErrorResponse{Error: body})
 }
 
 // errorAttempt builds a trail entry for a transport/HTTP-level failure,
