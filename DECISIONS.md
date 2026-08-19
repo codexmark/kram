@@ -2638,8 +2638,9 @@ manual instead:
 - `go build ./...`, `go vet ./...`, `gofmt -l .`, `go test ./... -race`
   run locally before every push (same commands the removed workflow
   would have run);
-- releases are cut with `scripts/build-release.sh` plus `gh release
-  create` directly — see the README's "Building releases".
+- releases are cut with `scripts/release.sh`, which runs that same gate
+  itself before building and publishing — see "curl-based install
+  distribution" below and the README's "Building releases".
 
 This is a cost decision, not a technical one — GitHub Actions on a free
 personal plan comes with a limited included-minutes quota, and this
@@ -2681,6 +2682,113 @@ On a `pull_request` event, `github.sha` is GitHub's ephemeral, synthetic merge c
 ### Caching: `actions/setup-go`'s built-in cache, not a hand-rolled one
 
 `cache: true` on `actions/setup-go@v5` (keyed from `go.sum`, covering both the module download cache and the build cache) is what the task asked to prefer over inventing manual `actions/cache` wiring — it already solves this correctly and is one line per job.
+
+---
+
+## curl-based install distribution
+
+Kram's source (`codexmark/kram`) has to stay private, but a new machine
+installing it shouldn't need a GitHub PAT, `gh auth login`, or any access
+to the private repo at all — just `curl` and `tar`. The fix is
+architectural, not a workaround: a second, public repository,
+**`codexmark/kram-releases`**, holds nothing but an installer script and
+GitHub Release binaries. It never contains a copy of Kram's source. The
+private repo is where everything is built, tested, and packaged; the
+public repo is purely a distribution surface the private repo's own
+release process publishes to. Same constraint as "Continuous
+integration" above carries through here without exception: no
+`.github/workflows/` anywhere in this — every step, including the final
+publish, runs on the maintainer's own machine via `gh`, which is a
+publish-time dependency only, never something the end user needs.
+
+**Stable asset names, not versioned ones.** `scripts/build-release.sh`
+used to name every archive `kram-${VERSION}-${os}-${arch}.tar.gz` and
+the binary inside it identically. That's wrong for a curl installer: it
+would have to call the GitHub API just to discover the exact asset name
+before it could download anything, adding a dependency and a failure
+mode `curl`+`tar` alone don't need. Assets are now named purely from
+platform — `kram-linux-amd64.tar.gz`, `kram-darwin-arm64.tar.gz`,
+`kram-windows-amd64.zip` — with the binary inside always just `kram`
+(`kram.exe` on Windows). The version lives only in the release tag/URL
+segment (`releases/latest/download/...` or
+`releases/download/vX.Y.Z/...`), which is exactly what GitHub's own
+"latest" redirect and versioned-download URLs are for. `SHA256SUMS` is
+generated alongside every build. The script also self-checks: after
+building the *host's own* OS/ARCH target (the only one it can actually
+execute), it runs `kram -version` against the fresh binary and aborts
+the whole build if the reported version doesn't match what was passed
+in — cross-compiled targets can't be executed to verify the same way,
+but they share the exact same `-ldflags -X main.version=...` mechanism
+the native build just proved works, so trusting them is a reasoned
+inference, not a blind spot.
+
+**`scripts/release.sh`** is the one command that publishes a release:
+validates the version argument looks like semver, requires `gh`/`git`/
+`go` on `PATH` and `gh` to already be authenticated, requires a clean
+`git status --porcelain` (aborts otherwise — a release has to be
+reproducible from a known commit, so publishing a working tree with
+uncommitted changes is refused outright, no `--allow-dirty` escape
+hatch added since nothing has needed one yet), then runs the same
+`gofmt -l .` / `go vet ./...` / `go test ./... -race` gate this project
+already runs before every push. Only after all of that passes does it
+call `build-release.sh`, print a summary (version, commit, target repo,
+asset list), ask for confirmation (skippable with `--yes`), and publish
+via `gh release create --repo codexmark/kram-releases`. The confirmation
+step exists specifically because publishing a release is a hard-to-
+undo, externally-visible action — the same category of action this
+project's own operating principles already treat as needing an explicit
+human "yes," just enforced in a script instead of relied on by habit.
+
+**`install.sh`** (drafted and versioned here at `scripts/dist-repo/
+install.sh`, published as-is — same bytes, no build step — to the
+public repo's root; `scripts/dist-repo/README.md` the same way for that
+repo's README) is deliberately small and auditable: detect OS
+(`uname -s`; only Linux/Darwin — Windows gets a `.zip` download and a
+pointer to it, not an attempt to make Bash and
+PowerShell share one code path) and architecture (`uname -m`, normalized
+to `amd64`/`arm64`), build the download URL from
+`KRAM_VERSION`+`KRAM_RELEASES_REPO`/`latest`, download to a `mktemp -d`
+directory cleaned up via `trap ... EXIT` regardless of how the script
+exits, download `SHA256SUMS` and verify the asset against it
+(`sha256sum`, falling back to `shasum -a 256` on macOS; if *neither*
+exists, the script refuses to install rather than silently skipping
+verification), extract, and only *then* copy the binary into
+`KRAM_INSTALL_DIR` (default `$HOME/.local/bin`) — download, verify, and
+extract all have to succeed before anything touches the install
+directory, so a failed download or a bad checksum can never leave a
+half-installed or corrupted binary in place of a working one. No
+`sudo` anywhere, and no automatic edits to `~/.bashrc`/`~/.zshrc`/
+`~/.profile` — if the install directory isn't already on `PATH`, the
+script prints the exact `export PATH=...` line and stops there, since
+editing a user's shell config unattended has too many real edge cases
+(which file, which shell, whether it's already been added, dotfiles
+managed by something else entirely) to do safely as a first version.
+Post-install, it actually runs `$INSTALL_DIR/kram -version` and fails
+loudly if that doesn't work — copying the file is not the same as
+proving it runs, and this is what catches an architecture mismatch or a
+corrupted archive immediately instead of at the user's next `kram`
+invocation.
+
+Verified locally before ever touching the real public repo: a full
+`build-release.sh` run confirmed stable names, the in-archive `kram`
+name, `SHA256SUMS`, and the native-target version self-check all work;
+`release.sh`'s argument validation and dirty-working-tree abort were
+exercised directly (the latter briefly surfaced this machine's own
+known `gh` mise-shim issue — see the reference memory on it — resolved
+by using the real `gh` binary path, not a script bug); `install.sh` was
+run against a local Python `http.server` serving a real `dist/` output
+(via an internal-only `KRAM_BASE_URL` override that production installs
+never set) through five scenarios: a clean install, the "install
+directory not on PATH" guidance branch, a 404'd asset, and a tampered
+`SHA256SUMS` — the last one confirmed the install directory was never
+even created, proving the atomicity claim above rather than just
+asserting it.
+
+No GoReleaser, Docker, Nix, Homebrew, or build-tool dependency beyond
+what the project already has (Go, a POSIX shell, `gh`) was introduced —
+Kram's whole architectural advantage here is being one static,
+`CGO_ENABLED=0` Go binary; the distribution mechanism is sized to match
+that simplicity, not to anticipate needs nobody has yet.
 
 ---
 

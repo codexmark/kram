@@ -1583,6 +1583,14 @@ Hard scenarios represent runtime invariants. Model-dependent soft scenarios rema
 
 ---
 
+# Installing
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/codexmark/kram-releases/master/install.sh | sh
+```
+
+Downloads the right binary for your OS/architecture from GitHub Releases, verifies its SHA-256 checksum, and installs it to `$HOME/.local/bin` — no Go toolchain, no `sudo`, no shell config edited automatically. See [codexmark/kram-releases](https://github.com/codexmark/kram-releases) for version pinning (`KRAM_VERSION`) and a custom install directory (`KRAM_INSTALL_DIR`). Windows: download `kram-windows-amd64.zip` from the [latest release](https://github.com/codexmark/kram-releases/releases/latest).
+
 # Building releases
 
 ```bash
@@ -1605,17 +1613,15 @@ Release builds use:
 CGO_ENABLED=0
 ```
 
-The build script produces `.tar.gz` archives on Unix-like targets and `.zip` on Windows, with version information embedded through linker flags.
+The build script produces `.tar.gz` archives on Unix-like targets and `.zip` on Windows (each containing just a `kram`/`kram.exe` binary, and named without a version — `kram-linux-amd64.tar.gz`, not `kram-v1.2.3-linux-amd64.tar.gz` — so the installer can construct a download URL from OS/arch alone), plus a `SHA256SUMS` file, with version information embedded through linker flags.
 
-Releases are currently built and published manually rather than through GitHub Actions — see "Continuous integration" in [`DECISIONS.md`](DECISIONS.md) for why. To cut one:
+Releases are built and published entirely from the maintainer's own machine rather than through GitHub Actions — see "Continuous integration" and "curl-based install distribution" in [`DECISIONS.md`](DECISIONS.md) for why. To cut one:
 
 ```bash
-git tag v1.2.3
-git push origin v1.2.3
-./scripts/build-release.sh v1.2.3
-(cd dist && sha256sum * > checksums.txt)
-gh release create v1.2.3 dist/* --generate-notes
+./scripts/release.sh v1.2.3
 ```
+
+This runs the full local gate (`gofmt`, `go vet`, `go test -race`), cross-compiles every target, generates `SHA256SUMS`, shows a summary, asks for confirmation, and publishes the GitHub Release to the public [codexmark/kram-releases](https://github.com/codexmark/kram-releases) repo — the source here (`codexmark/kram`) stays private; only binaries and the installer are public. See `scripts/release.sh --help` for flags (`--notes FILE`, `--yes`).
 
 ---
 
