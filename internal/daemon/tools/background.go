@@ -167,6 +167,12 @@ func (t *runBackground) Name() string { return "run_background" }
 func (t *runBackground) Description() string {
 	return "Start a long-running shell command (a dev server, a watcher, a build daemon) that keeps running after this tool call returns — unlike bash, which is foreground-only and bounded by a timeout. Returns a process id; use process_output to read what it's printed, process_list to see everything running, and process_kill to stop it."
 }
+func (t *runBackground) ToolMetadata() ToolMetadata {
+	return ToolMetadata{
+		Summary:    "A dev server, watcher, or build daemon; check it with process_output, stop it with process_kill.",
+		PreferOver: "bash",
+	}
+}
 func (t *runBackground) Schema() json.RawMessage {
 	return json.RawMessage(`{
 		"type": "object",

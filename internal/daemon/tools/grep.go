@@ -31,6 +31,9 @@ func (t *grep) Name() string { return "grep" }
 func (t *grep) Description() string {
 	return "Search text files under a directory for lines matching a regular expression. Returns up to 200 matches as path:line:content."
 }
+func (t *grep) ToolMetadata() ToolMetadata {
+	return ToolMetadata{Summary: "Search for a symbol — grep for it beats guessing which file holds it."}
+}
 
 func (t *grep) Schema() json.RawMessage {
 	return json.RawMessage(`{

@@ -39,6 +39,9 @@ func (t *snapshotCreate) Name() string { return "snapshot_create" }
 func (t *snapshotCreate) Description() string {
 	return "Capture the current state of every file in the workspace (respecting .gitignore) as a named, restorable snapshot. Does not touch the user's own git repository, index, staging area, branch, or commits — this is a separate, hidden mechanism. Use before a risky multi-file change so there is a way back with snapshot_restore."
 }
+func (t *snapshotCreate) ToolMetadata() ToolMetadata {
+	return ToolMetadata{Summary: "Capture a restorable snapshot before a risky multi-file change."}
+}
 
 func (t *snapshotCreate) Schema() json.RawMessage {
 	return json.RawMessage(`{

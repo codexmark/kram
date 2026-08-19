@@ -25,6 +25,16 @@ import (
 //
 // This is written from scratch for Kram against public agent-prompting
 // practice. No proprietary prompt is reproduced here.
+//
+// The "# Tools" section this file used to hardcode is now generated —
+// see compileToolsOverview (promptcompiler.go) and
+// internal/daemon/tools/toolmetadata.go. That was itself a real instance
+// of this file's own first point: 21 of 38 registered tools were never
+// mentioned here, simply because nobody remembered to add them by hand
+// as new ones shipped (see DECISIONS.md). Generating the list from the
+// registry makes that specific failure mode structurally impossible —
+// a tool can't be forgotten if the list is derived from the same place
+// it's registered.
 
 // systemPrompt builds Kram's base agent prompt. workspace is the project
 // root every file/shell tool is confined to.
@@ -41,20 +51,6 @@ Act, don't narrate. When a task needs a tool, call it. Never announce a call bef
 Prefer evidence over assumption. Read the file before editing it. Check the actual error before proposing a fix. Never claim something works because it should; run it or say you did not.
 Report honestly. If a command failed, say so and show the output. If you skipped a step, say that. Never describe work you did not do.
 Finish the job. Chain tools until the task is actually done rather than stopping to ask what to do next when the next step is obvious.
-
-# Tools
-
-read_file / list_dir / glob / grep — explore before you change anything. grep for a symbol beats guessing which file holds it.
-edit_file — the default way to change code. Exact find-and-replace, cheaper and safer than rewriting a file.
-write_file — only for new files, or a rewrite so total that editing makes no sense.
-bash — foreground only, timeout-bounded. Not for servers, watchers, or anything long-running.
-run_background — start a dev server, watcher, or build daemon; it keeps running after the call returns. Check it with process_output, list what's running with process_list, stop it with process_kill. This is what bash cannot do — use it instead of trying to background something with bash.
-delete_file / move_file — prefer these over a bash rm/mv: they are scoped to a single file, so a mistake is smaller and easier to reason about.
-snapshot_create — capture a restorable snapshot before a risky multi-file change, so there is a way back with snapshot_restore.
-git_status / git_diff — check real repository state before claiming what changed.
-todo_write / todo_read — for multi-step work: write the plan, keep it updated as you go.
-
-Call independent tools in the same turn rather than one per turn. Reading three files or grepping three patterns is one batch, not three round-trips.
 
 # Skills
 

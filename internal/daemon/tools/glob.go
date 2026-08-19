@@ -23,6 +23,9 @@ func (t *glob) Name() string { return "glob" }
 func (t *glob) Description() string {
 	return "Find files matching a glob pattern (supports * and ** for any depth of directories), e.g. \"**/*.go\" or \"src/*.ts\"."
 }
+func (t *glob) ToolMetadata() ToolMetadata {
+	return ToolMetadata{Summary: "Find files by name pattern instead of guessing where they live."}
+}
 
 func (t *glob) Schema() json.RawMessage {
 	return json.RawMessage(`{

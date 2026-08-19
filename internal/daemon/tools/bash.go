@@ -47,6 +47,9 @@ func (t *bash) Description() string {
 	// platform where it wouldn't hold.
 	return fmt.Sprintf("Run a shell command (via %s) in the project root and return its combined stdout/stderr. Foreground only, bounded by a timeout — do not use for long-running or background processes.", shell.Describe())
 }
+func (t *bash) ToolMetadata() ToolMetadata {
+	return ToolMetadata{Summary: "Foreground only, timeout-bounded. Not for servers, watchers, or anything long-running."}
+}
 
 func (t *bash) Schema() json.RawMessage {
 	return json.RawMessage(`{

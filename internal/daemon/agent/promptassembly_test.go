@@ -124,20 +124,65 @@ func TestRunLoopPromptAssemblyContract(t *testing.T) {
 		t.Fatalf("expected exactly 1 gateway request, got %d", len(reqs))
 	}
 	msgs := reqs[0]
-	if len(msgs) != 4 {
-		t.Fatalf("expected 4 messages ([0]base [1]AGENTS.md [2]memory [3]user turn), got %d: %+v", len(msgs), msgs)
+	if len(msgs) != 5 {
+		t.Fatalf("expected 5 messages ([0]base [1]tools-overview [2]AGENTS.md [3]memory [4]user turn), got %d: %+v", len(msgs), msgs)
 	}
 	if msgs[0].Role != "system" || msgs[0].Content == "" {
 		t.Errorf("msgs[0] should be the non-empty base system prompt, got %+v", msgs[0])
 	}
-	if msgs[1].Role != "system" || !strings.Contains(msgs[1].Content, "Always run tests before finishing.") {
-		t.Errorf("msgs[1] should be the AGENTS.md project-context message, got %+v", msgs[1])
+	if msgs[1].Role != "system" || !strings.Contains(msgs[1].Content, "# Tools") || !strings.Contains(msgs[1].Content, "run_background") {
+		t.Errorf("msgs[1] should be the generated tools overview (mentioning run_background, among every other registered tool), got %+v", msgs[1])
 	}
-	if msgs[2].Role != "system" || !strings.Contains(msgs[2].Content, "the user prefers terse answers") {
-		t.Errorf("msgs[2] should be the memory message, got %+v", msgs[2])
+	if msgs[2].Role != "system" || !strings.Contains(msgs[2].Content, "Always run tests before finishing.") {
+		t.Errorf("msgs[2] should be the AGENTS.md project-context message, got %+v", msgs[2])
 	}
-	if msgs[3].Role != "user" || msgs[3].Content != "oi" {
-		t.Errorf("msgs[3] should be the real conversation turn, got %+v", msgs[3])
+	if msgs[3].Role != "system" || !strings.Contains(msgs[3].Content, "the user prefers terse answers") {
+		t.Errorf("msgs[3] should be the memory message, got %+v", msgs[3])
+	}
+	if msgs[4].Role != "user" || msgs[4].Content != "oi" {
+		t.Errorf("msgs[4] should be the real conversation turn, got %+v", msgs[4])
+	}
+}
+
+// TestRunLoopPromptAssemblyEveryEnabledToolAppearsInPrompt is the
+// regression test for the actual bug this registry exists to fix: 21 of
+// 38 registered tools were once mentioned nowhere in the prompt, simply
+// because nobody remembered to hand-add them (see DECISIONS.md). This
+// runs a real Service.Run against the real tools.NewRegistry (not a
+// mock) and asserts every tool AllTools() reports as enabled shows up
+// somewhere in the generated system messages — the literal contract "a
+// tool cannot silently go unmentioned again," proven against production
+// tool wiring, not a hand-picked subset.
+func TestRunLoopPromptAssemblyEveryEnabledToolAppearsInPrompt(t *testing.T) {
+	workspace := t.TempDir()
+	srv, requests := fakeGateway(t, []scriptedChatResponse{{content: "hello there"}})
+	defer srv.Close()
+
+	s := newTestService(t, workspace, srv.URL, Config{Workspace: workspace, MaxTurns: 10})
+	newTestSession(t, s, "sess-1")
+
+	if _, err := s.Run(context.Background(), "sess-1", "oi", nil, nil); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	reqs := requests()
+	if len(reqs) != 1 {
+		t.Fatalf("expected exactly 1 gateway request, got %d", len(reqs))
+	}
+	var allContent strings.Builder
+	for _, m := range reqs[0] {
+		allContent.WriteString(m.Content)
+		allContent.WriteString("\n")
+	}
+	prompt := allContent.String()
+
+	for _, info := range s.tools.AllTools() {
+		if info.Disabled {
+			continue
+		}
+		if !strings.Contains(prompt, info.Name) {
+			t.Errorf("enabled tool %q never appears anywhere in the generated prompt", info.Name)
+		}
 	}
 }
 

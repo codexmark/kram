@@ -4,11 +4,12 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/codexmark/kram/internal/daemon/tools"
 	"github.com/codexmark/kram/internal/openai"
 )
 
 func TestCompilePreambleBaseOnly(t *testing.T) {
-	parts := compilePreamble("/ws", "", false, openai.ChatMessage{}, false)
+	parts := compilePreamble("/ws", "", false, openai.ChatMessage{}, false, nil)
 
 	if len(parts) != 1 {
 		t.Fatalf("parts = %d, want 1 (base only): %+v", len(parts), parts)
@@ -23,7 +24,7 @@ func TestCompilePreambleBaseOnly(t *testing.T) {
 }
 
 func TestCompilePreambleWithProjectContextOnly(t *testing.T) {
-	parts := compilePreamble("/ws", "some AGENTS.md text", true, openai.ChatMessage{}, false)
+	parts := compilePreamble("/ws", "some AGENTS.md text", true, openai.ChatMessage{}, false, nil)
 
 	if len(parts) != 2 {
 		t.Fatalf("parts = %d, want 2 (base + project-context): %+v", len(parts), parts)
@@ -42,7 +43,7 @@ func TestCompilePreambleWithProjectContextOnly(t *testing.T) {
 
 func TestCompilePreambleWithMemoryOnly(t *testing.T) {
 	memMsg := openai.ChatMessage{Role: "system", Content: "remembered fact"}
-	parts := compilePreamble("/ws", "", false, memMsg, true)
+	parts := compilePreamble("/ws", "", false, memMsg, true, nil)
 
 	if len(parts) != 2 {
 		t.Fatalf("parts = %d, want 2 (base + memory): %+v", len(parts), parts)
@@ -58,7 +59,7 @@ func TestCompilePreambleWithMemoryOnly(t *testing.T) {
 
 func TestCompilePreambleWithBothProjectContextAndMemory(t *testing.T) {
 	memMsg := openai.ChatMessage{Content: "remembered fact"}
-	parts := compilePreamble("/ws", "ctx", true, memMsg, true)
+	parts := compilePreamble("/ws", "ctx", true, memMsg, true, nil)
 
 	if len(parts) != 3 {
 		t.Fatalf("parts = %d, want 3 (base, project-context, memory): %+v", len(parts), parts)
@@ -69,6 +70,44 @@ func TestCompilePreambleWithBothProjectContextAndMemory(t *testing.T) {
 		if gotIDs[i] != wantIDs[i] {
 			t.Errorf("order[%d] = %q, want %q (full order: %v)", i, gotIDs[i], wantIDs[i], gotIDs)
 		}
+	}
+}
+
+// TestCompileToolsOverviewNilRegistryReturnsEmptyPart matches
+// compilePreamble's own "only include if present" handling — nil reg is
+// the shape evals/tests without a tool registry produce.
+func TestCompileToolsOverviewNilRegistryReturnsEmptyPart(t *testing.T) {
+	p := compileToolsOverview(nil)
+	if p.ID != "tools-overview" || p.Content != "" {
+		t.Errorf("nil registry part = %+v, want ID=tools-overview and empty Content", p)
+	}
+}
+
+// TestCompileToolsOverviewListsEnabledToolsAndSkipsDisabled uses a real
+// tools.Registry (NewRegistry takes disabled names directly, so no fakes
+// needed) — confirms an enabled tool with hand-curated ToolMetadata
+// renders its PreferOver cross-reference, a disabled tool is omitted
+// entirely, and a tool with no curated metadata still appears via the
+// Description()-derived fallback.
+func TestCompileToolsOverviewListsEnabledToolsAndSkipsDisabled(t *testing.T) {
+	reg := tools.NewRegistry(t.TempDir(), nil, map[string]bool{"bash": true})
+
+	p := compileToolsOverview(reg)
+
+	if !strings.HasPrefix(p.Content, "# Tools\n") {
+		t.Errorf("content should start with the # Tools header, got %q", p.Content[:min(40, len(p.Content))])
+	}
+	if !strings.Contains(p.Content, "run_background") || !strings.Contains(p.Content, "(use this instead of bash)") {
+		t.Errorf("run_background should appear with its PreferOver cross-reference, got: %s", p.Content)
+	}
+	if strings.Contains(p.Content, "bash — ") {
+		t.Errorf("disabled tool bash should not appear in the overview, got: %s", p.Content)
+	}
+	if !strings.Contains(p.Content, "web_fetch — ") {
+		t.Errorf("web_fetch (no curated metadata) should still appear via the Description() fallback, got: %s", p.Content)
+	}
+	if !strings.Contains(p.Content, "Call independent tools in the same turn") {
+		t.Errorf("content should end with the batching footer, got: %s", p.Content)
 	}
 }
 

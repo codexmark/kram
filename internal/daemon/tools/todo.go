@@ -68,6 +68,9 @@ func (t *todoWrite) Name() string { return "todo_write" }
 func (t *todoWrite) Description() string {
 	return "Replace the project's task list with the given items. Use this to plan multi-step work and track progress — write the full list each time, including items that haven't changed."
 }
+func (t *todoWrite) ToolMetadata() ToolMetadata {
+	return ToolMetadata{Summary: "For multi-step work: write the plan, keep it updated as you go."}
+}
 
 func (t *todoWrite) Schema() json.RawMessage {
 	return json.RawMessage(`{

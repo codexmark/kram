@@ -21,6 +21,12 @@ func (t *deleteFile) Name() string { return "delete_file" }
 func (t *deleteFile) Description() string {
 	return "Delete a single file. Refuses to delete directories — use the bash tool with an explicit command for recursive deletes."
 }
+func (t *deleteFile) ToolMetadata() ToolMetadata {
+	return ToolMetadata{
+		Summary:    "Scoped to a single file, so a mistake is smaller and easier to reason about.",
+		PreferOver: "bash rm",
+	}
+}
 
 func (t *deleteFile) Schema() json.RawMessage {
 	return json.RawMessage(`{

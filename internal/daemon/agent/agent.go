@@ -476,7 +476,7 @@ func (s *Service) runLoop(ctx context.Context, sessionID, model string, depth in
 		nearBudget := turn == s.cfg.MaxTurns-1
 
 		projectContext, haveProjectContext := loadProjectContext(s.cfg.Workspace)
-		preamble := partsToMessages(compilePreamble(s.cfg.Workspace, projectContext, haveProjectContext, memoryMsg, haveMemory))
+		preamble := partsToMessages(compilePreamble(s.cfg.Workspace, projectContext, haveProjectContext, memoryMsg, haveMemory, s.tools))
 		modelMessages := append(preamble, toModelMessages(effective)...)
 		modelMessages = append(modelMessages, partsToMessages(compileTurnPostscript(emptyRetryUsed, nearBudget))...)
 

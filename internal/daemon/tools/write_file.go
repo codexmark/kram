@@ -18,6 +18,13 @@ func (t *writeFile) Name() string { return "write_file" }
 func (t *writeFile) Description() string {
 	return "Create or overwrite a UTF-8 text file at the given path, relative to the project root. Creates parent directories as needed."
 }
+func (t *writeFile) ToolMetadata() ToolMetadata {
+	// Deliberately no PreferOver here: that field means "reach for this
+	// instead of X" (see run_background), and the guidance here is the
+	// opposite direction — prefer edit_file over this one for an
+	// existing file. The Summary itself already carries that (negated).
+	return ToolMetadata{Summary: "Only for new files, or a rewrite so total that editing makes no sense."}
+}
 
 func (t *writeFile) Schema() json.RawMessage {
 	return json.RawMessage(`{

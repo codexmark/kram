@@ -2130,6 +2130,103 @@ cooldown — are real and confirmed, explicitly scoped out of this pass at
 the reviewer's own direction ("depois disso, eu pararia de mexer nessa
 camada") and left for whenever this layer is revisited next.
 
+## Tool Semantics Registry v1: the prompt's Tools section is now generated, not hand-maintained
+
+Found while testing Kram against a real second project ("talonario", a
+React Native/Expo app run explicitly as a dogfooding test): asked to
+start the dev server, Kram correctly refused `bash` for a long-running
+process, but never reached for `run_background` — a tool that already
+existed, was well-suited, and was already registered — because
+`systemPrompt()`'s hand-written "# Tools" section never mentioned it.
+Diffing the real tool registry (`Registry.AllTools()`) against that
+hand-written section found the gap was far bigger than one tool: 21 of
+38 registered tools were never mentioned in the prompt at all. This is
+the same failure mode this file's own "How you work" prompt guidance
+warns about — a tool being in the schema is not an instruction to use
+it — except the instance was in Kram's own prompt-authoring process, not
+a model's behavior. A quick patch (adding `run_background`/
+`delete_file`/`move_file`/`snapshot_create` by hand) shipped first, in
+`v0.2.1`, to close the immediate gap; this entry is the structural fix
+that makes the whole bug class impossible instead of patched once.
+
+New `internal/daemon/tools/toolmetadata.go`: a `ToolMetadata{Summary,
+PreferOver}` struct, a `MetadataProvider` interface a `Tool` can
+optionally implement, and `Registry.ToolMetadata(name)`, which returns
+the tool's hand-curated metadata if it implements `MetadataProvider`, or
+derives a fallback from the first sentence of its existing
+`Description()` otherwise. The fallback is the property that makes the
+bug structurally impossible: a tool cannot go unmentioned just because
+nobody got around to writing a `Summary` for it, the same way it
+previously went unmentioned because nobody got around to updating a
+hand-written paragraph.
+
+`internal/daemon/agent/promptcompiler.go` gained
+`compileToolsOverview(reg *tools.Registry) PromptPart`, iterating every
+enabled (non-`Disabled`) tool in registration order via `AllTools()`,
+rendering `name — Summary` and, when set, `PreferOver` as `"(use this
+instead of X)"` — the exact cross-reference `run_background` needed
+against `bash`. `compilePreamble` gained a `*tools.Registry` parameter
+and inserts this part right after `base`, before `project-context` —
+structurally where the old hand-written Tools section already sat.
+`systemprompt.go`'s hand-written "# Tools" section was deleted outright,
+replaced by a doc-comment pointing at the generator.
+
+Migrated today's already-approved wording into `ToolMetadata()` methods
+for the 14 tools that were already manually listed
+(`read_file`/`list_dir`/`glob`/`grep`/`edit_file`/`write_file`/`bash`/
+`run_background`/`delete_file`/`move_file`/`snapshot_create`/
+`git_status`/`git_diff`/`todo_write`). The other ~24 tools
+(`lsp_*`/`mcp_*`/`memory_*`/`session_search`/`skill*`/
+`snapshot_list`/`diff`/`restore`/`todo_read`/`web_fetch`/`ask_question`/
+`delegate_task`/`artifact_read`/`process_*`) stay on the automatic
+fallback for now — correctly *listed*, which is the actual bug this
+closes, not yet hand-tuned with a `PreferOver`. Curating more of them is
+a low-risk follow-up whenever real usage shows the same "competes with a
+default habit" pattern `run_background` vs. `bash` did, not something
+worth guessing at wholesale up front.
+
+One naming note worth recording: `write_file`'s `ToolMetadata` carries
+no `PreferOver`, deliberately. The field means "prefer *this* tool over
+X" — and for `write_file` the correct direction is the opposite (prefer
+`edit_file` over it), which is already what its negated Summary says
+("Only for new files, or a rewrite so total that editing makes no
+sense."). Adding `PreferOver: "edit_file"` to `write_file` itself would
+have inverted the field's meaning.
+
+Splitting the preamble into an additional system message (base /
+tools-overview / project-context / memory, instead of base folding
+Tools in directly) was confirmed safe before relying on it: both
+`internal/provider/anthropic.go` and `internal/provider/gemini.go`
+already concatenate multiple system messages into one on the wire, so
+every provider Kram talks to already handles this shape.
+
+Tests: `toolmetadata_test.go` covers `Registry.ToolMetadata` — a tool
+implementing `MetadataProvider` wins verbatim, a tool that doesn't falls
+back to its `Description()`'s first sentence, an unregistered name
+returns a usable zero value without panicking, plus a live check
+(`TestRealRegistryEveryToolHasAUsableSummary`) that every tool in the
+real production registry produces a non-empty summary. New
+`compileToolsOverview` unit tests in `promptcompiler_test.go` use the
+real `tools.NewRegistry` (which already takes a `disabled` map as a
+constructor argument, so no fakes were needed) to confirm a disabled
+tool is skipped, `PreferOver` renders, and a tool with no curated
+metadata still appears via fallback. The regression test that actually
+matters, `TestRunLoopPromptAssemblyEveryEnabledToolAppearsInPrompt` in
+`promptassembly_test.go`, drives a real `Service.Run` against the real
+tool registry and asserts every currently-enabled tool name appears
+somewhere in the generated prompt — the literal, permanent proof that a
+tool cannot silently go unmentioned again, not a hand-picked subset of
+one.
+
+Live-verified against real separate `mock-provider`/gateway/daemon
+processes (not just the test suite): a real turn's captured request
+messages show the generated `# Tools` section listing all 34 enabled
+tools, including `run_background — ... (use this instead of bash)` —
+confirming the fix holds with the real registry wiring, not just the
+mocked one in tests, and that it now produces this without the v0.2.1
+patch's hand-written lines, which were removed outright rather than
+kept as a redundant fallback.
+
 ## Boundaries
 
 Several things were deliberately not built. Recording them so they don't

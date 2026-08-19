@@ -19,6 +19,9 @@ func (t *listDir) Name() string { return "list_dir" }
 func (t *listDir) Description() string {
 	return "List the files and subdirectories directly inside a directory, relative to the project root."
 }
+func (t *listDir) ToolMetadata() ToolMetadata {
+	return ToolMetadata{Summary: "Explore a directory's structure before you change anything in it."}
+}
 
 func (t *listDir) Schema() json.RawMessage {
 	return json.RawMessage(`{

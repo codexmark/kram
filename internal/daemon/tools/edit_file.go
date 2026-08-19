@@ -22,6 +22,9 @@ func (t *editFile) Name() string { return "edit_file" }
 func (t *editFile) Description() string {
 	return "Replace an exact substring in a file with another. Fails if old_string isn't found, or is found more than once and replace_all wasn't set — include enough surrounding context in old_string to make it unique."
 }
+func (t *editFile) ToolMetadata() ToolMetadata {
+	return ToolMetadata{Summary: "The default way to change code — cheaper and safer than rewriting a whole file."}
+}
 
 func (t *editFile) Schema() json.RawMessage {
 	return json.RawMessage(`{

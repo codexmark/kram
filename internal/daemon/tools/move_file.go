@@ -18,6 +18,12 @@ func (t *moveFile) Name() string { return "move_file" }
 func (t *moveFile) Description() string {
 	return "Move or rename a file within the project. Creates the destination's parent directories as needed."
 }
+func (t *moveFile) ToolMetadata() ToolMetadata {
+	return ToolMetadata{
+		Summary:    "Scoped to a single file, so a mistake is smaller and easier to reason about.",
+		PreferOver: "bash mv",
+	}
+}
 
 func (t *moveFile) Schema() json.RawMessage {
 	return json.RawMessage(`{

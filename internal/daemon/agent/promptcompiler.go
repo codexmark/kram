@@ -1,6 +1,11 @@
 package agent
 
-import "github.com/codexmark/kram/internal/openai"
+import (
+	"strings"
+
+	"github.com/codexmark/kram/internal/daemon/tools"
+	"github.com/codexmark/kram/internal/openai"
+)
 
 // RefreshPolicy documents which of the three real cadences a part
 // follows — not three arbitrary "stability tiers", but the three that
@@ -45,12 +50,65 @@ type PromptPart struct {
 	Content   string
 }
 
-// compilePreamble reproduces exactly what runLoop's preamble block built
-// inline before this refactor existed — same three parts, same order,
-// same "only include if present" gating.
-func compilePreamble(workspace, projectContext string, haveProjectContext bool, memoryMsg openai.ChatMessage, haveMemory bool) []PromptPart {
+// toolsOverviewHeader/Footer bookend the generated tool list — Footer is
+// the "batch independent calls" line that used to close the hand-written
+// "# Tools" section; kept here since it's about tool usage generally and
+// was always co-located with the list itself.
+const (
+	toolsOverviewHeader = "# Tools\n"
+	toolsOverviewFooter = "\nCall independent tools in the same turn rather than one per turn. Reading three files or grepping three patterns is one batch, not three round-trips."
+)
+
+// compileToolsOverview renders one line per enabled, registered tool —
+// every one, not a hand-picked subset, which is what makes this
+// generated instead of curated. A tool with hand-curated ToolMetadata
+// (see internal/daemon/tools/toolmetadata.go) gets its Summary and, if
+// set, a "(use this instead of X)" cross-reference; everything else
+// falls back to a Description()-derived summary — still listed, just
+// not yet hand-tuned, which is deliberate (see DECISIONS.md: adding
+// PreferOver for more tools is a low-risk follow-up whenever real usage
+// shows the same "competes with a default habit" pattern, not something
+// to guess at wholesale up front).
+//
+// reg may be nil (evals/tests that build a Service without a tool
+// registry) — returns an empty part in that case, matching how the rest
+// of this file degrades gracefully when its inputs are absent.
+func compileToolsOverview(reg *tools.Registry) PromptPart {
+	if reg == nil {
+		return PromptPart{ID: "tools-overview", Placement: PlacementPreamble, Refresh: RefreshStatic, Source: "builtin"}
+	}
+
+	var b strings.Builder
+	b.WriteString(toolsOverviewHeader)
+	for _, info := range reg.AllTools() {
+		if info.Disabled {
+			continue
+		}
+		md := reg.ToolMetadata(info.Name)
+		line := info.Name + " — " + md.Summary
+		if md.PreferOver != "" {
+			line += " (use this instead of " + md.PreferOver + ")"
+		}
+		b.WriteString(line + "\n")
+	}
+	b.WriteString(toolsOverviewFooter)
+
+	return PromptPart{
+		ID: "tools-overview", Placement: PlacementPreamble, Refresh: RefreshStatic, Source: "builtin",
+		Content: b.String(),
+	}
+}
+
+// compilePreamble reproduces what runLoop's preamble block built inline
+// before this refactor existed — base identity, the tools overview
+// (generated — see compileToolsOverview), project context, and memory,
+// in that order, each only included if present.
+func compilePreamble(workspace, projectContext string, haveProjectContext bool, memoryMsg openai.ChatMessage, haveMemory bool, reg *tools.Registry) []PromptPart {
 	parts := []PromptPart{
 		{ID: "base", Placement: PlacementPreamble, Refresh: RefreshStatic, Source: "builtin", Content: systemPrompt(workspace)},
+	}
+	if reg != nil {
+		parts = append(parts, compileToolsOverview(reg))
 	}
 	if haveProjectContext {
 		parts = append(parts, PromptPart{

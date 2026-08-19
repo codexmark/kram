@@ -22,6 +22,9 @@ func (t *readFile) Name() string { return "read_file" }
 func (t *readFile) Description() string {
 	return "Read a UTF-8 text file's contents by path, relative to the project root."
 }
+func (t *readFile) ToolMetadata() ToolMetadata {
+	return ToolMetadata{Summary: "Read a file before you change it."}
+}
 
 func (t *readFile) Schema() json.RawMessage {
 	return json.RawMessage(`{

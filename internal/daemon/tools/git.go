@@ -46,6 +46,9 @@ func newGitStatus(workspace string) *gitStatus { return &gitStatus{workspace: wo
 
 func (t *gitStatus) Name() string        { return "git_status" }
 func (t *gitStatus) Description() string { return "Show the working tree status (git status --short)." }
+func (t *gitStatus) ToolMetadata() ToolMetadata {
+	return ToolMetadata{Summary: "Check real repository state before claiming what changed."}
+}
 func (t *gitStatus) Schema() json.RawMessage {
 	return json.RawMessage(`{"type": "object", "properties": {}}`)
 }
@@ -64,6 +67,9 @@ func newGitDiff(workspace string) *gitDiff { return &gitDiff{workspace: workspac
 func (t *gitDiff) Name() string { return "git_diff" }
 func (t *gitDiff) Description() string {
 	return "Show uncommitted changes (git diff). Pass staged:true to show staged changes instead."
+}
+func (t *gitDiff) ToolMetadata() ToolMetadata {
+	return ToolMetadata{Summary: "Check real repository state before claiming what changed."}
 }
 func (t *gitDiff) Schema() json.RawMessage {
 	return json.RawMessage(`{"type": "object", "properties": {"staged": {"type": "boolean", "description": "Show staged (git diff --cached) instead of unstaged changes."}}}`)
