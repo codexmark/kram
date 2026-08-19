@@ -1,6 +1,10 @@
 package provider
 
 import (
+	"context"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/codexmark/kram/internal/openai"
@@ -69,5 +73,34 @@ func TestBuildGeminiContentsAssistantWithoutSignatureOmitsIt(t *testing.T) {
 	})
 	if got := contents[0].Parts[0].ThoughtSignature; got != "" {
 		t.Errorf("ThoughtSignature = %q, want empty when none was captured", got)
+	}
+}
+
+// TestGeminiEmitsToolCallProgress is the regression test for the
+// confirmed liveness gap: a functionCall part used to be accumulated
+// into toolCalls with no matching StreamEvent — Gemini sends a whole
+// function call in one part rather than fragmented deltas, but the
+// liveness gap is the same: a tool-calling turn with no leading text
+// produced zero events until Done.
+func TestGeminiEmitsToolCallProgress(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprintf(w, "data: %s\n\n", `{"candidates":[{"content":{"parts":[{"functionCall":{"name":"list_dir","args":{}}}]}}]}`)
+	}))
+	defer srv.Close()
+
+	p := NewGemini("test", srv.URL, "key", "", capabilities{})
+	events, err := p.ChatCompletion(context.Background(), openai.ChatCompletionRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sawProgress bool
+	for e := range events {
+		if e.ToolCallProgress {
+			sawProgress = true
+		}
+	}
+	if !sawProgress {
+		t.Error("expected a ToolCallProgress event for the functionCall part")
 	}
 }

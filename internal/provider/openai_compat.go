@@ -168,6 +168,15 @@ func (p *OpenAICompatible) ChatCompletion(ctx context.Context, req openai.ChatCo
 					case <-ctx.Done():
 						return false
 					}
+				} else if len(c.Delta.ToolCalls) > 0 {
+					// A chunk carrying only tool-call argument fragments —
+					// real progress, but not itself content or reasoning; see
+					// StreamEvent.ToolCallProgress.
+					select {
+					case events <- StreamEvent{ToolCallProgress: true}:
+					case <-ctx.Done():
+						return false
+					}
 				}
 				for _, tc := range c.Delta.ToolCalls {
 					toolCalls.add(tc.Index, tc.ID, tc.Function.Name, tc.Function.Arguments)

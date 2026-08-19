@@ -268,6 +268,17 @@ func (p *Gemini) ChatCompletion(ctx context.Context, req openai.ChatCompletionRe
 							},
 							GeminiThoughtSignature: part.ThoughtSignature,
 						})
+						// Real progress, but not itself content or reasoning
+						// — see StreamEvent.ToolCallProgress. Gemini sends a
+						// whole function call in one part rather than
+						// fragmented deltas, but the liveness gap is the
+						// same: without this, a tool-calling turn with no
+						// leading text produces zero events until Done.
+						select {
+						case events <- StreamEvent{ToolCallProgress: true}:
+						case <-ctx.Done():
+							return false
+						}
 					}
 				}
 			}

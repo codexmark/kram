@@ -28,10 +28,23 @@ type StreamEvent struct {
 	// reasoning phase alone routinely runs past what used to be a fixed
 	// peek timeout, and was being misread as a dead attempt).
 	Reasoning string
-	Done      bool
-	Usage     *openai.Usage
-	ToolCalls []openai.ToolCall
-	Err       error
+	// ToolCallProgress marks an event that carried tool-call argument
+	// fragments but no answer content and no reasoning — real evidence
+	// the provider is actively producing tokens, exactly like Reasoning
+	// is, but kept as a separate bool rather than folded into it: a
+	// caller must never mistake tool-call JSON fragments for chain-of-
+	// thought text. Exists purely as a liveness signal for
+	// router.BoundedPeek — a provider streaming a long tool call's
+	// arguments token-by-token, with no leading text, used to look like
+	// dead silence and get killed as stalled even though it was actively
+	// working the whole time (every adapter accumulates tool-call
+	// fragments internally without emitting any StreamEvent at all,
+	// unless this is set).
+	ToolCallProgress bool
+	Done             bool
+	Usage            *openai.Usage
+	ToolCalls        []openai.ToolCall
+	Err              error
 }
 
 // Provider is anything that can serve a chat completion request.

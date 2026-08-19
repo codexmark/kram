@@ -112,6 +112,17 @@ func BoundedPeek(ctx context.Context, src <-chan provider.StreamEvent) StreamPee
 			if strings.TrimSpace(evt.Reasoning) != "" {
 				continue // real progress, but not itself committable — keep waiting
 			}
+			if evt.ToolCallProgress {
+				// Same treatment as Reasoning, and for the same reason: a
+				// naive fix that only reset the idle timer (every event
+				// already does that, above) without also exempting this
+				// from noSignalEvents would still exhaust streamPeekMaxEvents
+				// on a long tool-call-only stream — a provider sending its
+				// arguments as many small fragments, with no leading text,
+				// would still get rejected as "peek buffer exhausted"
+				// despite being actively productive the whole time.
+				continue
+			}
 			noSignalEvents++
 			if noSignalEvents >= streamPeekMaxEvents {
 				return StreamPeekResult{Reason: "peek buffer exhausted without meaningful content", Buffered: buffered}

@@ -125,3 +125,54 @@ func TestBoundedPeekReasoningOnlyStillFallsBackEventually(t *testing.T) {
 		t.Error("a stream that only ever reasons and then closes should not commit")
 	}
 }
+
+// TestBoundedPeekToolCallProgressDoesNotCountAgainstMaxEvents is the
+// regression test for the confirmed bug: every adapter (openai_compat,
+// anthropic, gemini) accumulates tool-call argument fragments internally
+// with no matching StreamEvent at all, unless ToolCallProgress is set —
+// a naive fix that only reset the idle timer (every event already does
+// that) without also exempting these from noSignalEvents would still
+// exhaust streamPeekMaxEvents on a long tool-call-only stream. More
+// fragments than the max-events budget, followed by the real terminal
+// Done+ToolCalls, must still commit.
+func TestBoundedPeekToolCallProgressDoesNotCountAgainstMaxEvents(t *testing.T) {
+	ch := make(chan provider.StreamEvent, streamPeekMaxEvents*3+1)
+	for i := 0; i < streamPeekMaxEvents*3; i++ {
+		ch <- provider.StreamEvent{ToolCallProgress: true}
+	}
+	ch <- provider.StreamEvent{Done: true, ToolCalls: []openai.ToolCall{{ID: "1", Type: "function"}}}
+	res := BoundedPeek(context.Background(), ch)
+	if !res.Committed {
+		t.Fatalf("a real tool call after many tool-call-progress-only events should still commit, got rejection: %s", res.Reason)
+	}
+}
+
+// TestBoundedPeekPlainSilentEventsStillCountAgainstMaxEvents proves the
+// fix isn't just "exempt everything from the budget" — a genuinely
+// uninformative event (no Delta, no Reasoning, no ToolCallProgress, not
+// terminal) must still count and eventually exhaust the peek budget.
+func TestBoundedPeekPlainSilentEventsStillCountAgainstMaxEvents(t *testing.T) {
+	ch := make(chan provider.StreamEvent, streamPeekMaxEvents+1)
+	for i := 0; i < streamPeekMaxEvents; i++ {
+		ch <- provider.StreamEvent{}
+	}
+	close(ch)
+	res := BoundedPeek(context.Background(), ch)
+	if res.Committed {
+		t.Error("a stream of only plain, uninformative events should not commit")
+	}
+}
+
+// TestBoundedPeekToolCallProgressOnlyStillFallsBackEventually mirrors
+// the reasoning-only case: tool-call progress alone, with the stream
+// then closing with no real terminal ToolCalls, must still fall back.
+func TestBoundedPeekToolCallProgressOnlyStillFallsBackEventually(t *testing.T) {
+	ch := make(chan provider.StreamEvent, 3)
+	ch <- provider.StreamEvent{ToolCallProgress: true}
+	ch <- provider.StreamEvent{ToolCallProgress: true}
+	close(ch)
+	res := BoundedPeek(context.Background(), ch)
+	if res.Committed {
+		t.Error("a stream that only ever reports tool-call progress and then closes should not commit")
+	}
+}

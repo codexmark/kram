@@ -82,6 +82,37 @@ func TestOpenAICompatCapturesReasoningContentField(t *testing.T) {
 	}
 }
 
+// TestOpenAICompatEmitsToolCallProgress is the regression test for the
+// confirmed liveness gap: a chunk carrying only tool-call argument
+// fragments (no content, no reasoning) used to accumulate silently with
+// no StreamEvent at all, leaving router.BoundedPeek with zero visibility
+// into a provider that was actively streaming a tool call's arguments.
+func TestOpenAICompatEmitsToolCallProgress(t *testing.T) {
+	srv := sseServer(t, []string{
+		`{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"list_dir","arguments":""}}]}}]}`,
+		`{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{}"}}]}}]}`,
+		`{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`,
+	})
+	defer srv.Close()
+
+	p := NewOpenAICompatible("test", srv.URL, "", "", capabilities{})
+	events, err := p.ChatCompletion(context.Background(), openai.ChatCompletionRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := collectEvents(t, events)
+
+	progressEvents := 0
+	for _, e := range got {
+		if e.ToolCallProgress {
+			progressEvents++
+		}
+	}
+	if progressEvents != 2 {
+		t.Errorf("expected 2 ToolCallProgress events (one per tool-call-only chunk), got %d: %+v", progressEvents, got)
+	}
+}
+
 // TestOpenAICompatParsesRetryAfterHeader confirms a real Retry-After
 // header from a 429 response survives into the returned *HTTPError, so
 // a Gateway Round retry can honor it instead of guessing a backoff.

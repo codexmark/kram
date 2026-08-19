@@ -283,6 +283,13 @@ func (p *Anthropic) ChatCompletion(ctx context.Context, req openai.ChatCompletio
 			case "content_block_delta":
 				if tc, ok := blockIsToolUse[evt.Index]; ok {
 					tc.Function.Arguments += evt.Delta.PartialJSON
+					// Real progress, but not itself content or reasoning —
+					// see StreamEvent.ToolCallProgress.
+					select {
+					case events <- StreamEvent{ToolCallProgress: true}:
+					case <-ctx.Done():
+						return false
+					}
 				} else if evt.Delta.Text != "" {
 					select {
 					case events <- StreamEvent{Delta: evt.Delta.Text}:
