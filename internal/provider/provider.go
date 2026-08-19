@@ -17,7 +17,16 @@ import (
 // non-streaming requests and waits for the complete decision before
 // acting on it (see internal/daemon/agent).
 type StreamEvent struct {
-	Delta     string
+	Delta string
+	// Reasoning is a fragment of a reasoning-capable model's chain-of-
+	// thought, kept separate from Delta because it is not the model's
+	// actual answer — a caller must never relay it as assistant message
+	// content. It exists purely as a liveness signal: a provider that's
+	// only produced reasoning so far is actively working, not stalled,
+	// which router.BoundedPeek needs to know (see DECISIONS.md — a
+	// reasoning phase alone routinely runs past what used to be a fixed
+	// peek timeout, and was being misread as a dead attempt).
+	Reasoning string
 	Done      bool
 	Usage     *openai.Usage
 	ToolCalls []openai.ToolCall

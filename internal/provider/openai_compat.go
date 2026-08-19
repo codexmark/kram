@@ -42,7 +42,13 @@ func (p *OpenAICompatible) Kind() string { return "openai-compat" }
 type openaiCompatChunk struct {
 	Choices []struct {
 		Delta struct {
-			Content   string `json:"content"`
+			Content string `json:"content"`
+			// Reasoning carries a reasoning-capable model's chain-of-
+			// thought fragments — OpenRouter's wire extension for models
+			// like gpt-oss and nemotron, sent ahead of (sometimes long
+			// ahead of) any real answer content. See StreamEvent.Reasoning
+			// for why this can't just be folded into Content.
+			Reasoning string `json:"reasoning"`
 			ToolCalls []struct {
 				Index    int    `json:"index"`
 				ID       string `json:"id"`
@@ -111,6 +117,16 @@ func (p *OpenAICompatible) ChatCompletion(ctx context.Context, req openai.ChatCo
 				if c.Delta.Content != "" {
 					select {
 					case events <- StreamEvent{Delta: c.Delta.Content}:
+					case <-ctx.Done():
+						return false
+					}
+				} else if c.Delta.Reasoning != "" {
+					// No real answer content yet, but reasoning output is
+					// still real progress — forward it so
+					// router.BoundedPeek doesn't mistake a thinking model
+					// for a stalled one (see StreamEvent.Reasoning).
+					select {
+					case events <- StreamEvent{Reasoning: c.Delta.Reasoning}:
 					case <-ctx.Done():
 						return false
 					}

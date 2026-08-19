@@ -60,7 +60,14 @@ var Providers = []Provider{
 	// the OAuth token store (internal/credentials), never a real
 	// environment variable.
 	{ID: "openai-chatgpt", Label: "OpenAI (via login ChatGPT — beta)", Kind: "openai-responses", EnvVar: "OPENAI_CHATGPT_ACCESS_TOKEN", DefaultModel: "gpt-5.5", SupportsTools: true, SignupURL: "https://chatgpt.com", SupportsOAuth: true},
-	{ID: "gemini", Label: "Google AI Studio (Gemini)", Kind: "gemini", EnvVar: "GEMINI_API_KEY", DefaultModel: "gemini-2.5-pro", SupportsImages: true, SupportsTools: true, SignupURL: "https://aistudio.google.com/apikey"},
+	// DefaultModel is Google's own "latest" alias, not a numbered release —
+	// deliberately, after live-testing found both gemini-2.5-pro and
+	// gemini-2.5-flash rejected with a 404 ("no longer available to new
+	// users") despite still appearing, unflagged, in the real ListModels
+	// response (see DECISIONS.md). Numbered Gemini releases retire on a
+	// timeline the models list doesn't warn about; the "latest" aliases
+	// exist specifically so a pinned reference doesn't rot the same way.
+	{ID: "gemini", Label: "Google AI Studio (Gemini)", Kind: "gemini", EnvVar: "GEMINI_API_KEY", DefaultModel: "gemini-flash-latest", SupportsImages: true, SupportsTools: true, SignupURL: "https://aistudio.google.com/apikey"},
 	{ID: "openrouter-gptoss", Label: "OpenRouter (free: gpt-oss-20b)", Kind: "openai-compat", BaseURL: openRouterBaseURL, EnvVar: "OPENROUTER_API_KEY", DefaultModel: "openai/gpt-oss-20b:free", SupportsTools: true, FreeTier: true, SignupURL: "https://openrouter.ai/keys", SupportsOAuth: true},
 	{ID: "openrouter-gemma", Label: "OpenRouter (free: gemma-4-31b)", Kind: "openai-compat", BaseURL: openRouterBaseURL, EnvVar: "OPENROUTER_API_KEY", DefaultModel: "google/gemma-4-31b-it:free", SupportsTools: true, FreeTier: true, SignupURL: "https://openrouter.ai/keys", SupportsOAuth: true},
 	{ID: "openrouter-nemotron", Label: "OpenRouter (free: nemotron-3-super)", Kind: "openai-compat", BaseURL: openRouterBaseURL, EnvVar: "OPENROUTER_API_KEY", DefaultModel: "nvidia/nemotron-3-super-120b-a12b:free", SupportsTools: true, FreeTier: true, SignupURL: "https://openrouter.ai/keys", SupportsOAuth: true},

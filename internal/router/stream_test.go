@@ -92,3 +92,36 @@ func TestBoundedPeekContextCancellation(t *testing.T) {
 		t.Error("a canceled context should never result in a commit")
 	}
 }
+
+// TestBoundedPeekReasoningDoesNotCountAgainstMaxEvents reproduces the real
+// bug found live against OpenRouter's gpt-oss and nemotron models: a
+// reasoning-capable model sends many chain-of-thought fragments before
+// any real answer content. Before this fix, each fragment counted as a
+// "no signal" event and exhausted streamPeekMaxEvents long before the
+// real content ever arrived — this asserts that no longer happens.
+func TestBoundedPeekReasoningDoesNotCountAgainstMaxEvents(t *testing.T) {
+	ch := make(chan provider.StreamEvent, streamPeekMaxEvents*3+1)
+	for i := 0; i < streamPeekMaxEvents*3; i++ {
+		ch <- provider.StreamEvent{Reasoning: "thinking..."}
+	}
+	ch <- provider.StreamEvent{Delta: "the real answer"}
+	res := BoundedPeek(context.Background(), ch)
+	if !res.Committed {
+		t.Fatalf("real content after many reasoning fragments should still commit, got rejection: %s", res.Reason)
+	}
+}
+
+// TestBoundedPeekReasoningOnlyStillFallsBackEventually confirms reasoning
+// isn't a way to bypass rejection entirely — a stream that only ever
+// reasons and then closes must still fall back, same as any other
+// content-free stream.
+func TestBoundedPeekReasoningOnlyStillFallsBackEventually(t *testing.T) {
+	ch := make(chan provider.StreamEvent, 3)
+	ch <- provider.StreamEvent{Reasoning: "thinking one"}
+	ch <- provider.StreamEvent{Reasoning: "thinking two"}
+	close(ch)
+	res := BoundedPeek(context.Background(), ch)
+	if res.Committed {
+		t.Error("a stream that only ever reasons and then closes should not commit")
+	}
+}

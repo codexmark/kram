@@ -1585,6 +1585,77 @@ fabricated codes to sanity-check endpoints/shapes without needing a
 login, then, for Anthropic, by working through the actual live account
 data once a real connection had been made through the wizard.
 
+## The default combo's fallback chain, diagnosed from real gateway logs
+
+A real symptom from actual daily use, not a synthetic test: a wizard-
+configured "RESILIENT, 4 upstreams" combo was failing *every* candidate
+on most second-and-later prompts in a session, traced from the real
+`kram.log` a live session produced (not guessed from source reading —
+see "Two real bugs found only by running the wizard in tmux" above for
+why that distinction matters here too). Six candidates, six different
+failure reasons, three worth recording:
+
+**Gemini's pinned model was retired out from under it.** `gemini-2.5-pro`
+(the catalog's `DefaultModel`) 404'd on every single real generation
+call: `"This model models/gemini-2.5-pro is no longer available to new
+users."` The trap: `GET /v1beta/models` — the same endpoint
+`providerping`'s Gemini check calls — still lists it, unflagged, as
+supporting `generateContent`. A ping that only checks the model's
+presence in that list, or a hypothetical future "fetch available models"
+feature that trusted it, would both have kept reporting this as healthy.
+`gemini-2.5-flash` turned out to be retired the same way when tried as a
+replacement. Google's own `gemini-flash-latest`/`gemini-pro-latest`
+aliases exist specifically to not rot like a numbered release does —
+live-tested (a real streamed response, then a real tool call) before
+pinning `gemini-flash-latest` as the new default.
+
+**OpenRouter's free reasoning models were never actually broken — Kram
+was.** `openai/gpt-oss-20b:free` and `nvidia/nemotron-3-super-120b-a12b:free`
+failed with `"no meaningful content within the peek window"` on nearly
+every attempt. Direct testing (`curl -N` against a real streaming
+request) showed why: both are reasoning models that stream a chain-of-
+thought (OpenRouter's `delta.reasoning` field) for several seconds
+*before* any real answer content — and `internal/provider/openai_compat.go`
+didn't capture that field at all, so every reasoning fragment produced
+zero `StreamEvent`s. From `router.BoundedPeek`'s side, that reads as
+total silence; its fixed 5-second-from-start timer fired before real
+content ever arrived, and it gave up on a model that was actively working
+the whole time. Fixed at both ends: `openai_compat.go` now forwards
+reasoning fragments as `StreamEvent.Reasoning` (a new field, kept
+strictly separate from `Delta` — reasoning is not the model's answer and
+must never be relayed to a caller as assistant content), and
+`BoundedPeek`'s timer is now an *idle* timeout that resets on any event,
+reasoning included, bounded by a separate 30s overall ceiling so a model
+that reasons forever without ever answering still can't hold an attempt
+open indefinitely.
+
+**The two failures compounded into "almost never two prompts in a row."**
+With Anthropic permanently unusable (see "Browser login" above — no API
+credit balance) and Gemini permanently 404ing, only four of six
+candidates were ever real options; two of those four were being killed
+by the peek-timeout bug on nearly every attempt, and the remaining two
+are OpenRouter's genuinely shared, genuinely rate-limited free capacity.
+After live-verifying the fixes (three consecutive real prompts against
+the actual configured combo, zero provider failures in the log, each
+answered by the first candidate tried), that reduces to: one config
+correction plus one real bug, not six independent flakes.
+
+### A menu of available models would not have caught the Gemini failure on its own
+
+Asked directly, and worth recording: Gemini's own `ListModels` response
+listed the retired `gemini-2.5-pro` as supporting `generateContent` with
+no warning — the "menu" itself was wrong, not just unconsulted. A
+same-session check of OpenRouter's `/models` listing for the three
+pinned free-tier slugs found no equivalent problem there — all three are
+listed accurately (correct free pricing, correct tool support) and
+degrade for real reasons (rate limits, the reasoning-timeout bug above),
+not stale/wrong listings. So a future "discover available models
+automatically" feature is a real, reasonable direction, but it can't be
+"trust the list" — at least for Gemini, it would need an actual
+generation-capable liveness check per candidate model, not just
+presence in a catalog response, or it would inherit exactly this bug in
+a more automated, harder-to-notice form.
+
 ## Boundaries
 
 Several things were deliberately not built. Recording them so they don't
