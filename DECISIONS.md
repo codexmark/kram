@@ -2784,6 +2784,31 @@ directory not on PATH" guidance branch, a 404'd asset, and a tampered
 even created, proving the atomicity claim above rather than just
 asserting it.
 
+**A real bug survived that local testing and was only caught by the
+genuine end-to-end acceptance test** — installing for real via
+`curl ... | sh` against the live public repo, not the local
+`KRAM_BASE_URL`-overridden dry run. `KRAM_INSTALL_DIR=/tmp/x curl -fsSL
+... | sh` silently installed to the default `$HOME/.local/bin` instead
+of `/tmp/x`, with no error. The cause has nothing to do with
+`install.sh`'s own logic (it correctly reads `$KRAM_INSTALL_DIR`) — it's
+a POSIX shell semantics gotcha in the *documented invocation itself*:
+`VAR=value cmd1 | cmd2` only exports `VAR` into `cmd1`'s environment,
+not `cmd2`'s, and `sh` — the process that actually reads
+`KRAM_INSTALL_DIR` — is `cmd2` in that pipeline. `curl` never looks at
+the variable, so nothing about the failure was visible; it just quietly
+did the default thing. The fix is documentation-only, not a code
+change: every example moved the variable to immediately before `sh`
+(`curl -fsSL ... | KRAM_INSTALL_DIR=/tmp/x sh`), which *does* scope
+correctly since `sh` is the last command in the pipe, confirmed by
+re-running the exact same real `curl | sh` install with both
+`KRAM_VERSION` and `KRAM_INSTALL_DIR` set this way and getting the
+right version in the right directory. Worth being honest about why the
+five earlier local scenarios didn't catch this: every one of them
+invoked `install.sh` directly as a file (`bash install.sh` with env
+vars set the normal way, or via `env -i ... bash install.sh`) rather
+than through the actual `curl | sh` pipe the README instructs users to
+run — a gap in what "local testing" covered, not a gap in test count.
+
 No GoReleaser, Docker, Nix, Homebrew, or build-tool dependency beyond
 what the project already has (Go, a POSIX shell, `gh`) was introduced —
 Kram's whole architectural advantage here is being one static,

@@ -16,8 +16,10 @@ The first run walks you through a short setup wizard.
 
 ## Install a specific version
 
+The variable has to go right before `sh`, not before `curl` — `VAR=x cmd1 | cmd2` only sets `VAR` for `cmd1` in POSIX shells, and `sh` is the one that actually reads it here.
+
 ```sh
-KRAM_VERSION=v0.2.3 curl -fsSL https://raw.githubusercontent.com/codexmark/kram-releases/master/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/codexmark/kram-releases/master/install.sh | KRAM_VERSION=v0.2.3 sh
 ```
 
 ## Custom install directory
@@ -25,7 +27,7 @@ KRAM_VERSION=v0.2.3 curl -fsSL https://raw.githubusercontent.com/codexmark/kram-
 Defaults to `$HOME/.local/bin`.
 
 ```sh
-KRAM_INSTALL_DIR=/usr/local/bin curl -fsSL https://raw.githubusercontent.com/codexmark/kram-releases/master/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/codexmark/kram-releases/master/install.sh | KRAM_INSTALL_DIR=/usr/local/bin sh
 ```
 
 ## Windows
