@@ -172,6 +172,11 @@ type AttemptInfo struct {
 	// Attempt is this attempt's 1-indexed position in the fallback chain
 	// actually tried for this request (1 = first candidate tried).
 	Attempt int `json:"attempt,omitempty"`
+	// Class is this attempt's FailureClass, set whenever Outcome isn't
+	// OutcomeSuccess — see Classify and ClassContentRejected's doc
+	// comment for how a rejection (as opposed to a transport failure)
+	// gets classified.
+	Class FailureClass `json:"class,omitempty"`
 }
 
 // ScoreFactor is one weighted component of a scoring strategy's decision
