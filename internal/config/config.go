@@ -39,6 +39,13 @@ type ProviderConfig struct {
 	// live on every request (see internal/gateway.Run) since it can
 	// expire mid-session — see internal/credentials.Store.Resolve.
 	AuthMode string `yaml:"auth_mode,omitempty"`
+	// KeyOptional means APIKey should return an empty string instead of an
+	// error when APIKeyEnv isn't set — true only for
+	// internal/customprovider entries, most of which point at a local/LAN
+	// server with no auth at all. Every other provider keeps the strict
+	// default: an unset env var is a real misconfiguration worth failing
+	// loudly on (a clear startup error beats a confusing 401 later).
+	KeyOptional bool `yaml:"key_optional,omitempty"`
 	// Model is the upstream model ID to request, if it should be pinned
 	// regardless of what the client asked for. Empty means passthrough.
 	Model string `yaml:"model,omitempty"`
@@ -65,7 +72,7 @@ func (p ProviderConfig) APIKey() (string, error) {
 		return "", nil
 	}
 	v := os.Getenv(p.APIKeyEnv)
-	if v == "" {
+	if v == "" && !p.KeyOptional {
 		return "", fmt.Errorf("provider %q: env var %s is not set", p.ID, p.APIKeyEnv)
 	}
 	return v, nil

@@ -12,6 +12,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/codexmark/kram/internal/credentials"
+	"github.com/codexmark/kram/internal/customprovider"
 	"github.com/codexmark/kram/internal/oauthflow"
 	"github.com/codexmark/kram/internal/providercatalog"
 	"github.com/codexmark/kram/internal/providerping"
@@ -43,15 +44,52 @@ func newAccountsKeyInput() textinput.Model {
 }
 
 // wizardHasProvider reports whether at least one catalog account is
-// configured (env or stored) — the gate the wizard's provider step uses
-// before letting "n" advance to the next step.
+// configured (env or stored), or at least one custom provider is
+// registered — a custom provider counts by existence alone, since its
+// key is optional (see internal/customprovider's doc comment). The gate
+// the wizard's provider step uses before letting "n" advance.
 func (m *Model) wizardHasProvider() bool {
 	for _, row := range m.accountRows() {
 		if row.envSet || row.storedSet {
 			return true
 		}
 	}
-	return false
+	return len(m.customProviders) > 0
+}
+
+// accountsRowCounts returns the cursor layout for the combined accounts
+// list: staticCount catalog rows, then customCount registered custom
+// providers, then exactly one "+ add" row — every cursor-position check
+// in this file is written against these three numbers rather than
+// hardcoding providercatalog.Accounts' length directly, so the custom
+// rows and the add row are never forgotten in a bounds check.
+func (m *Model) accountsRowCounts() (staticCount, customCount, addRow, total int) {
+	staticCount = len(providercatalog.Accounts)
+	customCount = len(m.customProviders)
+	addRow = staticCount + customCount
+	total = addRow + 1
+	return
+}
+
+// currentCustomProvider returns the custom provider under the cursor, if
+// any — nil when the cursor is on a static catalog row or the add row.
+func (m *Model) currentCustomProvider() *customprovider.Provider {
+	staticCount, customCount, _, _ := m.accountsRowCounts()
+	if m.accountsCursor < staticCount || m.accountsCursor >= staticCount+customCount {
+		return nil
+	}
+	return &m.customProviders[m.accountsCursor-staticCount]
+}
+
+// refreshCustomProviders reloads the cached list from customStore after
+// an add/delete — nil-safe, same "best-effort" convention as every other
+// local store here.
+func (m *Model) refreshCustomProviders() {
+	if m.customStore == nil {
+		m.customProviders = nil
+		return
+	}
+	m.customProviders = m.customStore.All()
 }
 
 func (m *Model) accountRows() []accountStatus {
@@ -82,9 +120,10 @@ func accountByID(id string) *providercatalog.Account {
 }
 
 // renderAccounts draws the accounts screen: every known provider from
-// providercatalog.Accounts, its current status, and — depending on
-// state — either the list+hints, a masked key-entry prompt, or the
-// in-progress OAuth flow.
+// providercatalog.Accounts, every registered internal/customprovider
+// entry, an "+ add custom" row, and — depending on state — either the
+// list+hints, a masked key-entry prompt, the custom-provider add form,
+// or the in-progress OAuth flow.
 func (m Model) renderAccounts() string {
 	var b strings.Builder
 	if m.wizardMode {
@@ -95,6 +134,7 @@ func (m Model) renderAccounts() string {
 		b.WriteString(styleBody.Render("contas") + "\n\n")
 	}
 
+	staticCount, _, addRow, _ := m.accountsRowCounts()
 	rows := m.accountRows()
 	for i, a := range providercatalog.Accounts {
 		status := styleHint.Render("— não configurado")
@@ -118,10 +158,44 @@ func (m Model) renderAccounts() string {
 			b.WriteString("  " + line + "\n")
 		}
 	}
+
+	for i, cp := range m.customProviders {
+		hasKey := m.credStore != nil && m.credStore.Get(cp.EnvVar) != ""
+		status := styleBadgeOK.Render("✓ registrado (sem key)")
+		if hasKey {
+			status = styleBadgeOK.Render("✓ definido (salvo)")
+		}
+		dot := pingDot(m, cp.EnvVar, true) // existence alone means "configured" for a custom entry
+		line := fmt.Sprintf("%s %-30s %s", dot, cp.Name, status)
+		line += "  " + styleHint.Render(cp.BaseURL)
+		if cp.Model != "" {
+			line += "  " + styleHint.Render("modelo: "+cp.Model)
+		}
+		if detail := pingDetail(m, cp.EnvVar); detail != "" {
+			line += "  " + styleHint.Render(detail)
+		}
+		rowIdx := staticCount + i
+		if rowIdx == m.accountsCursor {
+			b.WriteString(styleYouTag.Render("▸ ") + styleBody.Render(line) + "\n")
+		} else {
+			b.WriteString("  " + line + "\n")
+		}
+	}
+
+	addLine := styleHint.Render("+ adicionar provedor customizado (URL + key opcional — servidor local/rede)")
+	if addRow == m.accountsCursor {
+		b.WriteString(styleYouTag.Render("▸ ") + addLine + "\n")
+	} else {
+		b.WriteString("  " + addLine + "\n")
+	}
 	b.WriteString("\n")
 
 	if m.wizardMode {
-		b.WriteString(wizardGatewayModeLine(rows) + "\n\n")
+		b.WriteString(wizardGatewayModeLine(rows, len(m.customProviders)) + "\n\n")
+	}
+
+	if m.accountsAddingCustom {
+		return b.String() + m.renderCustomProviderForm()
 	}
 
 	if m.accountsEditing {
@@ -143,18 +217,28 @@ func (m Model) renderAccounts() string {
 	}
 
 	hint := ""
-	cur := providercatalog.Account{}
-	if m.accountsCursor < len(providercatalog.Accounts) {
-		cur = providercatalog.Accounts[m.accountsCursor]
-	}
-	if !cur.OAuthOnly {
-		hint = "enter cola api key"
-	}
-	if cur.SupportsOAuth {
-		if hint != "" {
-			hint += " · "
+	switch {
+	case m.accountsCursor < staticCount:
+		cur := providercatalog.Accounts[m.accountsCursor]
+		if !cur.OAuthOnly {
+			hint = "enter cola api key"
 		}
-		hint += "o conecta via oauth"
+		if cur.SupportsOAuth {
+			if hint != "" {
+				hint += " · "
+			}
+			hint += "o conecta via oauth"
+		}
+		if !m.wizardMode {
+			hint += " · d remove chave salva"
+		}
+	case m.accountsCursor < addRow:
+		hint = "enter define/atualiza a key"
+		if !m.wizardMode {
+			hint += " · d remove"
+		}
+	case m.accountsCursor == addRow:
+		hint = "enter adiciona provedor customizado"
 	}
 	if m.wizardMode {
 		hint += " · r verifica de novo"
@@ -167,9 +251,33 @@ func (m Model) renderAccounts() string {
 			hint += " · esc volta"
 		}
 	} else {
-		hint += " · d remove chave salva · r verifica de novo · esc volta"
+		hint += " · r verifica de novo · esc volta"
 	}
 	b.WriteString(styleHint.Render(hint))
+	return b.String()
+}
+
+// customFormLabels are the four fields of the "add custom provider" form,
+// in cursor order.
+var customFormLabels = []string{"nome", "url", "api key (opcional)", "modelo (opcional)"}
+
+// renderCustomProviderForm draws the "+ add custom" form — a plain
+// multi-field prompt in the same spirit as the single-field key-paste
+// editor above it, just with more than one input.
+func (m Model) renderCustomProviderForm() string {
+	var b strings.Builder
+	b.WriteString(styleMeta.Render("novo provedor customizado:") + "\n\n")
+	for i, label := range customFormLabels {
+		marker := "  "
+		if i == m.customFormCursor {
+			marker = styleYouTag.Render("▸ ")
+		}
+		b.WriteString(fmt.Sprintf("%s%-20s %s\n", marker, label, m.customFormInputs[i].View()))
+	}
+	if m.accountsStatus != "" {
+		b.WriteString("\n" + styleHint.Render(m.accountsStatus))
+	}
+	b.WriteString("\n\n" + styleHint.Render("tab avança · shift+tab volta · enter salva · esc cancela"))
 	return b.String()
 }
 
@@ -178,8 +286,8 @@ func (m Model) renderAccounts() string {
 // not providercatalog.Providers entries: OpenRouter contributes 3 free-
 // model routes from one account, and those must never be presented as 3
 // independent upstreams.
-func wizardGatewayModeLine(rows []accountStatus) string {
-	n := 0
+func wizardGatewayModeLine(rows []accountStatus, customCount int) string {
+	n := customCount
 	for _, r := range rows {
 		if r.envSet || r.storedSet {
 			n++
@@ -244,6 +352,10 @@ func pingDetail(m Model, envVar string) string {
 }
 
 func (m Model) handleAccountsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.accountsAddingCustom {
+		return m.handleCustomProviderFormKey(msg)
+	}
+
 	if m.accountsEditing {
 		switch msg.String() {
 		case "esc":
@@ -255,20 +367,21 @@ func (m Model) handleAccountsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if key == "" {
 				return m, nil
 			}
-			acct := providercatalog.Accounts[m.accountsCursor]
-			if m.credStore != nil {
-				if err := m.credStore.Set(acct.EnvVar, key); err != nil {
-					m.accountsStatus = "erro ao salvar: " + err.Error()
-					return m, nil
-				}
-				m.accountsStatus = acct.Label + ": chave salva — reinicie o kram pra usar."
-				if m.wizardMode {
-					// Validate immediately rather than waiting for a manual
-					// "r" — the wizard's whole point is real feedback as the
-					// user goes, not a key that might silently fail later.
-					m.accountsPinging = true
-					return m, pingAccountsCmd(m.credStore)
-				}
+			envVar, label, ok := m.currentCredentialTarget()
+			if !ok || m.credStore == nil {
+				return m, nil
+			}
+			if err := m.credStore.Set(envVar, key); err != nil {
+				m.accountsStatus = "erro ao salvar: " + err.Error()
+				return m, nil
+			}
+			m.accountsStatus = label + ": chave salva — reinicie o kram pra usar."
+			if m.wizardMode {
+				// Validate immediately rather than waiting for a manual
+				// "r" — the wizard's whole point is real feedback as the
+				// user goes, not a key that might silently fail later.
+				m.accountsPinging = true
+				return m, pingAccountsCmd(m.credStore, m.customProviders)
 			}
 			return m, nil
 		}
@@ -288,6 +401,8 @@ func (m Model) handleAccountsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	staticCount, _, addRow, total := m.accountsRowCounts()
+
 	switch msg.String() {
 	case "esc":
 		if m.wizardMode {
@@ -305,39 +420,77 @@ func (m Model) handleAccountsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.accountsCursor--
 		}
 	case "down":
-		if m.accountsCursor < len(providercatalog.Accounts)-1 {
+		if m.accountsCursor < total-1 {
 			m.accountsCursor++
 		}
 	case "enter":
-		if providercatalog.Accounts[m.accountsCursor].OAuthOnly {
-			return m, nil // no key to paste — "o" is this account's only path
+		switch {
+		case m.accountsCursor < staticCount:
+			if providercatalog.Accounts[m.accountsCursor].OAuthOnly {
+				return m, nil // no key to paste — "o" is this account's only path
+			}
+			m.accountsEditing = true
+			m.accountsStatus = ""
+			m.accountsKeyInput.SetValue("")
+			m.accountsKeyInput.Focus()
+			return m, textinput.Blink
+		case m.accountsCursor < addRow:
+			// An existing custom provider — enter sets/updates its
+			// (optional) key, reusing the same masked-input flow. Editing
+			// name/URL/model in place is out of scope: delete and re-add
+			// covers it.
+			m.accountsEditing = true
+			m.accountsStatus = ""
+			m.accountsKeyInput.SetValue("")
+			m.accountsKeyInput.Focus()
+			return m, textinput.Blink
+		default: // addRow
+			m.accountsAddingCustom = true
+			m.accountsStatus = ""
+			m.customFormInputs = newCustomProviderFormInputs()
+			m.customFormCursor = 0
+			m.customFormInputs[0].Focus()
+			return m, textinput.Blink
 		}
-		m.accountsEditing = true
-		m.accountsStatus = ""
-		m.accountsKeyInput.SetValue("")
-		m.accountsKeyInput.Focus()
-		return m, textinput.Blink
 	case "d":
 		if m.wizardMode {
 			return m, nil // no deletion during setup — nothing to undo yet
 		}
-		acct := providercatalog.Accounts[m.accountsCursor]
-		if m.credStore != nil {
-			_ = m.credStore.Delete(acct.EnvVar)
-			_ = m.credStore.DeleteOAuth(acct.EnvVar)
-			m.accountsStatus = acct.Label + ": credencial removida."
+		switch {
+		case m.accountsCursor < staticCount:
+			acct := providercatalog.Accounts[m.accountsCursor]
+			if m.credStore != nil {
+				_ = m.credStore.Delete(acct.EnvVar)
+				_ = m.credStore.DeleteOAuth(acct.EnvVar)
+				m.accountsStatus = acct.Label + ": credencial removida."
+			}
+		case m.accountsCursor < addRow:
+			if cp := m.currentCustomProvider(); cp != nil && m.customStore != nil {
+				name := cp.Name
+				_ = m.customStore.Delete(cp.ID)
+				if m.credStore != nil {
+					_ = m.credStore.Delete(cp.EnvVar)
+				}
+				m.refreshCustomProviders()
+				if _, _, newAddRow, _ := m.accountsRowCounts(); m.accountsCursor > newAddRow {
+					m.accountsCursor = newAddRow
+				}
+				m.accountsStatus = name + ": provedor removido."
+			}
 		}
 	case "o":
-		acct := providercatalog.Accounts[m.accountsCursor]
-		if acct.SupportsOAuth {
-			m.accountsOAuthPending = true
-			m.accountsStatus = ""
-			return m, startOAuthCmd(acct.ID)
+		if m.accountsCursor < staticCount {
+			acct := providercatalog.Accounts[m.accountsCursor]
+			if acct.SupportsOAuth {
+				m.accountsOAuthPending = true
+				m.accountsStatus = ""
+				return m, startOAuthCmd(acct.ID)
+			}
 		}
 	case "r":
 		m.accountsPinging = true
 		m.accountsStatus = ""
-		return m, pingAccountsCmd(m.credStore)
+		return m, pingAccountsCmd(m.credStore, m.customProviders)
 	case "n":
 		if m.wizardMode && m.wizardHasProvider() {
 			m.phase = phaseWizardRouting
@@ -349,6 +502,107 @@ func (m Model) handleAccountsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	return m, nil
+}
+
+// currentCredentialTarget resolves which envVar/label the masked
+// key-paste editor (accountsEditing) is currently acting on — a static
+// catalog account or an existing custom provider, whichever the cursor
+// is on. ok is false when the cursor is on the "+ add" row, which has no
+// key of its own to edit (use "enter" there to open the add form
+// instead).
+func (m Model) currentCredentialTarget() (envVar, label string, ok bool) {
+	staticCount, _, addRow, _ := m.accountsRowCounts()
+	switch {
+	case m.accountsCursor < staticCount:
+		acct := providercatalog.Accounts[m.accountsCursor]
+		return acct.EnvVar, acct.Label, true
+	case m.accountsCursor < addRow:
+		if cp := m.currentCustomProvider(); cp != nil {
+			return cp.EnvVar, cp.Name, true
+		}
+	}
+	return "", "", false
+}
+
+// newCustomProviderFormInputs builds the four fields of the "add custom
+// provider" form, in the same order as customFormLabels.
+func newCustomProviderFormInputs() []textinput.Model {
+	name := textinput.New()
+	name.Placeholder = "Meu Servidor"
+	name.CharLimit = 80
+	name.Prompt = "› "
+
+	url := textinput.New()
+	url.Placeholder = "http://192.168.1.50:8080/v1"
+	url.CharLimit = 300
+	url.Prompt = "› "
+
+	key := newAccountsKeyInput()
+
+	model := textinput.New()
+	model.Placeholder = "(vazio = repassa o que for pedido)"
+	model.CharLimit = 200
+	model.Prompt = "› "
+
+	return []textinput.Model{name, url, key, model}
+}
+
+// handleCustomProviderFormKey drives the "+ add custom" form: tab/shift+tab
+// move focus, esc cancels, enter validates and submits regardless of
+// which field currently has focus (the same "enter always finishes"
+// convention every other single-field prompt in this screen already
+// uses), anything else is forwarded to the focused input.
+func (m Model) handleCustomProviderFormKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.accountsAddingCustom = false
+		m.accountsStatus = ""
+		return m, nil
+	case "tab":
+		m.customFormInputs[m.customFormCursor].Blur()
+		m.customFormCursor = (m.customFormCursor + 1) % len(m.customFormInputs)
+		m.customFormInputs[m.customFormCursor].Focus()
+		return m, textinput.Blink
+	case "shift+tab":
+		m.customFormInputs[m.customFormCursor].Blur()
+		m.customFormCursor = (m.customFormCursor - 1 + len(m.customFormInputs)) % len(m.customFormInputs)
+		m.customFormInputs[m.customFormCursor].Focus()
+		return m, textinput.Blink
+	case "enter":
+		name := strings.TrimSpace(m.customFormInputs[0].Value())
+		url := strings.TrimSpace(m.customFormInputs[1].Value())
+		key := strings.TrimSpace(m.customFormInputs[2].Value())
+		model := strings.TrimSpace(m.customFormInputs[3].Value())
+
+		if m.customStore == nil {
+			m.accountsStatus = "erro: armazenamento local indisponível."
+			return m, nil
+		}
+		cp, err := m.customStore.Add(name, url, model)
+		if err != nil {
+			m.accountsStatus = err.Error()
+			return m, nil
+		}
+		if key != "" && m.credStore != nil {
+			if err := m.credStore.Set(cp.EnvVar, key); err != nil {
+				m.accountsStatus = "provedor salvo, mas erro ao salvar a key: " + err.Error()
+			}
+		}
+		m.accountsAddingCustom = false
+		m.refreshCustomProviders()
+		_, customCount, _, _ := m.accountsRowCounts()
+		staticCount := len(providercatalog.Accounts)
+		m.accountsCursor = staticCount + customCount - 1 // land on the row just added
+		m.accountsStatus = cp.Name + ": provedor adicionado — reinicie o kram pra usar."
+		if m.wizardMode {
+			m.accountsPinging = true
+			return m, pingAccountsCmd(m.credStore, m.customProviders)
+		}
+		return m, nil
+	}
+	var cmd tea.Cmd
+	m.customFormInputs[m.customFormCursor], cmd = m.customFormInputs[m.customFormCursor].Update(msg)
+	return m, cmd
 }
 
 // oauthURLMsg reports that the local callback listener is up and an

@@ -29,6 +29,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/codexmark/kram/internal/credentials"
+	"github.com/codexmark/kram/internal/customprovider"
 	"github.com/codexmark/kram/internal/kramhome"
 	"github.com/codexmark/kram/internal/mcp"
 	"github.com/codexmark/kram/internal/providercatalog"
@@ -66,7 +67,7 @@ func (m Model) handleWizardEnvironmentKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.phase = phaseAccounts
 			m.wizardStep = 3
 			m.accountsPinging = true
-			return m, pingAccountsCmd(m.credStore)
+			return m, pingAccountsCmd(m.credStore, m.customProviders)
 		}
 		m.phase = phaseWizardProjects
 		m.wizardStep = 2
@@ -132,7 +133,7 @@ func (m Model) handleWizardProjectsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.phase = phaseAccounts
 		m.wizardStep = 3
 		m.accountsPinging = true
-		return m, pingAccountsCmd(m.credStore)
+		return m, pingAccountsCmd(m.credStore, m.customProviders)
 	}
 	var cmd tea.Cmd
 	if m.wizardProjectsField == 0 {
@@ -307,6 +308,11 @@ func RunWizard(explicitWorkspace string, workspaceExplicit bool) (WizardResult, 
 
 func newWizardModel(explicitWorkspace string, workspaceExplicit bool) Model {
 	credStore, _ := credentials.Load() // nil on failure; accounts.go already guards every use
+	customStore, _ := customprovider.Load()
+	var customProviders []customprovider.Provider
+	if customStore != nil {
+		customProviders = customStore.All()
+	}
 
 	cwd, _ := os.Getwd()
 	hasGit := false
@@ -344,6 +350,8 @@ func newWizardModel(explicitWorkspace string, workspaceExplicit bool) Model {
 		phase:                   phaseWizardEnvironment,
 		credStore:               credStore,
 		accountsKeyInput:        newAccountsKeyInput(),
+		customStore:             customStore,
+		customProviders:         customProviders,
 	}
 	if workspaceExplicit {
 		if abs, err := filepath.Abs(explicitWorkspace); err == nil {

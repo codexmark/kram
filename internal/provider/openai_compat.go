@@ -83,7 +83,14 @@ func (p *OpenAICompatible) ChatCompletion(ctx context.Context, req openai.ChatCo
 		return nil, fmt.Errorf("%s: building request: %w", p.id, err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Authorization", "Bearer "+p.apiKey)
+	// Custom local/LAN servers commonly run with no auth at all (see
+	// internal/customprovider) — every other caller here always has a
+	// real key, so skipping the header only when empty changes nothing
+	// for them, but avoids sending a malformed "Bearer " to a server
+	// that would otherwise just ignore it.
+	if p.apiKey != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+p.apiKey)
+	}
 	httpReq.Header.Set("Accept", "text/event-stream")
 
 	resp, err := p.client.Do(httpReq)

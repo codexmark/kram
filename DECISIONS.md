@@ -1699,6 +1699,55 @@ prompt that triggers three genuinely parallel tool calls
 correctly synthesized the final answer from their results, the exact
 shape of turn that used to 400 on every attempt.
 
+## Custom providers: a user-registered OpenAI-compatible endpoint (local/LAN servers)
+
+`internal/providercatalog` was a fixed, compile-time list — no way to
+point Kram at a local server (llama.cpp, LM Studio, Ollama's OpenAI
+endpoint, vLLM) without hand-editing a generated `config.yaml`.
+`internal/customprovider` adds a small user-editable store (name, URL,
+optional model) reachable from the accounts screen's new "+ adicionar
+provedor customizado" row — multiple entries, each independently named,
+since "servidor de casa" and "servidor do trampo" are both real
+simultaneous cases. The API key is optional (most local servers have no
+auth) and, when present, is *not* stored in this new package at all — it
+reuses `internal/credentials.Store` under a synthesized env var
+(`CUSTOM_<ID>_API_KEY`), the same pattern an OAuth-connected account's
+synthetic env var already established. One place for every secret.
+
+### A custom provider with no key crashed the entire gateway, not just that one provider
+
+Live-tested (see below) with a real no-auth local server and caught
+immediately: `config.ProviderConfig.APIKey()` treated an unset
+`APIKeyEnv` as a hard error unconditionally, which every provider path
+before this one could safely assume never fires — `detectGatewayConfig`
+only ever included a *catalog* provider when its env var was already
+confirmed non-empty, so the error branch was structurally unreachable
+for them. Custom providers break that assumption on purpose (existence
+in the store, not a populated env var, is what "configured" means for
+one — see the optional-key design above), and `provider.Build` calling
+`APIKey()` for one with no key turned a "log a warning and skip this one
+provider" situation into `gateway.Run` returning an error before
+`ListenAndServe` — the whole gateway, and with it the whole `kram`
+process, never came up. Fixed with a new `ProviderConfig.KeyOptional`
+field, set only on custom-provider entries, so every other provider path
+(catalog or a hand-written config.yaml) keeps today's strict behavior —
+an unset required env var stays a clear startup error, not a silently
+missing credential discovered later as a confusing 401.
+
+### Live-verified against a real LAN server, not just the bundled mock
+
+`devtools/mock-provider` (a real local OpenAI-compatible server already
+in this repo, built for exactly this kind of testing) confirmed the
+basic flow, but the user supplied a real server on their own network
+mid-verification, which ended up testing more of the real path at once:
+registered it through the actual accounts screen (name "lab", a real
+`http://192.168.x.x:20128/v1` URL, a real key, later a pinned model), it
+pinged green at real latency, and — forced onto a single-provider combo
+to guarantee the fallback chain couldn't route around it — a real chat
+turn completed through it end to end. This is also what surfaced the
+`KeyOptional` bug above: the crash only reproduced against a real
+gateway startup with a no-auth entry present, not against any unit test.
+
 ## Boundaries
 
 Several things were deliberately not built. Recording them so they don't

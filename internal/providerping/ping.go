@@ -137,7 +137,12 @@ func buildPingRequest(ctx context.Context, kind, baseURL, apiKey string) (*http.
 		if err != nil {
 			return nil, err
 		}
-		req.Header.Set("Authorization", "Bearer "+apiKey)
+		// A no-auth custom local/LAN server (internal/customprovider) has
+		// no key to send — skip the header rather than a malformed
+		// "Bearer " that would otherwise just be ignored.
+		if apiKey != "" {
+			req.Header.Set("Authorization", "Bearer "+apiKey)
+		}
 		return req, nil
 	}
 }

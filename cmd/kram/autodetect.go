@@ -6,6 +6,7 @@ import (
 
 	"github.com/codexmark/kram/internal/config"
 	"github.com/codexmark/kram/internal/credentials"
+	"github.com/codexmark/kram/internal/customprovider"
 	"github.com/codexmark/kram/internal/providercatalog"
 )
 
@@ -40,6 +41,12 @@ func loadStoredCredentials() {
 // will be found in that case, same as before this parameter existed).
 // Order is deterministic (the catalog's order), which also becomes the
 // round-robin combo order.
+//
+// Every registered internal/customprovider entry is also included,
+// unconditionally — unlike a catalog provider, a custom one's mere
+// existence in that store *is* the "configured" signal, since its API
+// key is optional (most local/LAN servers have no auth) and there's no
+// env var whose presence would otherwise say "use this one".
 func detectGatewayConfig(strategyOverride string, credStore *credentials.Store) (*config.Config, error) {
 	var providers []config.ProviderConfig
 	var ids []string
@@ -65,6 +72,17 @@ func detectGatewayConfig(strategyOverride string, credStore *credentials.Store) 
 		ids = append(ids, p.ID)
 		if !p.FreeTier {
 			havePaid = true
+		}
+	}
+
+	if customStore, err := customprovider.Load(); err == nil {
+		for _, cp := range customStore.All() {
+			id := "custom-" + cp.ID
+			providers = append(providers, config.ProviderConfig{
+				ID: id, Kind: "openai-compat", BaseURL: cp.BaseURL, APIKeyEnv: cp.EnvVar,
+				Model: cp.Model, SupportsTools: true, KeyOptional: true,
+			})
+			ids = append(ids, id)
 		}
 	}
 

@@ -11,6 +11,7 @@ import (
 	"github.com/codexmark/kram/internal/cli/daemonclient"
 	"github.com/codexmark/kram/internal/cli/statusclient"
 	"github.com/codexmark/kram/internal/credentials"
+	"github.com/codexmark/kram/internal/customprovider"
 	"github.com/codexmark/kram/internal/oauthflow"
 	"github.com/codexmark/kram/internal/providercatalog"
 	"github.com/codexmark/kram/internal/providerping"
@@ -149,18 +150,19 @@ type pingResultsMsg struct {
 	results map[string]providerping.Result
 }
 
-// pingAccountsCmd checks every catalog account concurrently — this runs
-// on demand (entering the accounts screen, or a manual refresh), never in
-// the background, and each check is bounded by providerping's own
-// timeout, so the whole batch can't hang the UI indefinitely. credStore
-// may be nil (a fresh install with no credentials file yet); the real env
-// var always wins over a stored key, same precedence cmd/kram's own
-// startup wiring uses.
-func pingAccountsCmd(credStore *credentials.Store) tea.Cmd {
+// pingAccountsCmd checks every catalog account plus every registered
+// custom provider concurrently — this runs on demand (entering the
+// accounts screen, a manual refresh, or right after adding/updating a
+// credential), never in the background, and each check is bounded by
+// providerping's own timeout, so the whole batch can't hang the UI
+// indefinitely. credStore may be nil (a fresh install with no
+// credentials file yet); the real env var always wins over a stored key,
+// same precedence cmd/kram's own startup wiring uses.
+func pingAccountsCmd(credStore *credentials.Store, customProviders []customprovider.Provider) tea.Cmd {
 	return func() tea.Msg {
 		var wg sync.WaitGroup
 		var mu sync.Mutex
-		results := make(map[string]providerping.Result, len(providercatalog.Accounts))
+		results := make(map[string]providerping.Result, len(providercatalog.Accounts)+len(customProviders))
 
 		for _, acct := range providercatalog.Accounts {
 			key := os.Getenv(acct.EnvVar)
@@ -191,6 +193,24 @@ func pingAccountsCmd(credStore *credentials.Store) tea.Cmd {
 				results[envVar] = res
 				mu.Unlock()
 			}(acct.EnvVar, kind, baseURL, key)
+		}
+
+		for _, cp := range customProviders {
+			key := ""
+			if credStore != nil {
+				key = credStore.Get(cp.EnvVar)
+			}
+			// Unlike a catalog account, existence alone is the "configured"
+			// signal here — an empty key is a legitimate no-auth local
+			// server, not "unchecked" (see internal/customprovider).
+			wg.Add(1)
+			go func(envVar, baseURL, key string) {
+				defer wg.Done()
+				res := providerping.Ping(context.Background(), "openai-compat", baseURL, key)
+				mu.Lock()
+				results[envVar] = res
+				mu.Unlock()
+			}(cp.EnvVar, cp.BaseURL, key)
 		}
 
 		wg.Wait()

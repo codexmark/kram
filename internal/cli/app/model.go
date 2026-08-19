@@ -23,6 +23,7 @@ import (
 	"github.com/codexmark/kram/internal/cli/daemonclient"
 	"github.com/codexmark/kram/internal/cli/statusclient"
 	"github.com/codexmark/kram/internal/credentials"
+	"github.com/codexmark/kram/internal/customprovider"
 	"github.com/codexmark/kram/internal/openai"
 	"github.com/codexmark/kram/internal/providerping"
 	"github.com/codexmark/kram/internal/toolsettings"
@@ -178,6 +179,19 @@ type Model struct {
 	accountsPings   map[string]providerping.Result
 	accountsPinging bool
 
+	// customStore is the user-registered custom-provider list (URL +
+	// optional key/model, for a local/LAN OpenAI-compatible server — see
+	// internal/customprovider), nil only if the file couldn't be opened.
+	// customProviders is a cache of customStore.All() refreshed after
+	// every add/delete, rendered as extra rows below the static catalog
+	// in the accounts screen. accountsAddingCustom/customFormInputs/
+	// customFormCursor drive the "+ add custom provider" form.
+	customStore          *customprovider.Store
+	customProviders      []customprovider.Provider
+	accountsAddingCustom bool
+	customFormInputs     []textinput.Model
+	customFormCursor     int
+
 	// tools/skills toggle screen state.
 	toolSettings *toolsettings.Store
 	toolsList    []daemonclient.ToolInfo
@@ -281,12 +295,18 @@ func New(daemon *daemonclient.Client, gateway *statusclient.Client, sessionID, c
 
 	credStore, _ := credentials.Load()     // nil on failure; every use site guards for it
 	toolSettings, _ := toolsettings.Load() // same
+	customStore, _ := customprovider.Load()
+	var customProviders []customprovider.Provider
+	if customStore != nil {
+		customProviders = customStore.All()
+	}
 
 	m := Model{
 		daemon: daemon, gateway: gateway, combo: combo, workspace: workspace, sessionID: sessionID,
 		input: ti, newSessionText: titleInput, accountsKeyInput: keyInput, questionInput: answerInput,
 		viewport: viewport.New(80, 20), spin: sp,
 		credStore: credStore, toolSettings: toolSettings,
+		customStore: customStore, customProviders: customProviders,
 	}
 	switch {
 	case sessionID != "":
@@ -460,7 +480,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.accountsStatus = status
 			if m.wizardMode {
 				m.accountsPinging = true
-				return m, pingAccountsCmd(m.credStore)
+				return m, pingAccountsCmd(m.credStore, m.customProviders)
 			}
 		}
 		return m, nil
@@ -625,7 +645,7 @@ func (m Model) handlePickerKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.phase = phaseAccounts
 		m.accountsStatus = ""
 		m.accountsPinging = true
-		return m, pingAccountsCmd(m.credStore)
+		return m, pingAccountsCmd(m.credStore, m.customProviders)
 	case "f":
 		m.phase = phaseTools
 		m.toolsStatus = ""
