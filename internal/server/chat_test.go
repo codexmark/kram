@@ -407,6 +407,52 @@ func TestAllProvidersFailedWithInvalidRequestIsNotRetryable(t *testing.T) {
 	}
 }
 
+// TestAllProvidersFailedIsRetryableIfAnyAttemptWas is the regression
+// test for the confirmed bug: Retryable used to reflect only the *last*
+// attempt's class, which is wrong whenever ranking order happens to put
+// a permanently-broken candidate (a 404 for a retired model, say) after
+// a merely transient one (429/503) — the round as a whole is still
+// worth retrying, since which candidate was tried last is an accident
+// of ranking order, not evidence every candidate is hopeless.
+func TestAllProvidersFailedIsRetryableIfAnyAttemptWas(t *testing.T) {
+	cfg := &config.Config{
+		Providers:    []config.ProviderConfig{{ID: "p1", Kind: "fake"}, {ID: "p2", Kind: "fake"}, {ID: "p3", Kind: "fake"}},
+		Combos:       []config.ComboConfig{{ID: "default", Strategy: "priority", Providers: []string{"p1", "p2", "p3"}}},
+		DefaultCombo: "default",
+	}
+	providers := map[string]provider.Provider{
+		"p1": scriptedProvider{id: "p1", events: []provider.StreamEvent{{Err: &provider.HTTPError{Provider: "p1", StatusCode: 429, Status: "429 Too Many Requests"}}}},
+		"p2": scriptedProvider{id: "p2", events: []provider.StreamEvent{{Err: &provider.HTTPError{Provider: "p2", StatusCode: 503, Status: "503 Service Unavailable"}}}},
+		"p3": scriptedProvider{id: "p3", events: []provider.StreamEvent{{Err: &provider.HTTPError{Provider: "p3", StatusCode: 404, Status: "404 Not Found"}}}},
+	}
+	breakers := breaker.NewRegistry()
+	tel := telemetry.New()
+	rt, err := router.New(cfg, providers, breakers, tel)
+	if err != nil {
+		t.Fatalf("router.New: %v", err)
+	}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	s := New(cfg, providers, rt, breakers, tel, logger)
+
+	rec := postBufferedChat(t, s)
+	var errResp openai.ErrorResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &errResp); err != nil {
+		t.Fatalf("decoding error response: %v", err)
+	}
+	if len(errResp.Error.Attempts) != 3 {
+		t.Fatalf("expected 3 attempts in the trail, got %d: %+v", len(errResp.Error.Attempts), errResp.Error.Attempts)
+	}
+	if !errResp.Error.Retryable {
+		t.Error("Retryable = false, want true — p1 (429) was retryable even though the last candidate (p3, 404) wasn't")
+	}
+	// Cause still reflects the last attempt — still meaningful as "what
+	// ultimately ended this request", just no longer conflated with
+	// Retryable.
+	if errResp.Error.Cause != openai.ClassInvalidRequest {
+		t.Errorf("Cause = %q, want %q (p3's class, the last attempt)", errResp.Error.Cause, openai.ClassInvalidRequest)
+	}
+}
+
 // TestAllProvidersFailedCarriesRetryAfter confirms a real Retry-After
 // from the upstream survives all the way to the wire response.
 func TestAllProvidersFailedCarriesRetryAfter(t *testing.T) {

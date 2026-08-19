@@ -86,10 +86,14 @@ func (s *Service) callModelWithRetry(ctx context.Context, model string, messages
 		if !errors.As(err, &ge) || !ge.Retryable {
 			// Not a GatewayError at all (e.g. the gateway itself is
 			// unreachable — a different failure mode retrying won't fix
-			// either), or a GatewayError whose last attempt's class says
-			// retrying can't help (see openai.FailureClass.Retryable) —
-			// fail immediately rather than burning rounds on a request
-			// that will fail the same way every time.
+			// either), or a GatewayError where not even one candidate in
+			// the trail was retryable (see openai.FailureClass.Retryable
+			// and writeGatewayError's doc comment — this is deliberately
+			// "any attempt retryable", not just the last one, since which
+			// candidate a ranking happens to try last is an accident of
+			// order, not evidence the whole round is hopeless) — fail
+			// immediately rather than burning rounds on a request that
+			// will fail the same way every time.
 			return gatewayclient.Result{}, err
 		}
 	}

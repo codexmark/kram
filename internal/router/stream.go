@@ -36,12 +36,20 @@ const (
 	// took longer than that ceiling on real prompts — not stalled, just
 	// still thinking — and got rejected mid-answer, forcing fallback onto
 	// worse (rate-limited) candidates that then failed too, compounding
-	// into a fully failed turn (see DECISIONS.md). The genuine "never
-	// answers at all" backstop already exists one layer down, at the
-	// transport: every provider adapter's http.Client carries its own
-	// timeout (120s in internal/provider/openai_compat.go) — the right
-	// place for an absolute ceiling, since it doesn't fire while tokens
-	// keep arriving.
+	// into a fully failed turn (see DECISIONS.md). A genuine hard ceiling
+	// still exists one layer down, at the transport: every provider
+	// adapter's http.Client carries its own timeout (120s in
+	// internal/provider/openai_compat.go). Note what that ceiling
+	// actually bounds, though — Go's http.Client.Timeout covers the
+	// *entire* request lifetime (dial, headers, and reading the full
+	// response body), not idle gaps between reads; it does not reset each
+	// time a byte arrives. So it's a real backstop against a connection
+	// that goes fully dead or one that's simply slower overall than
+	// 120s — not a per-token idle timer the way this package's own
+	// streamPeekIdleTimeout is. A stream that's still genuinely, slowly
+	// producing tokens past 120s total would still get cut off there;
+	// that's a real, known limit of the current design, not a solved
+	// case.
 	streamPeekIdleTimeout = 5 * time.Second
 )
 

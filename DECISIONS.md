@@ -2075,6 +2075,61 @@ binary (`~/.local/bin/kram`, real separate gateway+daemon processes,
 `devtools/mock-provider`, a workspace with a real `AGENTS.md`) — a
 genuine turn completed cleanly with no wiring regression.
 
+## Gateway Round retry: "last attempt wins" was the wrong retry decision
+
+A second review of the hardening pass above (by the same reviewer who
+caught the `RefreshPolicy` naming issue during the Prompt Compiler's
+design) found a real bug in `writeGatewayError`'s `Retryable` field: it
+was computed from only the *last* attempt in the fallback trail, on the
+stated reasoning that "the last attempt is the one that actually ended
+the request." That reasoning doesn't hold up. A concrete counterexample
+makes it obvious: three candidates ranked A, B, C; A fails `429` (rate
+limit, retryable), B fails `503` (server error, retryable), C fails
+`404` (retired/unknown model, not retryable — see the Gemini
+retired-model incident earlier in this document for exactly this
+failure mode in the wild). Whichever candidate happens to be *last* in
+ranking order is an accident of priority/strategy, not evidence the
+whole round is hopeless — under the old logic, C being last meant
+`Retryable=false` and the Gateway Round retry never fired, even though A
+or B might have succeeded moments later.
+
+Fixed in `writeGatewayError` (`internal/server/chat.go`): `Retryable` is
+now true if *any* attempt in the trail was retryable, computed by
+scanning the whole trail instead of indexing the last entry. `Cause`
+still reflects the last attempt specifically — that's still meaningful
+as "what ultimately ended this request" for display/logging, just no
+longer conflated with the retry decision. `internal/daemon/agent/retry.go`
+needed no logic change (it already just trusts `GatewayError.Retryable`
+from the wire) — only its comment, which restated the same now-wrong
+reasoning, got corrected.
+
+New `TestAllProvidersFailedIsRetryableIfAnyAttemptWas` in `chat_test.go`
+reproduces the exact A/B/C counterexample and asserts `Retryable=true`
+with `Cause` still reporting C's class. Live-verified against three real
+`mock-provider` instances (429/503/404) behind a real gateway: the raw
+JSON response now reads `"retryable": true, "cause": "invalid_request"`
+— previously would have been `"retryable": false`.
+
+Same review also flagged a factual error in `router/stream.go`'s comment
+about why the provider-adapter `http.Client`'s 120s timeout is a safe
+backstop: it claimed the timeout "doesn't fire while tokens keep
+arriving," which isn't how Go's `http.Client.Timeout` works — it's a
+hard ceiling on the entire request lifetime (dial through full body
+read), not an idle timer that resets per byte. Comment corrected to
+state this accurately, including the real (previously undocumented)
+consequence: a stream still slowly, genuinely producing tokens past
+120s total would still get cut off there. No behavior changed, only the
+documentation of an existing, real limitation.
+
+Two other findings from the same review — non-`GatewayError` transport
+errors (daemon↔gateway network failures) not going through retry
+classification at all, and 404 being lumped into the same
+`ClassInvalidRequest` bucket as a genuine malformed-request bug instead
+of a distinct "model/route unavailable" class with its own
+cooldown — are real and confirmed, explicitly scoped out of this pass at
+the reviewer's own direction ("depois disso, eu pararia de mexer nessa
+camada") and left for whenever this layer is revisited next.
+
 ## Boundaries
 
 Several things were deliberately not built. Recording them so they don't

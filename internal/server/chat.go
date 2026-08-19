@@ -166,11 +166,17 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 
 // writeGatewayError is the terminal response when every ranked candidate
 // in a combo failed — the structured counterpart to a flat message
-// string. Retryable/RetryAfterMS/Cause reflect the *last* attempt in
-// trail (the one that actually ended the request), a deliberate
-// simplification over trying to merge every attempt's class into one
-// verdict: a combo whose final candidate failed non-retryably isn't
-// worth retrying even if an earlier candidate hit a transient error.
+// string. Cause reflects the *last* attempt in trail (the one that
+// actually ended the request) — still meaningful for display/logging as
+// "what ultimately stopped this request". Retryable is deliberately a
+// separate, coarser signal: true if *any* attempt in the trail was
+// retryable, not just the last one. An earlier version tied Retryable to
+// the last attempt's class alone, which is wrong whenever the ranking
+// order happens to put a permanently-broken candidate (a 404 for a
+// retired model, say) after a merely rate-limited one — the round as a
+// whole is still worth retrying if even one candidate might succeed
+// given a moment, and which candidate happened to be tried last is an
+// accident of ranking, not evidence the whole round is hopeless.
 func writeGatewayError(w http.ResponseWriter, comboID string, trail []openai.AttemptInfo, lastErr error) {
 	body := openai.ErrorBody{
 		Message:  fmt.Sprintf("all providers in combo %q failed, last error: %v", comboID, lastErr),
@@ -179,9 +185,13 @@ func writeGatewayError(w http.ResponseWriter, comboID string, trail []openai.Att
 		Attempts: trail,
 	}
 	if len(trail) > 0 {
-		last := trail[len(trail)-1]
-		body.Cause = last.Class
-		body.Retryable = last.Class.Retryable()
+		body.Cause = trail[len(trail)-1].Class
+	}
+	for _, a := range trail {
+		if a.Class.Retryable() {
+			body.Retryable = true
+			break
+		}
 	}
 	var httpErr *provider.HTTPError
 	if errors.As(lastErr, &httpErr) && httpErr.RetryAfter > 0 {
