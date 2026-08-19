@@ -463,43 +463,31 @@ func (s *Service) runLoop(ctx context.Context, sessionID, model string, depth in
 
 		// Preamble order, most general first: who you are and how to work
 		// (systemPrompt) → this project's own rules (AGENTS.md) → facts
-		// remembered about this user/project (memory) → the conversation.
-		// None of it is persisted into history: each is rebuilt every turn
-		// from its current source, so editing AGENTS.md or writing a memory
-		// mid-conversation takes effect on the very next message instead of
-		// requiring a restart.
-		var preamble []openai.ChatMessage
-		preamble = append(preamble, openai.ChatMessage{Role: "system", Content: systemPrompt(s.cfg.Workspace)})
-		if projectContext, found := loadProjectContext(s.cfg.Workspace); found {
-			preamble = append(preamble, openai.ChatMessage{
-				Role:    "system",
-				Content: "Project context (from AGENTS.md/CLAUDE.md):\n\n" + projectContext,
-			})
-		}
-		if haveMemory {
-			preamble = append(preamble, memoryMsg)
-		}
-		modelMessages := append(preamble, toModelMessages(effective)...)
-		if emptyRetryUsed {
-			// Only true on the turn right after an empty final answer —
-			// see the ToolCalls==0 branch below for where this is set.
-			modelMessages = append(modelMessages, openai.ChatMessage{
-				Role:    "system",
-				Content: "Your previous response was empty. Answer the user directly in plain text now — do not return another empty response.",
-			})
-		}
-
+		// remembered about this user/project (memory) → the conversation
+		// → any turn-specific reminders. None of the preamble is persisted
+		// into history: each part is rebuilt every turn from its current
+		// source, so editing AGENTS.md or writing a memory mid-conversation
+		// takes effect on the very next message instead of requiring a
+		// restart. Built via the Prompt Compiler (promptcompiler.go) —
+		// same messages this block always produced, just assembled through
+		// PromptPart values instead of inline literals, so the ordering and
+		// per-part refresh cadence are real, inspectable data instead of
+		// implicit in append-call order.
 		nearBudget := turn == s.cfg.MaxTurns-1
+
+		projectContext, haveProjectContext := loadProjectContext(s.cfg.Workspace)
+		preamble := partsToMessages(compilePreamble(s.cfg.Workspace, projectContext, haveProjectContext, memoryMsg, haveMemory))
+		modelMessages := append(preamble, toModelMessages(effective)...)
+		modelMessages = append(modelMessages, partsToMessages(compileTurnPostscript(emptyRetryUsed, nearBudget))...)
+
+		// Soft landing (Hermes's pattern) on the final allowed turn: stop
+		// offering tools and ask directly for a wrap-up, rather than
+		// hard-cutting mid-tool-loop. Tool *visibility* is a runtime/policy
+		// concern, not prompt content — deliberately kept out of the
+		// compiler above.
 		toolDefs := s.tools.Definitions()
 		if nearBudget {
-			// Soft landing (Hermes's pattern): stop offering tools on the
-			// final allowed call and ask directly for a wrap-up, rather
-			// than hard-cutting mid-tool-loop.
 			toolDefs = nil
-			modelMessages = append(modelMessages, openai.ChatMessage{
-				Role:    "system",
-				Content: "You are at your turn limit for this task. Provide your best final answer now in plain text — no further tool calls.",
-			})
 		}
 
 		emit(onEvent, Event{Kind: EventRouteStart})

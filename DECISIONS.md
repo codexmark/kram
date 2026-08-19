@@ -2000,6 +2000,81 @@ Also added along the way: `devtools/mock-provider` gained `-fail-status`,
 step above needed at least one of them, and building the knobs once up
 front avoided re-touching that file piecemeal per fix.
 
+## Prompt Compiler v1: a structured, inspectable preamble — behavior-preserving
+
+A research study (`KRAM_Estudo_Mestre_Agentes_Competitivos.md`, synthesizing
+how Claude Code, Hermes Agent, OpenCode, Codex, and Antigravity structure
+their agent runtimes) proposed ten major subsystems for Kram's prompt/agent
+architecture. Its own recommended ordering — and its closing "Status"
+section — say the same thing: hardening first (the pass above), then turn
+the rest into a *sequence* of scoped changes, not a single wholesale
+implementation. This is the first and only item taken from that sequence
+so far: item 2, "Prompt Compiler + Instruction IR", done exactly as the
+study's own §2 requires — replace the ad hoc preamble-building code with
+something structured, **without changing behavior**.
+
+Before touching anything, what `runLoop` actually did was read directly
+out of the code rather than assumed: `systemPrompt(workspace)` is
+constant for a given workspace; `loadProjectContext` re-reads
+`AGENTS.md`/`CLAUDE.md` from disk fresh on *every* internal tool-loop
+iteration (deliberate real-time reactivity); `recentMemoryMessage` is
+computed once per `runLoop` call and frozen across that turn's internal
+iterations, specifically to preserve the provider's prefix cache across
+tool round-trips. Three genuinely different cadences, not the three a
+first draft of this plan initially assumed — an early "Static/Session/
+Turn" grouping conflated AGENTS.md's per-iteration refresh with memory's
+per-run freeze under the same "Session" label, which a review caught
+before any code was written: the fix was naming the field
+`RefreshPolicy` with values `RefreshStatic`/`RefreshRun`/`RefreshIteration`,
+matching the three cadences that actually exist instead of an invented
+taxonomy.
+
+New `internal/daemon/agent/promptcompiler.go`: `PromptPart{ID, Placement,
+Refresh, Source, Content}`, `compilePreamble(...)` and
+`compileTurnPostscript(...)` reproducing exactly what the inline code
+built (same messages, same order, same conditionals), `partsToMessages(...)`
+rendering them as `system`-role `openai.ChatMessage`s. `Placement`
+(`PlacementPreamble`/`PlacementPostHistory`) is real data on the part
+rather than only encoded in which function produced it — the same review
+pointed out that once more post-history reminders exist (a Reminder
+Engine's whole purpose), position will matter as much as content. Neither
+`Placement` nor `Refresh` nor `Source` conditions any behavior yet in v1;
+they exist because the *next* phase (Model/Agent Profiles, deliberately
+not started here) needs a real vocabulary to filter against instead of
+starting from scratch, and because a future prompt-inspection view
+(`/debug prompt`, not built yet) needs `Source` to say where each part
+came from. Explicitly not added: a `Role`/`Kind` field distinguishing IR
+content from wire format — that decision belongs to whichever phase first
+needs a non-OpenAI-shaped instruction, not this one; deciding it now
+would be guessing ahead of a real second consumer.
+
+One deliberate exclusion: `toolDefs = nil` on the final allowed turn stays
+a plain line in `runLoop`, not part of the compiler. Tool *visibility* is
+a runtime/policy question, not prompt content — the same separation this
+project already drew between "capability" and "policy" elsewhere.
+Folding it into the compiler would start turning it into exactly the
+kind of monolith the underlying study warns against.
+
+**Verification, upgraded partway through from a one-off manual check to
+a permanent regression test** (another review suggestion, accepted): unit
+tests in `promptcompiler_test.go` cover the pure functions; a new
+`TestRunLoopPromptAssemblyContract` in `promptassembly_test.go` drives a
+real `Service.Run` (real store, real tools registry, real `AGENTS.md` on
+disk, a real seeded memory entry) against a scripted `httptest` gateway
+that captures the actual `ChatCompletionRequest.Messages` it receives,
+and pins the exact message-index contract: `[0]` base prompt, `[1]`
+AGENTS.md, `[2]` memory, `[3...]` history. Two more integration tests
+cover the post-history cases specifically: `MaxTurns:1` to force the
+near-budget message onto the very first turn, and a two-round-trip
+script (empty reply, then a real one) to prove the empty-retry nudge
+actually appears on the retry request, not just in a unit test of the
+function that builds it. This is the contract a Model Profile or
+Reminder Engine phase will have to consciously change, not silently
+break. Live-verified once more end to end against the real installed
+binary (`~/.local/bin/kram`, real separate gateway+daemon processes,
+`devtools/mock-provider`, a workspace with a real `AGENTS.md`) — a
+genuine turn completed cleanly with no wiring regression.
+
 ## Boundaries
 
 Several things were deliberately not built. Recording them so they don't
@@ -2040,6 +2115,23 @@ surface, no bigger architecture changes than the fixes strictly needed):
   fix in the pass above was still hand-run through `gofmt`/`go
   vet`/`go test -race`/Windows cross-compile plus a live check each
   time; automating that sequence is process tooling, not a code fix.
+
+### The other nine items in the agent-architecture study, deferred
+
+`KRAM_Estudo_Mestre_Agentes_Competitivos.md` proposes ten subsystems;
+only item 2 (Prompt Compiler, above) has been built. The other nine —
+Model Profiles, Agent Profiles (build/plan/explore/review/verify),
+the Reminder Engine, `ProjectInstructionResolver` (hierarchical scoped
+`AGENTS.md`), a Tool Semantics Registry, Compaction v2 + hidden utility
+agents, the Learning Loop (memory-curator/skill-curator), Artifacts v2,
+a Hook API, and cognitive/multi-provider routing — are explicitly not
+started. The study's own recommended ordering (§16) and its closing
+"Status" section both say the same thing: convert this into a sequence
+of scoped changes, never all of it at once. `PromptPart`'s `Placement`/
+`Refresh`/`Source` fields exist now specifically so the next item in
+that sequence has real data to build against instead of starting cold —
+but which item is next, and its own design, is a separate decision each
+time, not a queue to work through automatically.
 
 ### No account rotation or provider evasion
 
