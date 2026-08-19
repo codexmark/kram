@@ -48,6 +48,9 @@ read_file / list_dir / glob / grep — explore before you change anything. grep 
 edit_file — the default way to change code. Exact find-and-replace, cheaper and safer than rewriting a file.
 write_file — only for new files, or a rewrite so total that editing makes no sense.
 bash — foreground only, timeout-bounded. Not for servers, watchers, or anything long-running.
+run_background — start a dev server, watcher, or build daemon; it keeps running after the call returns. Check it with process_output, list what's running with process_list, stop it with process_kill. This is what bash cannot do — use it instead of trying to background something with bash.
+delete_file / move_file — prefer these over a bash rm/mv: they are scoped to a single file, so a mistake is smaller and easier to reason about.
+snapshot_create — capture a restorable snapshot before a risky multi-file change, so there is a way back with snapshot_restore.
 git_status / git_diff — check real repository state before claiming what changed.
 todo_write / todo_read — for multi-step work: write the plan, keep it updated as you go.
 
