@@ -1,6 +1,8 @@
 package agent
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -108,6 +110,50 @@ func TestCompileToolsOverviewListsEnabledToolsAndSkipsDisabled(t *testing.T) {
 	}
 	if !strings.Contains(p.Content, "Call independent tools in the same turn") {
 		t.Errorf("content should end with the batching footer, got: %s", p.Content)
+	}
+}
+
+// TestCompileToolsOverviewExcludesPermissionFullyDeniedTool is the
+// regression test for a real bug a review found: this function used to
+// build its list from reg.AllTools(), which only excludes settings-
+// disabled tools — a tool the permission policy denies unconditionally
+// (exactly what a Strict preset's "delete_file: deny *" rule produces)
+// stayed AllTools()-visible and so got announced in the prompt with no
+// matching function in Definitions()'s wire schema, the model's actual
+// tool-calling surface. reg.VisibleTools() (internal/daemon/tools) is
+// now the one source both Definitions() and this function read from, so
+// this drives a real permissions.json on disk — the same mechanism a
+// Strict preset uses — rather than a settings-disabled map, which is
+// the one difference from TestCompileToolsOverviewListsEnabledToolsAnd
+// SkipsDisabled above and the reason that test alone didn't catch this.
+func TestCompileToolsOverviewExcludesPermissionFullyDeniedTool(t *testing.T) {
+	workspace := t.TempDir()
+	kramDir := filepath.Join(workspace, ".kram")
+	if err := os.MkdirAll(kramDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	permJSON := `{"rules":[{"tool":"delete_file","decision":"deny"}]}`
+	if err := os.WriteFile(filepath.Join(kramDir, "permissions.json"), []byte(permJSON), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	reg := tools.NewRegistry(workspace, nil, nil)
+	p := compileToolsOverview(reg)
+
+	if strings.Contains(p.Content, "delete_file — ") {
+		t.Errorf("a permission-denied tool must not be announced in the prompt with no matching wire-schema function, got: %s", p.Content)
+	}
+	foundInAllTools := false
+	for _, info := range reg.AllTools() {
+		if info.Name == "delete_file" {
+			foundInAllTools = true
+			if info.Disabled {
+				t.Error("delete_file should read Disabled=false in AllTools() — permission-denied is a different axis from settings-disabled")
+			}
+		}
+	}
+	if !foundInAllTools {
+		t.Fatal("test setup issue: delete_file should still be a registered tool")
 	}
 }
 

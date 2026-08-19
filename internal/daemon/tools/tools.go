@@ -179,20 +179,40 @@ func NewRegistry(workspace string, st *store.Store, disabled map[string]bool) *R
 	return r
 }
 
-// Definitions returns every *enabled* tool's definition in the gateway's
-// wire format, ready to attach to a ChatCompletionRequest — a disabled
-// tool is invisible to the model entirely, not just refused if called. A
-// tool the permission policy denies unconditionally (see
-// permission.Evaluator.FullyDenied) is hidden the same way: a capability
-// the model can never successfully use shouldn't cost tokens in the tool
-// schema. A tool denied only for *some* patterns stays visible, since it's
-// still sometimes usable — the policy is enforced at call time either way.
-func (r *Registry) Definitions() []openai.Tool {
-	out := make([]openai.Tool, 0, len(r.byName))
+// VisibleTools returns every tool the model can actually be offered right
+// now, name order — the single source of truth Definitions() (the wire
+// schema) and internal/daemon/agent's compileToolsOverview (the prompt's
+// generated Tools section) both derive from, so a tool can never be
+// announced in the prompt without also being callable, or the reverse.
+// Before this existed, compileToolsOverview built its list from AllTools
+// instead, which only excludes disabled tools — a tool the permission
+// policy denies unconditionally (e.g. a Strict preset's "delete_file:
+// deny *") stayed disabled=false and so got announced in the prompt with
+// no matching function in the wire schema. Filters the same two things
+// Definitions() always has: a disabled tool, and one the permission
+// policy denies unconditionally (see permission.Evaluator.FullyDenied) —
+// a capability the model can never successfully use shouldn't cost
+// tokens in the schema or occupy a line in the overview. A tool denied
+// only for *some* patterns stays visible, since it's still sometimes
+// usable and the policy is enforced at call time either way.
+func (r *Registry) VisibleTools() []Tool {
+	out := make([]Tool, 0, len(r.byName))
 	for _, t := range r.byName {
 		if r.disabled[t.Name()] || r.permEval.FullyDenied(t.Name()) {
 			continue
 		}
+		out = append(out, t)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name() < out[j].Name() })
+	return out
+}
+
+// Definitions returns every visible tool's definition (see VisibleTools)
+// in the gateway's wire format, ready to attach to a ChatCompletionRequest.
+func (r *Registry) Definitions() []openai.Tool {
+	visible := r.VisibleTools()
+	out := make([]openai.Tool, 0, len(visible))
+	for _, t := range visible {
 		out = append(out, openai.Tool{
 			Type: "function",
 			Function: openai.ToolFunction{

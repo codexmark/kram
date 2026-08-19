@@ -59,16 +59,20 @@ const (
 	toolsOverviewFooter = "\nCall independent tools in the same turn rather than one per turn. Reading three files or grepping three patterns is one batch, not three round-trips."
 )
 
-// compileToolsOverview renders one line per enabled, registered tool —
-// every one, not a hand-picked subset, which is what makes this
-// generated instead of curated. A tool with hand-curated ToolMetadata
-// (see internal/daemon/tools/toolmetadata.go) gets its Summary and, if
-// set, a "(use this instead of X)" cross-reference; everything else
-// falls back to a Description()-derived summary — still listed, just
-// not yet hand-tuned, which is deliberate (see DECISIONS.md: adding
-// PreferOver for more tools is a low-risk follow-up whenever real usage
-// shows the same "competes with a default habit" pattern, not something
-// to guess at wholesale up front).
+// compileToolsOverview renders one line per tool the model can actually
+// be offered right now — reg.VisibleTools(), the same source Definitions()
+// (the wire schema) derives from, deliberately not AllTools() (which only
+// excludes disabled tools, not ones the permission policy denies
+// unconditionally — see VisibleTools' own doc comment for the concrete
+// bug that distinction fixes: a Strict-preset "deny *" tool used to get
+// announced here with no matching function in the wire schema). A tool
+// with hand-curated ToolMetadata (see internal/daemon/tools/
+// toolmetadata.go) gets its Summary and, if set, a "(use this instead of
+// X)" cross-reference; everything else falls back to a Description()-
+// derived summary — still listed, just not yet hand-tuned, which is
+// deliberate (see DECISIONS.md: adding PreferOver for more tools is a
+// low-risk follow-up whenever real usage shows the same "competes with a
+// default habit" pattern, not something to guess at wholesale up front).
 //
 // reg may be nil (evals/tests that build a Service without a tool
 // registry) — returns an empty part in that case, matching how the rest
@@ -80,12 +84,9 @@ func compileToolsOverview(reg *tools.Registry) PromptPart {
 
 	var b strings.Builder
 	b.WriteString(toolsOverviewHeader)
-	for _, info := range reg.AllTools() {
-		if info.Disabled {
-			continue
-		}
-		md := reg.ToolMetadata(info.Name)
-		line := info.Name + " — " + md.Summary
+	for _, t := range reg.VisibleTools() {
+		md := reg.ToolMetadata(t.Name())
+		line := t.Name() + " — " + md.Summary
 		if md.PreferOver != "" {
 			line += " (use this instead of " + md.PreferOver + ")"
 		}

@@ -2162,14 +2162,35 @@ hand-written paragraph.
 
 `internal/daemon/agent/promptcompiler.go` gained
 `compileToolsOverview(reg *tools.Registry) PromptPart`, iterating every
-enabled (non-`Disabled`) tool in registration order via `AllTools()`,
-rendering `name — Summary` and, when set, `PreferOver` as `"(use this
-instead of X)"` — the exact cross-reference `run_background` needed
+visible tool (see `Registry.VisibleTools()`, corrected below) in name
+order, rendering `name — Summary` and, when set, `PreferOver` as `"(use
+this instead of X)"` — the exact cross-reference `run_background` needed
 against `bash`. `compilePreamble` gained a `*tools.Registry` parameter
-and inserts this part right after `base`, before `project-context` —
-structurally where the old hand-written Tools section already sat.
+and inserts this part right after `base`, before `project-context`.
 `systemprompt.go`'s hand-written "# Tools" section was deleted outright,
 replaced by a doc-comment pointing at the generator.
+
+**Correction, caught by review:** this section originally claimed the
+generated part landed "structurally where the old hand-written Tools
+section already sat." That's not accurate and is worth being honest
+about. Before this change, `# Tools` lived *inside* `systemPrompt()`'s
+own template, between "# How you work" and "# Skills" — one single
+system message. After this change, the generated tools-overview is a
+*separate* system message, inserted by `compilePreamble` after `base`
+and before `project-context`/`memory`, which — because `base` itself
+still ends with "...# Safety" — puts Tools structurally *after* Skills/
+Memory/Delegation/Asking/Writing-code/Output/Safety, not where it used
+to sit relative to them. Not necessarily worse — Tools landing right
+before project context and conversation history may even help
+salience — but it was an unexamined side effect of the refactor, not a
+deliberate placement decision, and this file shouldn't have described it
+as one. Recorded here as a deliberate placement now that it's been
+looked at: Tools stays a separate post-`base` message. A real Model/
+Agent Profile phase splitting `base` itself into named parts (identity,
+workflow, tools, skills, memory-policy, delegation, coding-policy,
+safety) — so ordering is an explicit, inspectable property of the parts
+list instead of implicit in a single template string — is the natural
+next step for this file, not attempted here.
 
 Migrated today's already-approved wording into `ToolMetadata()` methods
 for the 14 tools that were already manually listed
@@ -2364,6 +2385,89 @@ real logic lives. Verified with the same baseline as every other change
 in this document: `gofmt -l .` clean, `go vet ./...` clean,
 `go test ./... -race` green across every package, and a Windows
 cross-compile of `cmd/kram` still succeeding.
+
+## Tool Semantics Registry: VisibleTools closes the AllTools()/Definitions() mismatch
+
+A review of `e80e919` and the commits before it (the Gateway Round retry
+fix, the Tool Semantics Registry, and the coverage push) found one real
+bug in the registry itself, introduced by the registry's own launch:
+`compileToolsOverview` built the prompt's Tools section from
+`Registry.AllTools()`, which excludes only *settings-disabled* tools —
+not tools the permission policy denies unconditionally (`FullyDenied`).
+`Definitions()`, the function that actually decides what the model's
+wire-format tool schema contains, has always filtered both. The result:
+a tool denied outright by policy — the concrete example the review gave
+is the Strict permission preset's `{"tool":"delete_file","pattern":"*",
+"decision":"deny"}` rule — kept `Disabled: false` in `AllTools()` and so
+still got a line in the generated prompt (`delete_file — Scoped to a
+single file...`), while `Definitions()` correctly omitted it from the
+schema the model can actually call. The model could be told a tool
+exists that it has no way to invoke — precisely the kind of mismatch the
+Tool Semantics Registry exists to make impossible, just moved one layer
+down instead of eliminated.
+
+Root cause: two functions computing "what's visible" independently,
+with silently different filters, and nothing forcing them to agree.
+
+Fixed by introducing the single source both were supposed to share:
+`Registry.VisibleTools() []Tool` (`internal/daemon/tools/tools.go`),
+filtering exactly what `Definitions()` always filtered — `r.disabled` and
+`r.permEval.FullyDenied` — sorted by name. `Definitions()` now builds its
+wire-format list from `VisibleTools()` instead of duplicating the filter
+inline (a small side effect: `Definitions()`'s output is now
+deterministically name-ordered, where it was previously unordered map
+iteration — nothing reads it order-sensitively, checked before making
+this change). `compileToolsOverview` (`internal/daemon/agent/
+promptcompiler.go`) now calls `reg.VisibleTools()` instead of
+`reg.AllTools()`. `AllTools()` itself is unchanged and still the right
+function for its one real caller, the settings/tools-toggle screen —
+that screen needs to show a permission-denied tool too, so a user can
+see it exists and adjust the policy, which is a different concern from
+"what can the model use right now" and deliberately stays a separate
+axis (`AllTools()`'s `Disabled` field only ever meant "settings-
+disabled", never "policy-denied" — that distinction was already correct
+before this fix, it just wasn't the thing `compileToolsOverview` should
+have been filtering on).
+
+New regression tests pin exactly the gap that let this through unnoticed
+the first time: the original `compileToolsOverview` test used a
+settings-`disabled` map to prove a tool disappears from the overview,
+which — since `AllTools()` and `VisibleTools()` agree on settings-
+disabled tools — passed against both the buggy and the fixed code and
+proved nothing about permission denial.
+`TestPermissionFullDenyHidesToolFromVisibleToolsToo`
+(`internal/daemon/tools/permission_test.go`) and
+`TestCompileToolsOverviewExcludesPermissionFullyDeniedTool`
+(`internal/daemon/agent/promptcompiler_test.go`) both drive a real
+`permissions.json` deny-all rule instead — the same mechanism a Strict
+preset uses — and assert the denied tool is absent from `VisibleTools()`/
+the generated overview while still present (correctly, `Disabled: false`)
+in `AllTools()`. Live-verified against real separate `mock-provider`/
+gateway/daemon processes with a `.kram/permissions.json` denying
+`delete_file`: the real captured gateway request confirmed `delete_file`
+absent from both the generated prompt's Tools section and the wire
+`tools` array (32 tools, matching), where before the fix it would have
+appeared in the prompt only.
+
+The same review flagged a second issue in the Gateway Round retry fix
+(`5a225d0`): `Retryable` is now correctly computed from the whole
+attempt trail (any attempt retryable ⇒ `Retryable: true`), but
+`RetryAfterMS` still comes from `lastErr` alone via a single
+`errors.As(lastErr, &httpErr)` check — so a trail like 429 (with a real
+`Retry-After: 10s`) → 503 → 404 correctly reports `Retryable: true` but
+`RetryAfterMS: 0`, since the last attempt (404) carried no `Retry-After`
+header. The agent's Gateway Round retry then backs off on its own
+default (~500ms) instead of honoring the 10s a real upstream asked for.
+Confirmed real, **deliberately not fixed here** — the reviewer's own
+call, agreed with: a proper fix belongs with the deferred failure-domain/
+per-provider-cooldown work already on record above ("Two other findings
+from the same review" in the Gateway Round retry section) rather than a
+quick patch that would still be wrong in spirit (the right behavior
+isn't "carry one more field through," it's "don't retry provider A
+again for 10s specifically, while B and C remain immediately retriable,"
+which needs real per-provider route health, not a single aggregate
+`RetryAfterMS`). Recorded here so it isn't lost track of, not
+addressed.
 
 ## Boundaries
 

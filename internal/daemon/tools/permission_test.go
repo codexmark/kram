@@ -190,6 +190,41 @@ func TestPermissionFullDenyHidesToolFromDefinitions(t *testing.T) {
 	}
 }
 
+// TestPermissionFullDenyHidesToolFromVisibleToolsToo is the regression
+// test for the bug a review of the Tool Semantics Registry found: the
+// prompt's generated Tools overview (compileToolsOverview, in
+// internal/daemon/agent) used to build its list from AllTools(), which
+// only excludes disabled tools — a tool the permission policy denies
+// unconditionally (like a Strict preset's "delete_file: deny *") stayed
+// AllTools()-visible and so got announced in the prompt with no matching
+// function in Definitions()'s wire schema. VisibleTools() is now the one
+// source both Definitions() and the prompt compiler read from, so this
+// asserts the exact same fully-denied tool that TestPermissionFull
+// DenyHidesToolFromDefinitions checks against Definitions() is also
+// absent from VisibleTools() — and, for contrast, still present (with
+// Disabled=false) in AllTools(), which is deliberately a different view
+// for the settings screen's tool-toggle list.
+func TestPermissionFullDenyHidesToolFromVisibleToolsToo(t *testing.T) {
+	r, _ := newPermTestRegistry(t, `{"rules":[{"tool":"fake_tool","decision":"deny"}]}`)
+	for _, vt := range r.VisibleTools() {
+		if vt.Name() == "fake_tool" {
+			t.Fatal("a fully-denied tool must not appear in VisibleTools()")
+		}
+	}
+	foundInAllTools := false
+	for _, info := range r.AllTools() {
+		if info.Name == "fake_tool" {
+			foundInAllTools = true
+			if info.Disabled {
+				t.Error("a permission-denied (but not settings-disabled) tool should still read Disabled=false in AllTools() — it's a different axis, meant for the settings screen's toggle list")
+			}
+		}
+	}
+	if !foundInAllTools {
+		t.Error("fake_tool should still appear in AllTools() (settings screen needs to show even permission-denied tools so they can be inspected)")
+	}
+}
+
 func TestPermissionPartialDenyStillShowsInDefinitions(t *testing.T) {
 	r, _ := newPermTestRegistry(t, `{"rules":[
 		{"tool":"bash","pattern":"rm -rf *","decision":"deny"},
