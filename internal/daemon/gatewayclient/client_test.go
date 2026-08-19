@@ -3,9 +3,12 @@ package gatewayclient
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/codexmark/kram/internal/openai"
 )
@@ -70,5 +73,74 @@ func TestChatCompletionStreamSendsRunIDHeaderWhenSet(t *testing.T) {
 	}
 	if gotHeader != "run-B" {
 		t.Errorf("%s header = %q, want %q", openai.RunIDHeader, gotHeader, "run-B")
+	}
+}
+
+// TestChatCompletionDecodesStructuredGatewayError is the regression test
+// for the old flat-error-only behavior: a kram-gateway all-failed
+// response (Combo non-empty, the origin signal — see
+// internal/server/chat.go's writeGatewayError) must decode into a typed
+// *GatewayError a caller can inspect, not just a generic error string.
+func TestChatCompletionDecodesStructuredGatewayError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadGateway)
+		_ = json.NewEncoder(w).Encode(openai.ErrorResponse{Error: openai.ErrorBody{
+			Message: "all providers in combo \"default\" failed, last error: p1: upstream returned 429 Too Many Requests",
+			Type:    "kram_gateway_error",
+			Combo:   "default", Retryable: true, RetryAfterMS: 5000, Cause: openai.ClassRateLimit,
+			Attempts: []openai.AttemptInfo{{Provider: "p1", HTTPStatus: 429, Class: openai.ClassRateLimit}},
+		}})
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL)
+	_, err := c.ChatCompletion(context.Background(), "default", nil, nil)
+
+	var ge *GatewayError
+	if !errors.As(err, &ge) {
+		t.Fatalf("expected a *GatewayError, got %T: %v", err, err)
+	}
+	if ge.Combo != "default" {
+		t.Errorf("Combo = %q, want %q", ge.Combo, "default")
+	}
+	if !ge.Retryable {
+		t.Error("Retryable = false, want true")
+	}
+	if ge.RetryAfter != 5*time.Second {
+		t.Errorf("RetryAfter = %v, want 5s", ge.RetryAfter)
+	}
+	if ge.Cause != openai.ClassRateLimit {
+		t.Errorf("Cause = %q, want %q", ge.Cause, openai.ClassRateLimit)
+	}
+	if len(ge.Attempts) != 1 || ge.Attempts[0].Provider != "p1" {
+		t.Errorf("Attempts = %+v, want one entry for p1", ge.Attempts)
+	}
+}
+
+// TestChatCompletionFallsBackToPlainErrorForNonKramServer confirms
+// ChatCompletion still works against any OpenAI-compatible server's
+// plain error body (no Combo field at all) — the flat-error path from
+// before this change must survive unchanged for non-Kram endpoints.
+func TestChatCompletionFallsBackToPlainErrorForNonKramServer(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(openai.ErrorResponse{Error: openai.ErrorBody{
+			Message: "invalid request: missing required field 'model'",
+			Type:    "invalid_request_error",
+		}})
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL)
+	_, err := c.ChatCompletion(context.Background(), "default", nil, nil)
+
+	var ge *GatewayError
+	if errors.As(err, &ge) {
+		t.Fatalf("expected a plain error for a non-Kram error body, got a *GatewayError: %+v", ge)
+	}
+	if err == nil || !strings.Contains(err.Error(), "missing required field") {
+		t.Errorf("err = %v, want it to mention the upstream message", err)
 	}
 }

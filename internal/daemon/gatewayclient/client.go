@@ -15,6 +15,22 @@ import (
 	"github.com/codexmark/kram/internal/openai"
 )
 
+// GatewayError is what ChatCompletion returns when the gateway itself
+// reports every candidate in a combo failed — the typed, daemon-side
+// counterpart of openai.ErrorBody's extension fields, so a caller
+// (internal/daemon/agent's Gateway Round retry) can decide whether
+// retrying is worth it instead of pattern-matching an error string.
+type GatewayError struct {
+	Combo      string
+	Retryable  bool
+	RetryAfter time.Duration
+	Cause      openai.FailureClass
+	Attempts   []openai.AttemptInfo
+	Message    string
+}
+
+func (e *GatewayError) Error() string { return e.Message }
+
 // Client calls a kram-gateway instance's OpenAI-compatible API.
 type Client struct {
 	baseURL string
@@ -93,6 +109,19 @@ func (c *Client) ChatCompletion(ctx context.Context, model string, messages []op
 	if resp.StatusCode >= 400 {
 		var errResp openai.ErrorResponse
 		if json.NewDecoder(resp.Body).Decode(&errResp) == nil && errResp.Error.Message != "" {
+			// Combo is non-empty only for kram-gateway's own all-failed
+			// response (see internal/server/chat.go's writeGatewayError) —
+			// any other OpenAI-compatible server's plain error body falls
+			// through to the flat error below, so ChatCompletion keeps
+			// working against a non-Kram endpoint too.
+			if errResp.Error.Combo != "" {
+				return Result{}, &GatewayError{
+					Combo: errResp.Error.Combo, Retryable: errResp.Error.Retryable,
+					RetryAfter: time.Duration(errResp.Error.RetryAfterMS) * time.Millisecond,
+					Cause:      errResp.Error.Cause, Attempts: errResp.Error.Attempts,
+					Message: fmt.Sprintf("gateway error: %s", errResp.Error.Message),
+				}
+			}
 			return Result{}, fmt.Errorf("gateway error: %s", errResp.Error.Message)
 		}
 		return Result{}, fmt.Errorf("gateway returned %s", resp.Status)
