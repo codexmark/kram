@@ -242,3 +242,131 @@ func containsStr(list []string, want string) bool {
 	}
 	return false
 }
+
+// breakerFailureThreshold mirrors internal/breaker's unexported
+// failureThreshold (3) — duplicated here since it's not exported; keep
+// in sync if that constant ever changes.
+const breakerFailureThreshold = 3
+
+// newBufferedTestServer wires a single-provider "default" combo (no
+// fallback candidate, so a failing p1 fails the whole request cleanly —
+// exactly what the breaker-poisoning tests below need to isolate).
+func newBufferedTestServer(t *testing.T, p1Events []provider.StreamEvent) (*Server, *breaker.Registry) {
+	t.Helper()
+	cfg := &config.Config{
+		Providers:    []config.ProviderConfig{{ID: "p1", Kind: "fake"}},
+		Combos:       []config.ComboConfig{{ID: "default", Strategy: "priority", Providers: []string{"p1"}}},
+		DefaultCombo: "default",
+	}
+	providers := map[string]provider.Provider{"p1": scriptedProvider{id: "p1", events: p1Events}}
+	breakers := breaker.NewRegistry()
+	tel := telemetry.New()
+	rt, err := router.New(cfg, providers, breakers, tel)
+	if err != nil {
+		t.Fatalf("router.New: %v", err)
+	}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	return New(cfg, providers, rt, breakers, tel, logger), breakers
+}
+
+const bufferedTestBody = `{"model":"default","messages":[{"role":"user","content":"hi"}]}`
+
+func postBufferedChat(t *testing.T, s *Server) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(bufferedTestBody))
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, req)
+	return rec
+}
+
+// TestKramCausedBadRequestDoesNotPoisonBreaker is the regression test for
+// the confirmed bug: a 400 caused by Kram's own malformed request (the
+// real historical example being the Gemini role:"function" bug — see
+// DECISIONS.md) used to trip a provider's circuit breaker exactly like a
+// genuine upstream instability would, taking a perfectly healthy
+// provider out of rotation for a bug that was never its fault.
+func TestKramCausedBadRequestDoesNotPoisonBreaker(t *testing.T) {
+	s, breakers := newBufferedTestServer(t, []provider.StreamEvent{
+		{Err: &provider.HTTPError{Provider: "p1", StatusCode: 400, Status: "400 Bad Request"}},
+	})
+
+	for i := 0; i < breakerFailureThreshold+1; i++ {
+		postBufferedChat(t, s)
+	}
+
+	if breakers.IsOpen("p1") {
+		t.Error("a provider that only ever returned 400s (Kram's own malformed request) must not have its breaker tripped")
+	}
+}
+
+// TestGenuineServerErrorStillPoisonsBreaker confirms the fix didn't
+// overcorrect: a real 5xx must still trip the breaker exactly as before.
+func TestGenuineServerErrorStillPoisonsBreaker(t *testing.T) {
+	s, breakers := newBufferedTestServer(t, []provider.StreamEvent{
+		{Err: &provider.HTTPError{Provider: "p1", StatusCode: 500, Status: "500 Internal Server Error"}},
+	})
+
+	for i := 0; i < breakerFailureThreshold; i++ {
+		postBufferedChat(t, s)
+	}
+
+	if !breakers.IsOpen("p1") {
+		t.Error("a provider returning genuine 500s should trip the breaker after breakerFailureThreshold consecutive failures")
+	}
+}
+
+// TestResponseGateRejectionStillPoisonsBreaker confirms markRejection
+// kept the pre-existing behavior for content-level rejections — these
+// are deliberately never routed through Classify (see
+// openai.ClassContentRejected's doc comment), so they must keep counting
+// against the breaker unconditionally, same as before this change.
+func TestResponseGateRejectionStillPoisonsBreaker(t *testing.T) {
+	// No Done event at all -> drainToBuffer returns sawTerminal=false,
+	// nil err; ResponseGate's zero-value config only rejects on
+	// RequireTerminal, so wire that on for this test via a custom combo.
+	cfg := &config.Config{
+		Providers: []config.ProviderConfig{{ID: "p1", Kind: "fake"}},
+		Combos: []config.ComboConfig{{
+			ID: "default", Strategy: "priority", Providers: []string{"p1"},
+			Response: config.ResponseGateConfig{RequireTerminal: true},
+		}},
+		DefaultCombo: "default",
+	}
+	providers := map[string]provider.Provider{"p1": scriptedProvider{id: "p1", events: nil}} // closes with no Done
+	breakers := breaker.NewRegistry()
+	tel := telemetry.New()
+	rt, err := router.New(cfg, providers, breakers, tel)
+	if err != nil {
+		t.Fatalf("router.New: %v", err)
+	}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	s := New(cfg, providers, rt, breakers, tel, logger)
+
+	for i := 0; i < breakerFailureThreshold; i++ {
+		postBufferedChat(t, s)
+	}
+
+	if !breakers.IsOpen("p1") {
+		t.Error("a ResponseGate rejection (RequireTerminal, no Done ever seen) should still poison the breaker after breakerFailureThreshold rejections")
+	}
+}
+
+func TestErrorAttemptSetsFailureClass(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want openai.FailureClass
+	}{
+		{"400 bad request", &provider.HTTPError{StatusCode: 400}, openai.ClassInvalidRequest},
+		{"429 rate limit", &provider.HTTPError{StatusCode: 429}, openai.ClassRateLimit},
+		{"500 server error", &provider.HTTPError{StatusCode: 500}, openai.ClassServerError},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			info := errorAttempt("p1", 10, 1, 0.5, c.err)
+			if info.Class != c.want {
+				t.Errorf("errorAttempt(%v).Class = %q, want %q", c.err, info.Class, c.want)
+			}
+		})
+	}
+}

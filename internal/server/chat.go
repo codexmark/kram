@@ -15,6 +15,21 @@ import (
 	"github.com/codexmark/kram/internal/router"
 )
 
+// classifyTransportError buckets a genuine transport/HTTP-level failure
+// (the request never reached a real answer at all) via openai.Classify,
+// extracting the real upstream status code the same way errorAttempt
+// does. Never call this for a ResponseGate/StreamGate rejection or a
+// BoundedPeek timeout — those aren't transport failures; see
+// markRejection.
+func classifyTransportError(err error) openai.FailureClass {
+	var httpErr *provider.HTTPError
+	status := 0
+	if errors.As(err, &httpErr) {
+		status = httpErr.StatusCode
+	}
+	return openai.Classify(status, err)
+}
+
 // handleChatCompletions is the attempt executor: it asks the router for a
 // ranked candidate list (routing strategy), calls each one in order
 // (attempt execution), and gates whatever comes back before accepting it
@@ -77,11 +92,12 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			elapsed := time.Since(attemptStart).Milliseconds()
 			if !peek.Committed {
 				lastErr = fmt.Errorf("%s: %s", p.ID(), peek.Reason)
-				s.markFailure(p.ID(), lastErr)
+				s.markRejection(p.ID(), peek.Reason)
 				s.telemetry.RecordLatency(p.ID(), elapsed)
 				trail = append(trail, openai.AttemptInfo{
 					Provider: p.ID(), OK: false, LatencyMS: elapsed,
 					Outcome: openai.OutcomeRejected, Reason: peek.Reason, Attempt: attemptNum, Score: &score,
+					Class: openai.ClassContentRejected,
 				})
 				continue
 			}
@@ -120,11 +136,12 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			// but AttemptInfo.Outcome keeps the distinction visible: this
 			// is OutcomeRejected, never OutcomeError.
 			lastErr = fmt.Errorf("%s: %s", p.ID(), outcome.Reason)
-			s.markFailure(p.ID(), lastErr)
+			s.markRejection(p.ID(), outcome.Reason)
 			s.telemetry.RecordLatency(p.ID(), elapsed)
 			trail = append(trail, openai.AttemptInfo{
 				Provider: p.ID(), OK: false, LatencyMS: elapsed,
 				Outcome: openai.OutcomeRejected, Reason: outcome.Reason, Attempt: attemptNum, Score: &score,
+				Class: openai.ClassContentRejected,
 			})
 			continue
 		}
@@ -160,13 +177,36 @@ func errorAttempt(providerID string, elapsedMS int64, attempt int, score float64
 	if errors.As(err, &httpErr) {
 		info.HTTPStatus = httpErr.StatusCode
 	}
+	info.Class = openai.Classify(info.HTTPStatus, err)
 	return info
 }
 
+// markFailure reports a genuine transport/HTTP-level failure — the
+// request never reached a real, gate-evaluated answer. Whether it counts
+// against the circuit breaker depends on its FailureClass: a 400 caused
+// by Kram's own malformed request (see DECISIONS.md's Gemini role-name
+// bug) must not poison an otherwise-healthy provider's breaker the same
+// way a genuine 5xx/network failure does.
 func (s *Server) markFailure(id string, err error) {
+	class := classifyTransportError(err)
+	if class.CountsAgainstBreaker() {
+		s.breakers.ReportFailure(id)
+	}
+	s.telemetry.RecordFailure(id)
+	s.logger.Warn("provider attempt failed", "provider", id, "class", class, "error", err)
+}
+
+// markRejection reports a content-level rejection — a ResponseGate/
+// StreamGate decision, or a BoundedPeek timeout — never a transport
+// failure, so it's never routed through Classify (see
+// openai.ClassContentRejected's doc comment). Always counts against the
+// breaker: a provider that chronically returns short, empty, or
+// never-quite-arriving content is not healthy, even though every
+// individual HTTP call "succeeded".
+func (s *Server) markRejection(id, reason string) {
 	s.breakers.ReportFailure(id)
 	s.telemetry.RecordFailure(id)
-	s.logger.Warn("provider attempt failed", "provider", id, "error", err)
+	s.logger.Warn("provider attempt rejected", "provider", id, "class", openai.ClassContentRejected, "reason", reason)
 }
 
 // drainToBuffer fully consumes a provider's stream and concatenates its
@@ -275,10 +315,11 @@ func (s *Server) streamResponse(w http.ResponseWriter, comboID string, routeCtx 
 	// truthful and final — the router only ever hears about success here,
 	// once it's real, so the client's trail and the router's own Sticky/
 	// LKGP state can never disagree about who actually won.
-	finalize := func(outcome openai.AttemptOutcome, ok bool, reason string) []openai.AttemptInfo {
+	finalize := func(outcome openai.AttemptOutcome, ok bool, reason string, class openai.FailureClass) []openai.AttemptInfo {
 		pending.Outcome = outcome
 		pending.OK = ok
 		pending.Reason = reason
+		pending.Class = class
 		trail := append(append([]openai.AttemptInfo{}, priorTrail...), pending)
 		if ok {
 			s.router.RecordOutcome(comboID, routeCtx, pending.Provider, true)
@@ -310,7 +351,7 @@ func (s *Server) streamResponse(w http.ResponseWriter, comboID string, routeCtx 
 		if evt.Err != nil {
 			sawTerminal = true
 			s.markFailure(pending.Provider, evt.Err)
-			writeFinal("error", nil, nil, finalize(openai.OutcomeError, false, evt.Err.Error()))
+			writeFinal("error", nil, nil, finalize(openai.OutcomeError, false, evt.Err.Error(), classifyTransportError(evt.Err)))
 			return false
 		}
 		if evt.Delta != "" {
@@ -326,7 +367,7 @@ func (s *Server) streamResponse(w http.ResponseWriter, comboID string, routeCtx 
 			if len(evt.ToolCalls) > 0 {
 				finish = "tool_calls"
 			}
-			writeFinal(finish, evt.ToolCalls, evt.Usage, finalize(openai.OutcomeSuccess, true, ""))
+			writeFinal(finish, evt.ToolCalls, evt.Usage, finalize(openai.OutcomeSuccess, true, "", ""))
 			return false
 		}
 		return true
@@ -355,7 +396,7 @@ func (s *Server) streamResponse(w http.ResponseWriter, comboID string, routeCtx 
 		// silently turning a truncated answer into an apparent success.
 		err := fmt.Errorf("%s: stream closed without a terminal completion", pending.Provider)
 		s.markFailure(pending.Provider, err)
-		writeFinal("error", nil, nil, finalize(openai.OutcomeError, false, err.Error()))
+		writeFinal("error", nil, nil, finalize(openai.OutcomeError, false, err.Error(), classifyTransportError(err)))
 	}
 
 	fmt.Fprint(w, "data: [DONE]\n\n")
