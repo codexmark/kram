@@ -1828,6 +1828,44 @@ fact, already gone — proof the delete logic itself had already worked
 correctly at least once; the crash above is what made it *look* like
 deletion had failed.
 
+## A local reasoning server's "no meaningful content" failures were a second, different reasoning-field bug
+
+Right after the resilience fix above shipped, live traffic against the
+user's real accounts (`/home/codexmark/Projects/.kram/kram.log`) showed
+every single candidate in the active combo failing on the same turn:
+three OpenRouter free models with genuine `429 Too Many Requests` (real
+rate limits, nothing to fix), and the user's own registered local
+server ("lab", a real LAN endpoint) with `no meaningful content within
+the peek window` — the same symptom the OpenRouter reasoning-chunk bug
+produced earlier (see "The default combo's fallback chain" above), but
+that fix was already live, so this had to be something else.
+
+Reproduced directly against the real server with `curl -N` on a
+streaming chat-completion request: it *is* a reasoning model, and it
+*does* stream chain-of-thought — but under `delta.reasoning_content`,
+not OpenRouter's `delta.reasoning`. `internal/provider/openai_compat.go`
+only ever parsed the latter, so this server's reasoning stream, and by
+extension its liveness, was completely invisible to `router.BoundedPeek`
+— it looked like dead silence for the full idle window even while
+actively producing tokens the whole time. `reasoning_content` is not
+this one server's idiosyncrasy; it's the field name vLLM's reasoning
+parser and DeepSeek-R1-compatible APIs commonly use, so this was always
+going to bite the *next* self-hosted server someone registered too, not
+just this one. Fixed by reading both field names into the same
+`StreamEvent.Reasoning` signal (`openaiCompatChunk.Delta` gained a
+second field, `ReasoningContent`; a chunk populates at most one of the
+two, so summing them is just "whichever one this server sent").
+
+Live-verified against the real server, not just a mocked test: a small
+throwaway program (`provider.Build` → `ChatCompletion` →
+`router.BoundedPeek`, run once via `go run` and deleted after) showed
+`BoundedPeek` committing in ~190ms with the reasoning fragments correctly
+captured, versus the unconditional idle-timeout failure before the fix.
+Also covered by two new table-driven-style tests in
+`internal/provider/openai_compat_test.go` against a local `httptest`
+SSE server: one for each field name, so a regression in either direction
+gets caught without needing a live server.
+
 ## Boundaries
 
 Several things were deliberately not built. Recording them so they don't

@@ -44,12 +44,19 @@ type openaiCompatChunk struct {
 		Delta struct {
 			Content string `json:"content"`
 			// Reasoning carries a reasoning-capable model's chain-of-
-			// thought fragments — OpenRouter's wire extension for models
-			// like gpt-oss and nemotron, sent ahead of (sometimes long
-			// ahead of) any real answer content. See StreamEvent.Reasoning
-			// for why this can't just be folded into Content.
-			Reasoning string `json:"reasoning"`
-			ToolCalls []struct {
+			// thought fragments, sent ahead of (sometimes long ahead of)
+			// any real answer content. Two field names exist in the wild
+			// for the same thing and both are populated here: "reasoning"
+			// is OpenRouter's extension (gpt-oss, nemotron); "reasoning_content"
+			// is what vLLM's reasoning parser and DeepSeek-R1-compatible
+			// servers use instead — confirmed via a real streaming request
+			// against a user's local server that was silently timing out
+			// in router.BoundedPeek because this field went uncaptured.
+			// See StreamEvent.Reasoning for why neither can just be folded
+			// into Content.
+			Reasoning        string `json:"reasoning"`
+			ReasoningContent string `json:"reasoning_content"`
+			ToolCalls        []struct {
 				Index    int    `json:"index"`
 				ID       string `json:"id"`
 				Type     string `json:"type"`
@@ -127,13 +134,16 @@ func (p *OpenAICompatible) ChatCompletion(ctx context.Context, req openai.ChatCo
 					case <-ctx.Done():
 						return false
 					}
-				} else if c.Delta.Reasoning != "" {
+				} else if reasoning := c.Delta.Reasoning + c.Delta.ReasoningContent; reasoning != "" {
 					// No real answer content yet, but reasoning output is
 					// still real progress — forward it so
 					// router.BoundedPeek doesn't mistake a thinking model
-					// for a stalled one (see StreamEvent.Reasoning).
+					// for a stalled one (see StreamEvent.Reasoning). Only
+					// one of the two fields is ever non-empty for a given
+					// server, so concatenating is safe — it's really just
+					// "whichever one this server uses".
 					select {
-					case events <- StreamEvent{Reasoning: c.Delta.Reasoning}:
+					case events <- StreamEvent{Reasoning: reasoning}:
 					case <-ctx.Done():
 						return false
 					}
