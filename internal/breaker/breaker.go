@@ -21,6 +21,14 @@ const (
 	failureThreshold = 3
 	// cooldown is how long a provider stays open before a trial half-open request.
 	cooldown = 30 * time.Second
+	// halfOpenTrialTimeout bounds how long an admitted half-open trial
+	// can hold the slot before a fresh one is allowed in — a safety net
+	// for the case where the trial's caller never reports an outcome at
+	// all (e.g. its goroutine panics, or the request is abandoned via
+	// context cancellation before reaching ReportSuccess/ReportFailure),
+	// so a missed report can't wedge the breaker in "trial in flight"
+	// forever.
+	halfOpenTrialTimeout = cooldown
 )
 
 type entry struct {
@@ -28,6 +36,10 @@ type entry struct {
 	state            state
 	consecutiveFails int
 	openedAt         time.Time
+	// trialAt is when the current half-open trial was admitted; the zero
+	// value means no trial is currently in flight. Only meaningful while
+	// state == halfOpen.
+	trialAt time.Time
 }
 
 // Registry tracks circuit breaker state for every known provider ID.
@@ -62,7 +74,10 @@ func (r *Registry) get(id string) *entry {
 
 // Allow reports whether a request may currently be attempted against the
 // given provider. A provider in "open" state is allowed exactly once per
-// cooldown window (the half-open trial).
+// cooldown window (the half-open trial) — and, once that trial is
+// admitted, no further request is allowed until the trial's outcome is
+// reported (or halfOpenTrialTimeout elapses without one), so concurrent
+// callers can never all pile onto an upstream that's still recovering.
 func (r *Registry) Allow(id string) bool {
 	e := r.get(id)
 	e.mu.Lock()
@@ -74,13 +89,16 @@ func (r *Registry) Allow(id string) bool {
 	case open:
 		if time.Since(e.openedAt) >= cooldown {
 			e.state = halfOpen
+			e.trialAt = time.Now()
 			return true
 		}
 		return false
 	case halfOpen:
-		// Only one trial in flight at a time; treat as allowed since the
-		// caller is expected to report the outcome promptly.
-		return true
+		if e.trialAt.IsZero() || time.Since(e.trialAt) >= halfOpenTrialTimeout {
+			e.trialAt = time.Now()
+			return true
+		}
+		return false
 	default:
 		return true
 	}
@@ -93,6 +111,7 @@ func (r *Registry) ReportSuccess(id string) {
 	defer e.mu.Unlock()
 	e.state = closed
 	e.consecutiveFails = 0
+	e.trialAt = time.Time{}
 }
 
 // ReportFailure records a failed attempt, tripping the breaker open once
@@ -106,6 +125,7 @@ func (r *Registry) ReportFailure(id string) {
 	if e.state == halfOpen {
 		e.state = open
 		e.openedAt = time.Now()
+		e.trialAt = time.Time{}
 		return
 	}
 
