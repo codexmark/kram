@@ -1625,9 +1625,16 @@ reasoning fragments as `StreamEvent.Reasoning` (a new field, kept
 strictly separate from `Delta` — reasoning is not the model's answer and
 must never be relayed to a caller as assistant content), and
 `BoundedPeek`'s timer is now an *idle* timeout that resets on any event,
-reasoning included, bounded by a separate 30s overall ceiling so a model
-that reasons forever without ever answering still can't hold an attempt
-open indefinitely.
+reasoning included. An earlier version of this fix also added a fixed
+overall ceiling on top of the idle timer, on the theory that a model
+reasoning forever without ever answering needed a hard stop regardless —
+removed again after real traffic showed it actively harmful: a genuine
+120B-class reasoning model (OpenRouter's nemotron) legitimately took
+longer than that ceiling on real prompts, not stalled, just still
+thinking, and got rejected mid-answer. The real "never answers at all"
+backstop already exists one layer down: every provider adapter's
+`http.Client` carries its own 120s timeout, which doesn't fire while
+tokens keep arriving — the right place for an absolute ceiling.
 
 **The two failures compounded into "almost never two prompts in a row."**
 With Anthropic permanently unusable (see "Browser login" above — no API
@@ -1747,6 +1754,79 @@ to guarantee the fallback chain couldn't route around it — a real chat
 turn completed through it end to end. This is also what surfaced the
 `KeyOptional` bug above: the crash only reproduced against a real
 gateway startup with a no-auth entry present, not against any unit test.
+
+## A single missing provider credential crashed the whole gateway
+
+Real user report, reproduced exactly: `kram` refused to start at all —
+`gateway didn't come up: ... connection refused` — with no indication of
+why. `waitHealthy`'s timeout error was the only thing surfaced; the real
+cause had already landed on `gateway.Run`'s internal `errCh` and was
+silently discarded. Fixed first in `cmd/kram/main.go` (peek `errCh`
+before falling back to the generic timeout message) and
+`internal/gateway/gateway.go` (log the real cause too, so it survives in
+the log file even if a caller ignores it) — which surfaced the actual
+error: `building provider "anthropic": env var ANTHROPIC_API_KEY is not
+set`.
+
+That pointed at the deeper bug: a global `config.yaml`, written once by
+an earlier wizard run, still listed Anthropic as a required provider —
+its credential had since been deleted (via the accounts screen's "d"
+key, confirmed working; see below). `provider.Build` correctly failed
+for that one provider, but `gateway.Run`'s build loop treated *any*
+single provider failure as fatal for the entire process — one stale
+config line took down all six configured providers, the opposite of the
+fallback-chain resilience this project is built around (see "The
+default combo's fallback chain" above).
+
+Fixed at two layers, since fixing only one just moves the same crash:
+`gateway.Run` now logs a warning and skips a provider that fails to
+build instead of aborting, only erroring if literally zero providers
+end up built. `sanitizeCombosForBuiltProviders` (new, `gateway.go`) then
+strips any now-missing provider ID out of every combo before handing
+the config to `router.New` — which keeps its own stricter check
+unchanged (a combo referencing a provider ID that was never *declared*
+in `cfg.Providers` at all is still a real config typo worth a hard
+error). A combo left with zero providers after filtering is dropped
+entirely; if it was `default_combo`, the first surviving combo takes
+over that role, logged either way. Deliberately *not* touched:
+`config.Validate()`'s static check that every combo references a
+provider ID that exists somewhere in the declared provider list — that
+catches a different, still-real bug class (hand-edited config typos)
+and stays strict.
+
+Live-verified with the user's own real state (`/home/codexmark/.kram`,
+Anthropic/Gemini/OpenCode-Zen credentials genuinely absent, three
+OpenRouter providers genuinely present): the real log now reads three
+`skipping provider that failed to build` warnings, three `provider
+ready` lines, three `dropping unbuilt provider from combo` warnings, and
+`kram-gateway listening` — followed by real `/health` 200s from both the
+gateway and the daemon. Also covered by
+`internal/gateway/gateway_test.go` (new): `sanitizeCombosForBuiltProviders`
+directly (dropping a provider from a combo, dropping an empty combo and
+reassigning `default_combo`), and `Run` end-to-end (one broken + one
+working provider still serves; all-broken still fails fast).
+
+### The "d" key not deleting a provider was two separate, narrower bugs, not the router
+
+Investigated in parallel since the user reported it alongside the crash
+above. `internal/cli/app/accounts.go`'s `"d"` handler blocked *all*
+deletion unconditionally whenever `wizardMode` was true — a leftover
+from before custom providers existed, when catalog credentials really
+were the only thing on this screen and "nothing to undo during setup"
+was a reasonable rule. Custom providers changed that: a mistyped
+URL/name registered mid-wizard now has no way to be corrected before
+finishing setup. Fixed by scoping the wizard-mode restriction to only
+the catalog-row case, confirmed by six new focused tests in
+`accounts_test.go` covering every row type and mode combination
+(`TestDeleteKeyRemovesStoredCatalogCredential`,
+`TestDeleteKeyOnCustomProviderWorksDuringWizardSetup`, etc.) — direct
+`handleAccountsKey` calls, not live TUI, once tmux in this environment
+became too unstable to drive reliably for this particular investigation.
+Separately, direct inspection of the user's real
+`~/.config/kram-gateway/credentials.json` showed Anthropic's key was, in
+fact, already gone — proof the delete logic itself had already worked
+correctly at least once; the crash above is what made it *look* like
+deletion had failed.
 
 ## Boundaries
 

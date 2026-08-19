@@ -453,11 +453,11 @@ func (m Model) handleAccountsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, textinput.Blink
 		}
 	case "d":
-		if m.wizardMode {
-			return m, nil // no deletion during setup — nothing to undo yet
-		}
 		switch {
 		case m.accountsCursor < staticCount:
+			if m.wizardMode {
+				return m, nil // catalog keys are always freshly entered during setup — nothing to undo yet
+			}
 			acct := providercatalog.Accounts[m.accountsCursor]
 			if m.credStore != nil {
 				_ = m.credStore.Delete(acct.EnvVar)
@@ -465,6 +465,9 @@ func (m Model) handleAccountsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.accountsStatus = acct.Label + ": credencial removida."
 			}
 		case m.accountsCursor < addRow:
+			// Unlike catalog credentials, a custom provider can be deleted
+			// during setup too — a mistyped URL/name registered mid-wizard
+			// needs a way to be fixed before finishing, not just after.
 			if cp := m.currentCustomProvider(); cp != nil && m.customStore != nil {
 				name := cp.Name
 				_ = m.customStore.Delete(cp.ID)

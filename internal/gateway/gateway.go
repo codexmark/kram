@@ -48,17 +48,30 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, credStore
 		}
 		p, err := provider.Build(pc, resolve)
 		if err != nil {
-			return fmt.Errorf("building provider %q: %w", pc.ID, err)
+			// A single provider failing to build (almost always a missing
+			// or revoked credential left behind by a stale config.yaml)
+			// must not take the whole gateway down — the other providers
+			// are perfectly usable, and this is exactly the situation the
+			// router's fallback chain exists to absorb. Skip just this
+			// one; combos referencing it get sanitized below, and only a
+			// gateway left with zero usable providers is treated as fatal.
+			logger.Warn("skipping provider that failed to build", "id", pc.ID, "kind", pc.Kind, "error", err)
+			continue
 		}
 		providers[pc.ID] = p
 		logger.Info("provider ready", "id", pc.ID, "kind", pc.Kind)
+	}
+	if len(providers) == 0 {
+		return fmt.Errorf("no provider could be built (%d configured, all failed) — check credentials and provider config", len(cfg.Providers))
 	}
 
 	breakers := breaker.NewRegistry()
 	tel := telemetry.New()
 
-	rt, err := router.New(cfg, providers, breakers, tel)
+	routerCfg := sanitizeCombosForBuiltProviders(cfg, providers, logger)
+	rt, err := router.New(routerCfg, providers, breakers, tel)
 	if err != nil {
+		logger.Error("router failed to build", "error", err)
 		return fmt.Errorf("building router: %w", err)
 	}
 
@@ -78,6 +91,54 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, credStore
 		return nil
 	}
 	return err
+}
+
+// sanitizeCombosForBuiltProviders returns a shallow copy of cfg whose
+// combos only reference providers that actually made it into the built
+// map — router.New's own combo-building loop still hard-errors on any
+// provider ID it's handed that isn't in that map (correctly so: for a
+// config.yaml that was hand-edited or generated with a genuine typo,
+// that's a real bug worth surfacing loudly). What's sanitized here is
+// the *different, softer* case of a provider ID that was valid at
+// config-generation time but failed to build just now (e.g. its
+// credential was deleted since) — those get dropped from each combo
+// instead of taking the combo, or the whole router, down with them.
+func sanitizeCombosForBuiltProviders(cfg *config.Config, providers map[string]provider.Provider, logger *slog.Logger) *config.Config {
+	sanitized := *cfg
+	sanitized.Combos = make([]config.ComboConfig, 0, len(cfg.Combos))
+	for _, cc := range cfg.Combos {
+		kept := make([]string, 0, len(cc.Providers))
+		for _, pid := range cc.Providers {
+			if _, ok := providers[pid]; ok {
+				kept = append(kept, pid)
+			} else {
+				logger.Warn("dropping unbuilt provider from combo", "combo", cc.ID, "provider", pid)
+			}
+		}
+		if len(kept) == 0 {
+			logger.Warn("combo has no usable providers left, dropping it", "combo", cc.ID)
+			continue
+		}
+		cc.Providers = kept
+		sanitized.Combos = append(sanitized.Combos, cc)
+	}
+
+	if sanitized.DefaultCombo != "" {
+		stillExists := false
+		for _, cc := range sanitized.Combos {
+			if cc.ID == sanitized.DefaultCombo {
+				stillExists = true
+				break
+			}
+		}
+		if !stillExists && len(sanitized.Combos) > 0 {
+			logger.Warn("default_combo has no usable providers left, falling back to first remaining combo",
+				"default_combo", sanitized.DefaultCombo, "fallback", sanitized.Combos[0].ID)
+			sanitized.DefaultCombo = sanitized.Combos[0].ID
+		}
+	}
+
+	return &sanitized
 }
 
 // oauthRefreshAdapter bridges oauthflow's Token-returning refresh

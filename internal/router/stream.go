@@ -24,21 +24,25 @@ const (
 	// provider would exhaust in a handful of empty chunks.
 	streamPeekMaxEvents = 8
 	// streamPeekIdleTimeout bounds how long BoundedPeek waits between
-	// events before concluding a provider has stalled. Reset on every
-	// event received — reasoning included — since any event at all is
+	// events before concluding a provider has stalled — reset on every
+	// event received, reasoning included, since any event at all is
 	// evidence the provider is still actively producing tokens, not
-	// dead. Before this reset behavior existed, a reasoning-capable
-	// model whose thinking phase alone ran past this timeout was
-	// misread as a stalled attempt and dropped from the fallback chain,
-	// even though real content was still coming (confirmed live against
-	// OpenRouter's gpt-oss and nemotron — see DECISIONS.md).
+	// dead. This is the *only* time budget here, deliberately: an
+	// earlier version also had a fixed overall ceiling regardless of how
+	// much reasoning kept resetting this timer, on the theory that a
+	// model reasoning forever without ever answering needed a hard stop.
+	// Live traffic proved that assumption actively harmful: a real
+	// 120B-class reasoning model (OpenRouter's nemotron) legitimately
+	// took longer than that ceiling on real prompts — not stalled, just
+	// still thinking — and got rejected mid-answer, forcing fallback onto
+	// worse (rate-limited) candidates that then failed too, compounding
+	// into a fully failed turn (see DECISIONS.md). The genuine "never
+	// answers at all" backstop already exists one layer down, at the
+	// transport: every provider adapter's http.Client carries its own
+	// timeout (120s in internal/provider/openai_compat.go) — the right
+	// place for an absolute ceiling, since it doesn't fire while tokens
+	// keep arriving.
 	streamPeekIdleTimeout = 5 * time.Second
-	// streamPeekMaxDuration is the hard overall ceiling regardless of how
-	// much reasoning keeps the idle timer resetting — without this, a
-	// model that reasons indefinitely without ever answering could hold
-	// an attempt open forever, defeating the entire point of a *bounded*
-	// peek.
-	streamPeekMaxDuration = 30 * time.Second
 )
 
 // StreamPeekResult is what BoundedPeek decided after buffering a small
@@ -60,7 +64,7 @@ type StreamPeekResult struct {
 // BoundedPeek consumes events from src until it sees a meaningful signal
 // (a non-empty text delta, or a terminal event carrying tool calls) or
 // gives up — an error, a stream that closes with no meaningful content,
-// or one of the peek budgets below running out. "Received some bytes" is
+// or the idle budget below running out. "Received some bytes" is
 // deliberately not sufficient signal on its own: an empty delta, a
 // role-only opening chunk, or a provider that sends periodic keepalive
 // pings would otherwise look like progress — reasoning fragments are the
@@ -75,8 +79,6 @@ func BoundedPeek(ctx context.Context, src <-chan provider.StreamEvent) StreamPee
 	var buffered []provider.StreamEvent
 	noSignalEvents := 0
 
-	deadline := time.NewTimer(streamPeekMaxDuration)
-	defer deadline.Stop()
 	idle := time.NewTimer(streamPeekIdleTimeout)
 	defer idle.Stop()
 
@@ -116,8 +118,6 @@ func BoundedPeek(ctx context.Context, src <-chan provider.StreamEvent) StreamPee
 			}
 		case <-idle.C:
 			return StreamPeekResult{Reason: "no meaningful content within the peek window", Buffered: buffered}
-		case <-deadline.C:
-			return StreamPeekResult{Reason: "reasoning ran past the overall peek time budget without meaningful content", Buffered: buffered}
 		case <-ctx.Done():
 			return StreamPeekResult{Reason: ctx.Err().Error(), Buffered: buffered}
 		}

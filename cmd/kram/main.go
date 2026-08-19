@@ -243,9 +243,29 @@ func run(opts runOptions) error {
 	daemonURL := fmt.Sprintf("http://127.0.0.1:%d", daemonPort)
 
 	if err := waitHealthy(ctx, gatewayURL, 5*time.Second); err != nil {
+		// waitHealthy only ever sees "nobody's listening yet" — the real
+		// reason (e.g. "building provider %q: ...") already landed on
+		// errCh the moment gateway.Run returned, well before this dial
+		// ever timed out. Surface that instead of the generic connection-
+		// refused message, which was hiding every real cause behind an
+		// identical, useless error no matter what actually went wrong.
+		select {
+		case runErr := <-errCh:
+			if runErr != nil {
+				return fmt.Errorf("gateway failed to start: %w (see %s)", runErr, logFile.Name())
+			}
+		default:
+		}
 		return fmt.Errorf("gateway didn't come up: %w (see %s)", err, logFile.Name())
 	}
 	if err := waitHealthy(ctx, daemonURL, 5*time.Second); err != nil {
+		select {
+		case runErr := <-errCh:
+			if runErr != nil {
+				return fmt.Errorf("daemon failed to start: %w (see %s)", runErr, logFile.Name())
+			}
+		default:
+		}
 		return fmt.Errorf("daemon didn't come up: %w (see %s)", err, logFile.Name())
 	}
 
