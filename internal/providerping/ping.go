@@ -12,6 +12,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -47,9 +48,13 @@ type Result struct {
 }
 
 // Ping makes one minimal request against kind's API (anthropic, gemini,
-// or openai-compat) using apiKey, and classifies the result. baseURL, if
-// empty, uses each kind's public default — the same convention
-// internal/provider's adapters already use.
+// openai-compat, or openai-responses) using apiKey, and classifies the
+// result. baseURL, if empty, uses each kind's public default — the same
+// convention internal/provider's adapters already use. Every kind here
+// has exactly one real auth shape (see internal/oauthflow/anthropic.go's
+// doc comment for why an Anthropic account connected via browser login
+// still ends up with a plain, permanent API key rather than needing a
+// second auth mode here).
 func Ping(ctx context.Context, kind, baseURL, apiKey string) Result {
 	ctx, cancel := context.WithTimeout(ctx, pingTimeout)
 	defer cancel()
@@ -106,6 +111,26 @@ func buildPingRequest(ctx context.Context, kind, baseURL, apiKey string) (*http.
 			baseURL = "https://generativelanguage.googleapis.com"
 		}
 		return http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/v1beta/models?key="+apiKey, nil)
+
+	case "openai-responses":
+		// The Codex/ChatGPT backend has no confirmed lightweight "list
+		// models" endpoint (see internal/provider/openai_responses.go) —
+		// this sends a request that's expected to be rejected as
+		// malformed (empty input) rather than complete, and relies on
+		// the backend checking auth before body shape: a 401/403 still
+		// reads as "chave inválida" below, anything else as reachable.
+		// Approximate by nature — a real completion is the only fully
+		// reliable check for this backend.
+		if baseURL == "" {
+			baseURL = "https://chatgpt.com/backend-api/codex/responses"
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL, strings.NewReader(`{"model":"gpt-5.5","input":[],"stream":false}`))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+		return req, nil
 
 	default: // "openai-compat"
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/models", nil)

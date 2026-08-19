@@ -25,6 +25,7 @@ import (
 	"github.com/codexmark/kram/internal/cli/daemonclient"
 	"github.com/codexmark/kram/internal/cli/statusclient"
 	"github.com/codexmark/kram/internal/config"
+	"github.com/codexmark/kram/internal/credentials"
 	"github.com/codexmark/kram/internal/daemon"
 	"github.com/codexmark/kram/internal/gateway"
 	"github.com/codexmark/kram/internal/kramhome"
@@ -108,6 +109,14 @@ func run(opts runOptions) error {
 	wizardCompleted := false
 	var wizardResult app.WizardResult
 
+	// Loaded once and threaded through everywhere a credential might be
+	// needed for the rest of run(): detectGatewayConfig (to notice an
+	// OAuth-only-connected account with no env var to autodetect from),
+	// and gateway.Run (to actually resolve/refresh that account's token
+	// on every request). nil on failure is fine — every use site already
+	// guards for it, same as every other local store in this codebase.
+	credStore, _ := credentials.Load()
+
 	if (opts.setup || onboardState.NeedsSetup()) && opts.gatewayConfigPath == "" {
 		result, err := app.RunWizard(workspace, opts.workspaceExplicit)
 		if err != nil {
@@ -118,7 +127,7 @@ func run(opts runOptions) error {
 			workspace = result.Workspace
 			loadStoredCredentials() // pick up whatever the wizard's provider step just saved, before building the config below
 
-			cfgToSave, err := detectGatewayConfig(result.Strategy)
+			cfgToSave, err := detectGatewayConfig(result.Strategy, credStore)
 			if err != nil {
 				return fmt.Errorf("building config after setup: %w", err)
 			}
@@ -190,7 +199,7 @@ func run(opts runOptions) error {
 	// wizard already called this above.
 	loadStoredCredentials()
 
-	gwCfg, err := loadOrDetectGatewayConfig(opts.gatewayConfigPath, opts.gatewayPort, opts.strategy, absWorkspace)
+	gwCfg, err := loadOrDetectGatewayConfig(opts.gatewayConfigPath, opts.gatewayPort, opts.strategy, absWorkspace, credStore)
 	if err != nil {
 		return err
 	}
@@ -213,8 +222,14 @@ func run(opts runOptions) error {
 		cancel()
 	}()
 
+	// credStore (loaded once, above) is passed straight through to
+	// gateway.Run — not merged into os.Setenv like loadStoredCredentials'
+	// plain keys — because an oauth-authed provider's config entry
+	// (auth_mode: oauth) needs the gateway to resolve and refresh its
+	// credential live on every request, since a short-lived OAuth token
+	// would otherwise go stale long before the gateway process exits.
 	errCh := make(chan error, 2)
-	go func() { errCh <- gateway.Run(ctx, gwCfg, logger) }()
+	go func() { errCh <- gateway.Run(ctx, gwCfg, logger, credStore) }()
 
 	daemonCfg := daemon.Config{
 		Host: "127.0.0.1", Port: daemonPort,
@@ -313,7 +328,7 @@ func freePort() (int, error) {
 // replaces the auto-detected combo's strategy (see -strategy); ignored
 // when an explicit -config file is given, since that file already picks
 // its own strategy per combo.
-func loadOrDetectGatewayConfig(path string, port int, strategyOverride string, workspace string) (*config.Config, error) {
+func loadOrDetectGatewayConfig(path string, port int, strategyOverride string, workspace string, credStore *credentials.Store) (*config.Config, error) {
 	if path != "" {
 		cfg, err := config.Load(path)
 		if err != nil {
@@ -346,7 +361,7 @@ func loadOrDetectGatewayConfig(path string, port int, strategyOverride string, w
 		}
 	}
 
-	cfg, err := detectGatewayConfig(strategyOverride)
+	cfg, err := detectGatewayConfig(strategyOverride, credStore)
 	if err != nil {
 		return nil, err
 	}

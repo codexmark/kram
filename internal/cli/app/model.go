@@ -436,7 +436,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		openBrowser(msg.url)
 		ctx, cancel := context.WithCancel(context.Background())
 		m.accountsOAuthCancel = cancel
-		return m, waitOpenRouterOAuthCmd(ctx, msg.wait)
+		if msg.waitPermanent != nil {
+			return m, waitOAuthPermanentCmd(ctx, msg.acctID, msg.waitPermanent)
+		}
+		return m, waitOAuthRefreshableCmd(ctx, msg.acctID, msg.waitRefreshable)
 
 	case oauthResultMsg:
 		m.accountsOAuthPending = false
@@ -449,11 +452,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if m.credStore != nil {
-			if err := m.credStore.Set("OPENROUTER_API_KEY", msg.key); err != nil {
+			status, err := saveOAuthResult(m.credStore, msg)
+			if err != nil {
 				m.accountsStatus = "erro ao salvar: " + err.Error()
 				return m, nil
 			}
-			m.accountsStatus = "OpenRouter conectado — reinicie o kram pra usar."
+			m.accountsStatus = status
 			if m.wizardMode {
 				m.accountsPinging = true
 				return m, pingAccountsCmd(m.credStore)

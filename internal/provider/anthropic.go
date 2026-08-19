@@ -19,6 +19,16 @@ const defaultAnthropicBaseURL = "https://api.anthropic.com"
 // top-level field rather than a message role, streaming uses named SSE
 // events instead of OpenAI's flat "data:" chunks, and tool use/results are
 // content blocks rather than separate message roles).
+//
+// apiKey is always a real, permanent Anthropic API key — including when
+// the account was connected via the wizard's browser-login flow: that
+// flow (internal/oauthflow.AnthropicAuthorize) exchanges the OAuth token
+// for one of these right away rather than handing back something
+// short-lived, since a raw Claude Pro/Max OAuth token turned out not to
+// be a usable inference credential on its own (see that file's doc
+// comment for what was actually live-verified). So this adapter never
+// needed a second, refreshable credential shape the way
+// internal/provider/openai_responses.go does.
 type Anthropic struct {
 	capabilities
 	id      string

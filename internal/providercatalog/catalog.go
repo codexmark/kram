@@ -17,7 +17,7 @@ type Provider struct {
 	SupportsImages bool
 	SupportsTools  bool
 	SignupURL      string // where to get a key/account
-	SupportsOAuth  bool   // true only for providers with a real OAuth flow for third-party CLIs (currently just OpenRouter)
+	SupportsOAuth  bool   // true for providers with a real browser-login flow (see internal/oauthflow)
 	FreeTier       bool   // zero-cost tier: rate-limit-bound rather than cost-bound, which changes how the router should treat it
 }
 
@@ -47,8 +47,19 @@ const openRouterBaseURL = "https://openrouter.ai/api/v1"
 // fallback — if it can't take tools, expect it to answer in plain text
 // only rather than using Kram's tools.
 var Providers = []Provider{
-	{ID: "anthropic", Label: "Anthropic (Claude)", Kind: "anthropic", EnvVar: "ANTHROPIC_API_KEY", DefaultModel: "claude-sonnet-4-5", SupportsImages: true, SupportsTools: true, SignupURL: "https://console.anthropic.com/settings/keys"},
+	{ID: "anthropic", Label: "Anthropic (Claude)", Kind: "anthropic", EnvVar: "ANTHROPIC_API_KEY", DefaultModel: "claude-sonnet-4-5", SupportsImages: true, SupportsTools: true, SignupURL: "https://console.anthropic.com/settings/keys", SupportsOAuth: true},
 	{ID: "openai", Label: "OpenAI", Kind: "openai-compat", BaseURL: "https://api.openai.com/v1", EnvVar: "OPENAI_API_KEY", DefaultModel: "gpt-5", SupportsImages: true, SupportsTools: true, SignupURL: "https://platform.openai.com/api-keys"},
+	// openai-chatgpt is a distinct product from openai above: a ChatGPT
+	// Plus/Pro/Team subscription's Codex access via browser login, not a
+	// developer API key. It talks to a different backend
+	// (chatgpt.com/backend-api/codex/responses, Responses wire format —
+	// see internal/provider/openai_responses.go) and only serves
+	// Codex-branded models, so it can never share openai's env var or
+	// config entry — doing so would silently misrepresent what the
+	// credential can actually do. EnvVar here is only a lookup key into
+	// the OAuth token store (internal/credentials), never a real
+	// environment variable.
+	{ID: "openai-chatgpt", Label: "OpenAI (via login ChatGPT — beta)", Kind: "openai-responses", EnvVar: "OPENAI_CHATGPT_ACCESS_TOKEN", DefaultModel: "gpt-5.5", SupportsTools: true, SignupURL: "https://chatgpt.com", SupportsOAuth: true},
 	{ID: "gemini", Label: "Google AI Studio (Gemini)", Kind: "gemini", EnvVar: "GEMINI_API_KEY", DefaultModel: "gemini-2.5-pro", SupportsImages: true, SupportsTools: true, SignupURL: "https://aistudio.google.com/apikey"},
 	{ID: "openrouter-gptoss", Label: "OpenRouter (free: gpt-oss-20b)", Kind: "openai-compat", BaseURL: openRouterBaseURL, EnvVar: "OPENROUTER_API_KEY", DefaultModel: "openai/gpt-oss-20b:free", SupportsTools: true, FreeTier: true, SignupURL: "https://openrouter.ai/keys", SupportsOAuth: true},
 	{ID: "openrouter-gemma", Label: "OpenRouter (free: gemma-4-31b)", Kind: "openai-compat", BaseURL: openRouterBaseURL, EnvVar: "OPENROUTER_API_KEY", DefaultModel: "google/gemma-4-31b-it:free", SupportsTools: true, FreeTier: true, SignupURL: "https://openrouter.ai/keys", SupportsOAuth: true},
@@ -82,13 +93,19 @@ type Account struct {
 	EnvVar        string
 	SignupURL     string
 	SupportsOAuth bool
+	// OAuthOnly is true for an account with no paste-a-key path at all —
+	// its only credential shape is a browser-login OAuth token (so far,
+	// just openai-chatgpt). The accounts screen hides "enter cola api
+	// key" for these rows.
+	OAuthOnly bool
 }
 
 // Accounts is the deduplicated credential list for the CLI's accounts
 // screen, in the same priority order as Providers.
 var Accounts = []Account{
-	{ID: "anthropic", Label: "Anthropic (Claude)", EnvVar: "ANTHROPIC_API_KEY", SignupURL: "https://console.anthropic.com/settings/keys"},
+	{ID: "anthropic", Label: "Anthropic (Claude)", EnvVar: "ANTHROPIC_API_KEY", SignupURL: "https://console.anthropic.com/settings/keys", SupportsOAuth: true},
 	{ID: "openai", Label: "OpenAI", EnvVar: "OPENAI_API_KEY", SignupURL: "https://platform.openai.com/api-keys"},
+	{ID: "openai-chatgpt", Label: "OpenAI (via login ChatGPT — beta)", EnvVar: "OPENAI_CHATGPT_ACCESS_TOKEN", SignupURL: "https://chatgpt.com", SupportsOAuth: true, OAuthOnly: true},
 	{ID: "gemini", Label: "Google AI Studio (Gemini)", EnvVar: "GEMINI_API_KEY", SignupURL: "https://aistudio.google.com/apikey"},
 	{ID: "openrouter", Label: "OpenRouter", EnvVar: "OPENROUTER_API_KEY", SignupURL: "https://openrouter.ai/keys", SupportsOAuth: true},
 	{ID: "opencode-zen", Label: "OpenCode Zen", EnvVar: "OPENCODE_ZEN_API_KEY", SignupURL: "https://opencode.ai/auth"},

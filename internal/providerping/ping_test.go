@@ -47,6 +47,24 @@ func TestPingAnthropicHeaders(t *testing.T) {
 	}
 }
 
+func TestPingOpenAIResponsesUsesBearer(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Errorf("expected POST, got %s", r.Method)
+		}
+		if r.Header.Get("Authorization") != "Bearer sk-chatgpt" {
+			t.Errorf("expected Authorization: Bearer sk-chatgpt, got %q", r.Header.Get("Authorization"))
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	res := Ping(context.Background(), "openai-responses", srv.URL, "sk-chatgpt")
+	if res.Status != StatusOK {
+		t.Errorf("Status = %v, want StatusOK", res.Status)
+	}
+}
+
 func TestPingGeminiKeyAsQueryParam(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Query().Get("key") != "gk-test" {

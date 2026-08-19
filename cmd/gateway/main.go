@@ -28,7 +28,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := gateway.Run(context.Background(), cfg, logger); err != nil {
+	if err := gateway.Run(context.Background(), cfg, logger, nil); err != nil {
 		logger.Error("fatal", "error", err)
 		os.Exit(1)
 	}

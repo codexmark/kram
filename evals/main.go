@@ -84,7 +84,7 @@ func run() int {
 	}
 
 	errCh := make(chan error, 2)
-	go func() { errCh <- gateway.Run(ctx, &gwCfg, logger) }()
+	go func() { errCh <- gateway.Run(ctx, &gwCfg, logger, nil) }()
 
 	dbPath := filepath.Join(workspace, "eval.db")
 	daemonCfg := daemon.Config{

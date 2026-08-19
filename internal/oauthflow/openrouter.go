@@ -1,19 +1,21 @@
-// Package oauthflow runs OpenRouter's documented OAuth PKCE flow
-// (openrouter.ai/docs/oauth) end to end: generate a PKCE pair, send the
-// user's browser to OpenRouter's own login/consent page, catch the
-// redirect on a local callback server, and exchange the code for a real
-// API key. OpenRouter is the only provider in Kram's catalog that offers
-// this to third-party CLIs — Anthropic/OpenAI/Gemini/OpenCode Zen are
-// API-key-only, so there's no flow to build for those; the accounts
-// screen falls back to pasting a key for them.
+// Package oauthflow runs each provider's browser-login PKCE flow end to
+// end: generate a PKCE pair, send the user's browser to the provider's
+// own login/consent page, catch the redirect on a local callback server,
+// and exchange the code for a credential.
+//
+// OpenRouter's flow (this file) is the simple case: the exchange returns
+// a permanent API key, used exactly like a pasted one. Anthropic's
+// (anthropic.go) and OpenAI's (openai.go) flows instead return a
+// short-lived access token plus a refresh token — see Token in token.go
+// — because they authenticate a subscription (Claude Pro/Max, ChatGPT
+// Plus/Pro), not a developer API key. Gemini and OpenCode Zen have no
+// OAuth flow at all; the accounts screen falls back to pasting a key for
+// those.
 package oauthflow
 
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
-	"crypto/sha256"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -119,17 +121,4 @@ func exchangeCode(ctx context.Context, code, verifier string) (string, error) {
 		return "", fmt.Errorf("OpenRouter exchange failed (status %d)", resp.StatusCode)
 	}
 	return out.Key, nil
-}
-
-func randomVerifier() (string, error) {
-	b := make([]byte, 32)
-	if _, err := rand.Read(b); err != nil {
-		return "", err
-	}
-	return base64.RawURLEncoding.EncodeToString(b), nil
-}
-
-func challengeFromVerifier(verifier string) string {
-	sum := sha256.Sum256([]byte(verifier))
-	return base64.RawURLEncoding.EncodeToString(sum[:])
 }

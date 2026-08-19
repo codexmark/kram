@@ -11,6 +11,7 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/codexmark/kram/internal/credentials"
 	"github.com/codexmark/kram/internal/oauthflow"
 	"github.com/codexmark/kram/internal/providercatalog"
 	"github.com/codexmark/kram/internal/providerping"
@@ -56,12 +57,28 @@ func (m *Model) wizardHasProvider() bool {
 func (m *Model) accountRows() []accountStatus {
 	rows := make([]accountStatus, len(providercatalog.Accounts))
 	for i, a := range providercatalog.Accounts {
+		stored := m.credStore != nil && m.credStore.Get(a.EnvVar) != ""
+		if !stored && m.credStore != nil {
+			_, stored = m.credStore.GetOAuth(a.EnvVar)
+		}
 		rows[i] = accountStatus{
 			envSet:    os.Getenv(a.EnvVar) != "",
-			storedSet: m.credStore != nil && m.credStore.Get(a.EnvVar) != "",
+			storedSet: stored,
 		}
 	}
 	return rows
+}
+
+// accountByID finds a catalog account by ID, or nil if none matches —
+// used to look up the right EnvVar/Label once an OAuth flow (started
+// against an account ID) completes.
+func accountByID(id string) *providercatalog.Account {
+	for i := range providercatalog.Accounts {
+		if providercatalog.Accounts[i].ID == id {
+			return &providercatalog.Accounts[i]
+		}
+	}
+	return nil
 }
 
 // renderAccounts draws the accounts screen: every known provider from
@@ -125,9 +142,19 @@ func (m Model) renderAccounts() string {
 		b.WriteString(styleHint.Render(m.accountsStatus) + "\n\n")
 	}
 
-	hint := "enter cola api key"
-	if m.accountsCursor < len(providercatalog.Accounts) && providercatalog.Accounts[m.accountsCursor].SupportsOAuth {
-		hint += " · o conecta via oauth"
+	hint := ""
+	cur := providercatalog.Account{}
+	if m.accountsCursor < len(providercatalog.Accounts) {
+		cur = providercatalog.Accounts[m.accountsCursor]
+	}
+	if !cur.OAuthOnly {
+		hint = "enter cola api key"
+	}
+	if cur.SupportsOAuth {
+		if hint != "" {
+			hint += " · "
+		}
+		hint += "o conecta via oauth"
 	}
 	if m.wizardMode {
 		hint += " · r verifica de novo"
@@ -282,6 +309,9 @@ func (m Model) handleAccountsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.accountsCursor++
 		}
 	case "enter":
+		if providercatalog.Accounts[m.accountsCursor].OAuthOnly {
+			return m, nil // no key to paste — "o" is this account's only path
+		}
 		m.accountsEditing = true
 		m.accountsStatus = ""
 		m.accountsKeyInput.SetValue("")
@@ -294,14 +324,15 @@ func (m Model) handleAccountsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		acct := providercatalog.Accounts[m.accountsCursor]
 		if m.credStore != nil {
 			_ = m.credStore.Delete(acct.EnvVar)
-			m.accountsStatus = acct.Label + ": chave salva removida."
+			_ = m.credStore.DeleteOAuth(acct.EnvVar)
+			m.accountsStatus = acct.Label + ": credencial removida."
 		}
 	case "o":
 		acct := providercatalog.Accounts[m.accountsCursor]
 		if acct.SupportsOAuth {
 			m.accountsOAuthPending = true
 			m.accountsStatus = ""
-			return m, startOpenRouterOAuthCmd()
+			return m, startOAuthCmd(acct.ID)
 		}
 	case "r":
 		m.accountsPinging = true
@@ -324,29 +355,92 @@ func (m Model) handleAccountsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // authorization URL is ready — the browser opens (best-effort) and the
 // screen shows the URL as a fallback the instant this lands, before the
 // (potentially long) wait for the user to actually click through.
+//
+// Exactly one of waitPermanent/waitRefreshable is set, matching the two
+// shapes internal/oauthflow's Authorize functions return: OpenRouter and
+// Anthropic both exchange for a permanent API key (waitPermanent) — for
+// Anthropic that's one extra create-key call tucked inside its own
+// Authorize function, not something this file needs to know about — while
+// only OpenAI's ChatGPT login exchanges for a refreshable oauthflow.Token
+// (waitRefreshable), since that one has no equivalent permanent-key step.
+// See internal/oauthflow/anthropic.go's doc comment for why.
 type oauthURLMsg struct {
-	url  string
-	wait func(ctx context.Context) (string, error)
-	err  error
+	acctID          string
+	url             string
+	waitPermanent   func(ctx context.Context) (string, error)
+	waitRefreshable func(ctx context.Context) (oauthflow.Token, error)
+	err             error
 }
 
-func startOpenRouterOAuthCmd() tea.Cmd {
+// startOAuthCmd dispatches to the right catalog account's OAuth flow.
+// Only accounts with SupportsOAuth true ever reach this (see the "o" key
+// handler above); a default case exists purely so an unmapped ID reports
+// a real error instead of panicking on a nil wait function.
+func startOAuthCmd(acctID string) tea.Cmd {
 	return func() tea.Msg {
-		url, wait, err := oauthflow.OpenRouterAuthorize()
-		return oauthURLMsg{url: url, wait: wait, err: err}
+		switch acctID {
+		case "openrouter":
+			url, wait, err := oauthflow.OpenRouterAuthorize()
+			return oauthURLMsg{acctID: acctID, url: url, waitPermanent: wait, err: err}
+		case "anthropic":
+			url, wait, err := oauthflow.AnthropicAuthorize()
+			return oauthURLMsg{acctID: acctID, url: url, waitPermanent: wait, err: err}
+		case "openai-chatgpt":
+			url, wait, err := oauthflow.OpenAIAuthorize()
+			return oauthURLMsg{acctID: acctID, url: url, waitRefreshable: wait, err: err}
+		default:
+			return oauthURLMsg{acctID: acctID, err: fmt.Errorf("no oauth flow implemented for %q", acctID)}
+		}
 	}
 }
 
+// oauthResultMsg carries whichever shape of credential the flow produced
+// — refreshable is the discriminator model.go's handler switches on,
+// since a zero-value Token and a zero-value string key are both
+// indistinguishable from "not set" on their own.
 type oauthResultMsg struct {
-	key string
-	err error
+	acctID      string
+	key         string
+	token       oauthflow.Token
+	refreshable bool
+	err         error
 }
 
-func waitOpenRouterOAuthCmd(ctx context.Context, wait func(ctx context.Context) (string, error)) tea.Cmd {
+func waitOAuthPermanentCmd(ctx context.Context, acctID string, wait func(ctx context.Context) (string, error)) tea.Cmd {
 	return func() tea.Msg {
 		key, err := wait(ctx)
-		return oauthResultMsg{key: key, err: err}
+		return oauthResultMsg{acctID: acctID, key: key, err: err}
 	}
+}
+
+func waitOAuthRefreshableCmd(ctx context.Context, acctID string, wait func(ctx context.Context) (oauthflow.Token, error)) tea.Cmd {
+	return func() tea.Msg {
+		tok, err := wait(ctx)
+		return oauthResultMsg{acctID: acctID, token: tok, refreshable: true, err: err}
+	}
+}
+
+// saveOAuthResult persists whichever credential shape msg carries against
+// the right catalog account and reports a real status line — shared by
+// model.go's oauthResultMsg handler so the Set-vs-SetOAuth branch only
+// lives in one place.
+func saveOAuthResult(credStore *credentials.Store, msg oauthResultMsg) (status string, err error) {
+	acct := accountByID(msg.acctID)
+	if acct == nil {
+		return "", fmt.Errorf("unknown account %q", msg.acctID)
+	}
+	if msg.refreshable {
+		if err := credStore.SetOAuth(acct.EnvVar, credentials.OAuthToken{
+			Access: msg.token.Access, Refresh: msg.token.Refresh, ExpiresAt: msg.token.ExpiresAt,
+		}); err != nil {
+			return "", err
+		}
+	} else {
+		if err := credStore.Set(acct.EnvVar, msg.key); err != nil {
+			return "", err
+		}
+	}
+	return acct.Label + ": conectado — reinicie o kram pra usar.", nil
 }
 
 // openBrowser is best-effort — the authorization URL is always shown on

@@ -29,24 +29,38 @@ func loadStoredCredentials() {
 }
 
 // detectGatewayConfig builds a single-combo gateway config from whichever
-// providercatalog.Providers have their API-key env var set (a real env
-// var, or a key loaded from the local credentials store and os.Setenv'd
-// by loadStoredCredentials in main.go before this runs). Order is
-// deterministic (the catalog's order), which also becomes the round-robin
-// combo order.
-func detectGatewayConfig(strategyOverride string) (*config.Config, error) {
+// providercatalog.Providers have a real credential available: their
+// API-key env var set (a real env var, or a key loaded from the local
+// credentials store and os.Setenv'd by loadStoredCredentials in main.go
+// before this runs), or — for a provider connected via browser login
+// (SupportsOAuth) rather than a pasted/exported key — a refreshable OAuth
+// token in credStore, in which case AuthMode is set to "oauth" so the
+// gateway resolves it live instead of expecting a static env var (see
+// internal/gateway.Run). credStore may be nil (no OAuth-based providers
+// will be found in that case, same as before this parameter existed).
+// Order is deterministic (the catalog's order), which also becomes the
+// round-robin combo order.
+func detectGatewayConfig(strategyOverride string, credStore *credentials.Store) (*config.Config, error) {
 	var providers []config.ProviderConfig
 	var ids []string
 
 	havePaid := false
 	for _, p := range providercatalog.Providers {
 		key := os.Getenv(p.EnvVar)
+		authMode := ""
 		if key == "" {
-			continue
+			if credStore == nil {
+				continue
+			}
+			if _, ok := credStore.GetOAuth(p.EnvVar); !ok {
+				continue
+			}
+			authMode = "oauth"
 		}
 		providers = append(providers, config.ProviderConfig{
 			ID: p.ID, Kind: p.Kind, BaseURL: p.BaseURL, APIKeyEnv: p.EnvVar,
 			Model: p.DefaultModel, SupportsImages: p.SupportsImages, SupportsTools: p.SupportsTools,
+			AuthMode: authMode,
 		})
 		ids = append(ids, p.ID)
 		if !p.FreeTier {

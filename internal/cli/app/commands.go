@@ -11,9 +11,30 @@ import (
 	"github.com/codexmark/kram/internal/cli/daemonclient"
 	"github.com/codexmark/kram/internal/cli/statusclient"
 	"github.com/codexmark/kram/internal/credentials"
+	"github.com/codexmark/kram/internal/oauthflow"
 	"github.com/codexmark/kram/internal/providercatalog"
 	"github.com/codexmark/kram/internal/providerping"
 )
+
+// oauthRefreshAdapter bridges oauthflow's Token-returning refresh
+// functions to the credentials.OAuthToken shape Store.Resolve expects —
+// kept tiny and local rather than adding a credentials -> oauthflow
+// import, which would invert the packages' natural dependency direction
+// (oauthflow is the lower-level HTTP flow package; credentials is generic
+// storage that shouldn't need to know oauthflow exists).
+func oauthRefreshAdapter(acctID string) func(ctx context.Context, refreshToken string) (credentials.OAuthToken, error) {
+	f := oauthflow.RefreshFunc(acctID)
+	if f == nil {
+		return nil
+	}
+	return func(ctx context.Context, refreshToken string) (credentials.OAuthToken, error) {
+		tok, err := f(ctx, refreshToken)
+		if err != nil {
+			return credentials.OAuthToken{}, err
+		}
+		return credentials.OAuthToken{Access: tok.Access, Refresh: tok.Refresh, ExpiresAt: tok.ExpiresAt}, nil
+	}
+}
 
 type sessionsListMsg struct {
 	sessions []daemonclient.Session
@@ -144,7 +165,15 @@ func pingAccountsCmd(credStore *credentials.Store) tea.Cmd {
 		for _, acct := range providercatalog.Accounts {
 			key := os.Getenv(acct.EnvVar)
 			if key == "" && credStore != nil {
-				key = credStore.Get(acct.EnvVar)
+				// Resolve covers both credential shapes: it refreshes and
+				// returns a live OAuth access token when one is stored for
+				// this account (only openai-chatgpt ever has one — see
+				// oauthflow.RefreshFunc), or falls back to the plain stored
+				// key otherwise, same precedence the env var above already
+				// establishes (shell env wins over anything stored).
+				if resolved, err := credStore.Resolve(context.Background(), acct.EnvVar, oauthRefreshAdapter(acct.ID)); err == nil {
+					key = resolved
+				}
 			}
 			if key == "" {
 				continue // nothing configured for this account — not "down", just unchecked

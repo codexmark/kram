@@ -43,10 +43,30 @@ func TestEnvVarsIsDeduplicated(t *testing.T) {
 	}
 }
 
-func TestOnlyOpenRouterSupportsOAuth(t *testing.T) {
+func TestSupportsOAuthHasARealFlow(t *testing.T) {
+	// Every account claiming OAuth support must have a real Authorize
+	// function in internal/oauthflow — this only guards against an
+	// account being flagged SupportsOAuth before its flow exists (a
+	// catalog/oauthflow drift), not against the flow actually working
+	// against the real provider.
+	hasFlow := map[string]bool{
+		"anthropic":      true, // oauthflow.AnthropicAuthorize
+		"openai-chatgpt": true, // oauthflow.OpenAIAuthorize
+		"openrouter":     true, // oauthflow.OpenRouterAuthorize
+	}
 	for _, a := range Accounts {
-		if a.SupportsOAuth && a.ID != "openrouter" {
-			t.Errorf("account %q claims OAuth support, but only OpenRouter has a real flow implemented (internal/oauthflow)", a.ID)
+		if a.SupportsOAuth && !hasFlow[a.ID] {
+			t.Errorf("account %q claims OAuth support, but has no known flow in internal/oauthflow", a.ID)
+		}
+	}
+}
+
+func TestOAuthOnlyAccountsSupportOAuth(t *testing.T) {
+	// OAuthOnly without SupportsOAuth would hide the only way to connect
+	// the account at all.
+	for _, a := range Accounts {
+		if a.OAuthOnly && !a.SupportsOAuth {
+			t.Errorf("account %q is OAuthOnly but doesn't SupportsOAuth — it would have no way to connect", a.ID)
 		}
 	}
 }

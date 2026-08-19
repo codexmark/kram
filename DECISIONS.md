@@ -1485,6 +1485,106 @@ company-backed product might is a real, ongoing cost/liability decision
 for a solo maintainer — not something to introduce as a side effect of an
 onboarding flow.
 
+## Browser login for Anthropic and OpenAI (Claude Pro/Max, ChatGPT Pro/Plus)
+
+The wizard's Phase 2 backlog (see above) named "OAuth/browser-auth for
+providers beyond OpenRouter" as deferred. This closes that specific item
+for Anthropic and OpenAI — Gemini and OpenCode Zen remain key-only, since
+neither offers a subscription-login flow to build against.
+
+The first pass shipped here got Anthropic's actual credential shape
+wrong, and only real end-to-end testing against a live account (not
+`go build`, not a fake authorization code) caught it — worth recording
+in detail since it changed the design, not just a bug fix.
+
+### Anthropic: the OAuth access token is not itself a usable credential — it mints one
+
+The first implementation sent Anthropic's OAuth access token straight
+through as `Authorization: Bearer` on every request, mirroring
+OpenAI's flow. Live-tested against a real Claude Pro/Max account: every
+request built that way — `/v1/messages`, `/v1/models`, ping included —
+came back `403 permission_error`, `"OAuth token does not meet scope
+requirement any_of(user:inference, ...)"`, even though `user:inference`
+was explicitly requested in the authorize call's scope. An active Pro/Max
+subscription didn't change this.
+
+What actually works, also confirmed live against the same account: the
+token's `org:create_api_key` scope is for exactly one thing — a single
+POST to `https://api.anthropic.com/api/oauth/claude_cli/create_api_key`
+(`Authorization: Bearer <oauth access token>`), which mints a real,
+permanent `sk-ant-...` API key (`expires_at: null`) on the account that
+just authorized Kram. That key works precisely like any pasted one —
+confirmed by sending it as `x-api-key` against `/v1/messages` and getting
+a coherent, unrelated error back (`"Your credit balance is too low"` —
+an Anthropic Developer Console billing state, entirely separate from a
+Claude Pro/Max chat subscription; the two are unrelated balances). So
+`internal/oauthflow.AnthropicAuthorize` does the code exchange and this
+create-key call back to back and hands back a permanent string, the same
+shape `OpenRouterAuthorize` already returns — there is no refresh path
+for Anthropic, and no second `Bearer`-auth mode in
+`internal/provider/anthropic.go`. Both existed in the first pass and were
+removed once this was understood; `internal/credentials.Store`'s
+`OAuthToken`/`Resolve`/refresh machinery still exists, but Anthropic
+never touches it.
+
+### OpenAI's ChatGPT login really does need the refreshable-token machinery — and needed a fixed callback port
+
+OpenAI's flow is the case that machinery was built for: the access token
+*is* the usable credential (Bearer, straight to the Codex Responses
+backend), but it's short-lived and must be refreshed — confirmed by the
+same live-testing discipline, sending a fabricated code straight to
+`auth.openai.com/oauth/token` and getting a coherent `token_expired`
+rejection back rather than a client or shape error.
+
+A second real bug surfaced the same way: the authorize URL was rejected
+outright by `auth.openai.com` — `"invalid_authorize_request"` — visible
+directly in a browser, before any login prompt. The cause was the local
+callback listener's port: it was ephemeral (`net.Listen("...:0")`), but
+OpenAI's authorization server validates `redirect_uri` against an
+allowlist registered for this client_id, and the `opencode` client this
+was extracted from hardcodes port `1455`, not a dynamically chosen one.
+Kram's callback listener now binds that same fixed port — if something
+else already owns it locally, the flow fails to start with a clear error
+naming the requirement, rather than silently trying a different,
+guaranteed-to-be-rejected one.
+
+### OpenAI's ChatGPT login is a different product, not an alternate way to fill `OPENAI_API_KEY`
+
+It only authorizes access to a separate, Codex-branded backend
+(`chatgpt.com/backend-api/codex/responses`, the Responses wire format,
+not Chat Completions) serving a restricted model set — never
+`api.openai.com`. Presenting it as a second way to configure the existing
+`openai` catalog entry would be a real correctness bug dressed up as a
+convenience: the resulting token simply doesn't work there. It's its own
+catalog entry (`openai-chatgpt`) and its own adapter
+(`internal/provider/openai_responses.go`, `Kind: "openai-responses"`).
+
+### Anthropic's client_id is real but unofficial — said so, not hidden
+
+There is no public, documented OAuth client Anthropic offers third-party
+tools. The `client_id` this uses (`9d1c250a-e61b-44d9-88ed-5944d1962f5e`)
+is only known because it's been reverse-engineered from Anthropic's own
+`claude` CLI by outside projects — not something extracted from `opencode`
+(which, unlike its fully-implemented "login with ChatGPT" flow, turned
+out to have no working Anthropic OAuth implementation anywhere in its
+shipped bundle, despite showing the UI label for one). Both the
+authorize/token exchange and the create-key call were live-verified
+against a real account, not just probed with a fabricated code — see
+above. Framed honestly in the accounts screen's label ("beta") rather
+than presented as sanctioned, first-class support.
+
+### The lesson this reinforces: `go build` proves nothing about whether an OAuth flow actually works
+
+Every prior finding in this file about live-tmux-testing catching what a
+clean build can't (see "Two real bugs found only by running the wizard
+in tmux" above) applied again here, at higher stakes: a scope-mismatched
+Bearer token and a rejected authorize URL both look identical to a
+successful flow in source code, and both were only caught by sending
+real requests to Anthropic's and OpenAI's real servers — first with
+fabricated codes to sanity-check endpoints/shapes without needing a
+login, then, for Anthropic, by working through the actual live account
+data once a real connection had been made through the wizard.
+
 ## Boundaries
 
 Several things were deliberately not built. Recording them so they don't
@@ -1767,10 +1867,11 @@ re-litigated.
 
 The first-run wizard (see its own section above) also has a deliberately
 scoped Phase 2, called out explicitly at the time rather than discovered
-later: OAuth/browser-auth for providers beyond OpenRouter; the richer
-"projects root + picker" launcher for a bare `kram` invocation (today's
-wizard only persists `projects_root` as seed data, no picker UI reads it
-yet); more advanced/tunable permission presets; deeper system
-diagnostics; and actual migration logic across future
+later: ~~OAuth/browser-auth for providers beyond OpenRouter~~ *closed for
+Anthropic and OpenAI* — see "Browser login for Anthropic and OpenAI"
+above; the richer "projects root + picker" launcher for a bare `kram`
+invocation (today's wizard only persists `projects_root` as seed data, no
+picker UI reads it yet); more advanced/tunable permission presets; deeper
+system diagnostics; and actual migration logic across future
 `currentOnboardingVersion` bumps (today a version bump just re-triggers
 the wizard from scratch, which is intentional, not a stopgap).
