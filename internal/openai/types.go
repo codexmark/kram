@@ -224,9 +224,11 @@ type ChatCompletionChunkChoice struct {
 
 // ChatCompletionChunk is one `data: {...}` SSE event for streaming
 // responses. Provider, Attempts and Usage are kram-gateway extensions,
-// set only on the terminal chunk (mirrors ChatCompletionResponse) — the
-// daemon relies on these to run its agent loop entirely off the
-// streaming path instead of needing a separate non-streaming call.
+// set only on the terminal chunk (mirrors ChatCompletionResponse) —
+// used by the daemon's agent loop when a session opts into the
+// streaming path (internal/daemon/agent.Config.PreferStreaming; buffered
+// non-streaming calls, via ChatCompletionResponse instead, are the
+// default — see that field's doc comment for why).
 type ChatCompletionChunk struct {
 	ID       string                      `json:"id"`
 	Object   string                      `json:"object"`

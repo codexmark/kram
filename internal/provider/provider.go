@@ -14,9 +14,13 @@ import (
 // StreamEvent is one normalized increment of a chat completion stream.
 // Providers translate their native wire format into a sequence of these.
 // ToolCalls is only set on the final (Done) event — no provider streams
-// partial tool-call deltas to Kram's own agent loop, which always makes
-// non-streaming requests and waits for the complete decision before
-// acting on it (see internal/daemon/agent).
+// partial tool-call deltas as assembled ToolCall values; the daemon's
+// agent loop makes buffered (non-streaming) gateway calls by default and
+// waits for the complete decision before acting on it (see
+// internal/daemon/agent.Config.PreferStreaming for the opt-in exception),
+// so there's nothing further upstream that needs them incrementally
+// either. ToolCallProgress below exists for a narrower reason: not
+// exposing partial arguments, just proving the provider is still alive.
 type StreamEvent struct {
 	Delta string
 	// Reasoning is a fragment of a reasoning-capable model's chain-of-

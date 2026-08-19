@@ -61,6 +61,19 @@ type Config struct {
 	// Workspace is the project root — used to load AGENTS.md/CLAUDE.md as
 	// persistent project context, injected into every turn.
 	Workspace string
+	// PreferStreaming opts a session back into the streaming gateway
+	// call path (see streamCall) instead of the buffered default (see
+	// bufferedCall). Streaming commits to one candidate the moment
+	// router.BoundedPeek sees a meaningful first signal — if that
+	// candidate then fails mid-stream, the whole turn fails with it,
+	// since HTTP headers are already sent and no further fallback is
+	// possible. The buffered path doesn't have that problem: kram-
+	// gateway's own non-streaming branch already tries every ranked
+	// candidate to completion before writing anything back (see
+	// internal/server/chat.go), so it's the default. False (buffered) is
+	// what almost every caller wants; this exists as an escape hatch,
+	// not a recommendation.
+	PreferStreaming bool
 }
 
 func (c Config) withDefaults() Config {
@@ -155,6 +168,12 @@ type Service struct {
 	// let an answer meant for one satisfy the other.
 	pendingApprovalsMu sync.Mutex
 	pendingApprovals   map[string]chan tools.ApprovalDecision
+
+	// heartbeatInterval overrides the package-level heartbeatInterval
+	// default — unexported, only ever set directly by a same-package
+	// test that wants bufferedCall's ticker on a testable timescale
+	// instead of waiting out the real interval.
+	heartbeatInterval time.Duration
 }
 
 // New builds an agent Service.
@@ -162,6 +181,7 @@ func New(st *store.Store, gw *gatewayclient.Client, tr *tools.Registry, cfg Conf
 	return &Service{
 		store: st, gateway: gw, tools: tr, cfg: cfg.withDefaults(),
 		pending: make(map[string]chan string), pendingApprovals: make(map[string]chan tools.ApprovalDecision),
+		heartbeatInterval: heartbeatInterval,
 	}
 }
 
@@ -473,7 +493,7 @@ func (s *Service) runLoop(ctx context.Context, sessionID, model string, depth in
 		}
 
 		emit(onEvent, Event{Kind: EventRouteStart})
-		callResult, err := s.streamCall(ctx, model, modelMessages, toolDefs, onEvent)
+		callResult, err := s.callModel(ctx, model, modelMessages, toolDefs, onEvent)
 		if err != nil {
 			return RunResult{}, fmt.Errorf("gateway call failed: %w", err)
 		}
@@ -551,12 +571,60 @@ func (s *Service) runLoop(ctx context.Context, sessionID, model string, depth in
 	return RunResult{}, fmt.Errorf("agent loop exhausted %d turns without a final answer", s.cfg.MaxTurns)
 }
 
+// heartbeatInterval is how often bufferedCall emits EventHeartbeat while
+// a buffered gateway call is in flight — chosen with margin under the
+// CLI's own stall-warning threshold (internal/cli/app/view.go's
+// stallThreshold, 8s at time of writing) so at least one heartbeat lands
+// before that warning would otherwise paint during a longer-but-healthy
+// wait.
+const heartbeatInterval = 4 * time.Second
+
+// callModel picks the buffered or streaming gateway call path per
+// s.cfg.PreferStreaming — see that field's doc comment for why buffered
+// is the default.
+func (s *Service) callModel(ctx context.Context, model string, messages []openai.ChatMessage, toolDefs []openai.Tool, onEvent EventFunc) (gatewayclient.Result, error) {
+	if s.cfg.PreferStreaming {
+		return s.streamCall(ctx, model, messages, toolDefs, onEvent)
+	}
+	return s.bufferedCall(ctx, model, messages, toolDefs, onEvent)
+}
+
+// bufferedCall makes one gateway call over the non-streaming path and
+// waits for the complete result — kram-gateway's own non-streaming
+// branch already tries every ranked candidate to completion before
+// writing anything back (see internal/server/chat.go), so unlike
+// streamCall this never commits to one candidate before knowing whether
+// it actually succeeded. Since there's no incremental per-token output
+// to relay, EventHeartbeat fires periodically instead purely so a
+// caller's own liveness/stall-detection clock doesn't misread a longer
+// (but healthy) multi-candidate wait as a hang.
+func (s *Service) bufferedCall(ctx context.Context, model string, messages []openai.ChatMessage, toolDefs []openai.Tool, onEvent EventFunc) (gatewayclient.Result, error) {
+	type outcome struct {
+		result gatewayclient.Result
+		err    error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		r, err := s.gateway.ChatCompletion(ctx, model, messages, toolDefs)
+		done <- outcome{r, err}
+	}()
+
+	ticker := time.NewTicker(s.heartbeatInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case out := <-done:
+			return out.result, out.err
+		case <-ticker.C:
+			emit(onEvent, Event{Kind: EventHeartbeat})
+		}
+	}
+}
+
 // streamCall makes one gateway call over the streaming path and
-// accumulates it into the same shape the old non-streaming call
-// returned, emitting each text fragment via onEvent as it arrives. Every
-// turn goes through here now, including tool-calling turns — those just
-// happen to never emit a delta, since the model isn't producing visible
-// text when it's deciding what to call.
+// accumulates it into the same shape the non-streaming call returns,
+// emitting each text fragment via onEvent as it arrives. Only reached
+// when Config.PreferStreaming opts a session into it — see callModel.
 func (s *Service) streamCall(ctx context.Context, model string, messages []openai.ChatMessage, toolDefs []openai.Tool, onEvent EventFunc) (gatewayclient.Result, error) {
 	deltas, err := s.gateway.ChatCompletionStream(ctx, model, messages, toolDefs)
 	if err != nil {

@@ -43,6 +43,21 @@ const (
 	// known: every attempt made, the winner, and (for a scoring strategy)
 	// the full candidate ranking — see RouteCall.
 	EventRouteDone EventKind = "route_done"
+	// EventHeartbeat is a periodic, payload-free liveness signal emitted
+	// while a buffered (non-streaming) gateway call is in flight — see
+	// Service.bufferedCall. No per-candidate progress is observable on
+	// this path (same reason EventRouteStart's doc comment gives: the
+	// gateway's fallback loop happens inside one HTTP round-trip the
+	// daemon only sees the result of), so this exists purely to keep a
+	// caller's own "still working" liveness clock fresh during a
+	// multi-candidate or multi-round wait that can legitimately run
+	// longer than a single provider call would. Deliberately a distinct
+	// kind from EventNotice, which renders as a visible transcript line —
+	// a heartbeat firing every few seconds would spam that; a caller with
+	// no special handling for this kind is expected to silently ignore
+	// it (which, for anything that treats "any event" as a liveness
+	// signal, is already exactly the desired behavior).
+	EventHeartbeat EventKind = "heartbeat"
 )
 
 // Event is one thing that happened during Run, emitted live via the

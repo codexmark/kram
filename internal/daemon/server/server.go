@@ -204,6 +204,12 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 			writeEvent(map[string]any{"type": "route_start"})
 		case agent.EventRouteDone:
 			writeEvent(map[string]any{"type": "route_done", "route_call": evt.RouteCall})
+		case agent.EventHeartbeat:
+			// Payload-free on purpose — see EventHeartbeat's doc comment.
+			// Harmless for a client with no special handling for this
+			// type: it still resets any "time since last event" clock the
+			// same way every other frame on this stream already does.
+			writeEvent(map[string]any{"type": "heartbeat"})
 		}
 	}
 
