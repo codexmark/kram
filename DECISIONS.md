@@ -2989,3 +2989,24 @@ picker UI reads it yet); more advanced/tunable permission presets; deeper
 system diagnostics; and actual migration logic across future
 `currentOnboardingVersion` bumps (today a version bump just re-triggers
 the wizard from scratch, which is intentional, not a stopgap).
+
+## The KRAM identity mark is a boot splash, not persistent picker chrome
+
+The supplied retracting-legs K, ANSI Shadow `KRAM`, motto, dark panel and
+violet-to-cyan gradient are preserved as explicit terminal cells and locked by
+tests. They replace the unrelated `KramGateway` FIGlet mark that previously
+occupied the picker.
+
+The identity mark now owns one short startup phase inside the same Bubble Tea
+program as the destination screen: an 18-frame left-to-right reveal, six-frame
+hold and 12-frame true-color fade plus deterministic cell dissolve, at 45 ms
+per frame. Keeping it in the same program avoids the visible terminal restore/
+re-enter flash caused by running a second alt-screen program. Once it dissolves,
+the model transitions to its real target — first-run wizard, session picker or
+an explicitly selected chat — and only then starts that screen's commands.
+Enter, Space or Escape skips the splash without forwarding that key.
+
+The full composition requires 84 columns. Medium terminals show the exact
+central wordmark and motto; narrow terminals show `KRAM`. The picker itself no
+longer repeats the banner: a boot splash that remains on the next screen did
+not actually disappear and consumed useful session-list height.
