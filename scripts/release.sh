@@ -119,7 +119,9 @@ if [ -z "$NOTES_FILE" ]; then
   printf 'Kram %s\n\nCommit: %s\n' "$VERSION" "$COMMIT" > "$NOTES_FILE"
 fi
 cleanup() {
-  [ "$CLEANUP_NOTES" -eq 1 ] && rm -f "$NOTES_FILE"
+  if [ "$CLEANUP_NOTES" -eq 1 ]; then
+    rm -f "$NOTES_FILE"
+  fi
 }
 trap cleanup EXIT
 
