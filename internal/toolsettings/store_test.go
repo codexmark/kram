@@ -118,3 +118,24 @@ func TestSetAllDisabledLeavesOtherNamesAlone(t *testing.T) {
 		t.Error("SetAllDisabled should not touch names outside its own list")
 	}
 }
+
+func TestReplaceDisabledConvergesToExactState(t *testing.T) {
+	isolate(t)
+	s, _ := Load()
+	_ = s.SetAllDisabled([]string{"stale", "read_file"}, true)
+
+	if err := s.ReplaceDisabled([]string{"bash", "grep", "bash"}); err != nil {
+		t.Fatal(err)
+	}
+	if s.IsDisabled("stale") || s.IsDisabled("read_file") {
+		t.Error("ReplaceDisabled must remove stale entries")
+	}
+	if !s.IsDisabled("bash") || !s.IsDisabled("grep") {
+		t.Error("ReplaceDisabled must install the complete desired set")
+	}
+
+	reloaded, _ := Load()
+	if !reloaded.IsDisabled("bash") || reloaded.IsDisabled("stale") {
+		t.Errorf("exact replacement did not persist: %v", reloaded.Disabled())
+	}
+}

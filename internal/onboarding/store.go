@@ -58,17 +58,29 @@ func Load() (State, error) {
 	return s, nil
 }
 
-// Save persists state, stamping Version to currentVersion and Completed
-// to true — callers only ever save a state they intend to mark done; a
-// partially-completed wizard run (cancelled partway through) simply
-// never calls Save, so the next run sees NeedsSetup() == true again.
+// SaveProgress persists the choices needed to resume/re-run setup while
+// deliberately leaving Completed false. Stage 1 uses this before the daemon
+// starts; if the user exits during Stage 2, the next launch therefore opens
+// setup again instead of mistaking a half-finished wizard for a completed one.
+func SaveProgress(s State) error {
+	s.Completed = false
+	return save(s)
+}
+
+// Save persists a fully completed wizard state. It is only called after the
+// user confirms the final Ready step, never merely because Stage 1 produced a
+// usable gateway configuration.
 func Save(s State) error {
+	s.Completed = true
+	return save(s)
+}
+
+func save(s State) error {
 	path, err := kramhome.Path("onboarding.json")
 	if err != nil {
 		return err
 	}
 	s.Version = currentVersion
-	s.Completed = true
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}

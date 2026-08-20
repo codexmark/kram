@@ -86,7 +86,7 @@ func (p ProviderConfig) APIKey() (string, error) {
 // disabling stickiness is a real, different choice from never mentioning
 // it).
 type StrategyOptions struct {
-	// Sticky pins a run (see router.AffinityKey) to its winning provider
+	// Sticky pins a run (see router.RunKey) to its winning provider
 	// across tool round-trips, only used by the weighted (smart/quality/
 	// fast/cheap/reliable/custom) strategy family. Defaults to true for
 	// that family if unset — see DECISIONS.md, "Sticky by default".

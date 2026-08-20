@@ -2505,18 +2505,19 @@ surface, no bigger architecture changes than the fixes strictly needed):
   catalog entries share one `OPENROUTER_API_KEY`, three independent
   breaker keys) — real, confirmed, genuinely lower urgency than the P0s
   above.
-- **A `scripts/verify.sh` regression harness** enforced pre-push. Every
-  fix in the pass above was still hand-run through `gofmt`/`go
-  vet`/`go test -race`/Windows cross-compile plus a live check each
-  time; automating that sequence is process tooling, not a code fix.
+- ~~**A `scripts/verify.sh` regression harness** enforced pre-push.~~
+  Closed: the script now owns diff/format checks, vet, a fresh race suite,
+  host build, Windows and Android cross-builds, and installer tests. The
+  release script calls this same gate instead of carrying a second list.
 
-### The other nine items in the agent-architecture study, deferred
+### The remaining items in the agent-architecture study, deferred
 
-`KRAM_Estudo_Mestre_Agentes_Competitivos.md` proposes ten subsystems;
-only item 2 (Prompt Compiler, above) has been built. The other nine —
+`KRAM_Estudo_Mestre_Agentes_Competitivos.md` proposes ten subsystems.
+Prompt Compiler and Tool Semantics Registry have now been built. The
+remaining items —
 Model Profiles, Agent Profiles (build/plan/explore/review/verify),
 the Reminder Engine, `ProjectInstructionResolver` (hierarchical scoped
-`AGENTS.md`), a Tool Semantics Registry, Compaction v2 + hidden utility
+`AGENTS.md`), Compaction v2 + hidden utility
 agents, the Learning Loop (memory-curator/skill-curator), Artifacts v2,
 a Hook API, and cognitive/multi-provider routing — are explicitly not
 started. The study's own recommended ordering (§16) and its closing
@@ -2743,7 +2744,7 @@ human "yes," just enforced in a script instead of relied on by habit.
 install.sh`, published as-is — same bytes, no build step — to the
 public repo's root; `scripts/dist-repo/README.md` the same way for that
 repo's README) is deliberately small and auditable: detect OS
-(`uname -s`; only Linux/Darwin — Windows gets a `.zip` download and a
+(`uname -s`; Linux/Darwin plus conservative Termux detection — Windows gets a `.zip` download and a
 pointer to it, not an attempt to make Bash and
 PowerShell share one code path) and architecture (`uname -m`, normalized
 to `amd64`/`arm64`), build the download URL from
@@ -2817,6 +2818,53 @@ that simplicity, not to anticipate needs nobody has yet.
 
 ---
 
+## Onboarding completion and live tool settings
+
+Stage 1 only makes the gateway/daemon startable; it is not completion.
+`onboarding.SaveProgress` persists ProjectsRoot/LastWorkspace with
+`Completed=false`, and only Ready calls `onboarding.Save`. This also means
+re-running `--setup` cannot inherit a stale completed marker if the user exits
+during Tools or System Check.
+
+Tool presets are desired-state reconciliation, not incremental mutations:
+Recommended replaces the disabled set with empty; Minimal replaces it with
+exactly the currently registered non-safe tools. The CLI persists first and
+then sends the same set to `PUT /tools/settings`; the registry swaps it under a
+lock, so the first Welcome session and later settings changes do not require a
+daemon restart.
+
+Provider presence and provider health are separate gates. OK and Degraded
+(successful but slow) may continue normally. Down/unknown cannot use ordinary
+`n`; a separate, visible `c` override exists for a known temporary outage.
+
+## Context Policy v1
+
+`internal/daemon/contextpolicy` makes the model window one allocation instead
+of unrelated limits. Each iteration measures fixed prompt parts and tool
+schemas, reserves one eighth of the window for the answer (capped at 8k), and
+gives the remainder to effective history. The policy chooses Keep, structural
+Prune, or Compact using the same chars/4 estimate as the context panel. Tool
+output growth is capped by the history allocation still free after the current
+turn, never by a constant that ignores prompt/history size.
+
+The estimate remains intentionally provider-agnostic: exact tokenizers differ
+between providers in one combo. The important invariant is consistent,
+conservative accounting, not fake precision.
+
+## Native Windows installer and Termux/Android target
+
+Windows amd64 now has `install.ps1`: public assets only, SHA-256 before any
+replacement, candidate self-check, current-user install/PATH, and cleanup.
+Termux is an explicit `android/arm64` asset rather than an alias for Linux;
+`install.sh` requires both the Termux marker and canonical prefix before
+selecting it. Unix shell execution resolves `sh` from PATH/Termux prefix, and
+OAuth URL launch prefers `termux-open-url`.
+
+Android cross-compilation and installer selection are automated. Runtime
+claims that depend on the Android kernel/terminal — process groups, TUI input,
+SQLite persistence and a real provider call — still require a physical Termux
+acceptance pass and are not inferred from a successful cross-build.
+
 ## Known gaps
 
 Honest list of what Kram still doesn't have, as of this writing:
@@ -2836,10 +2884,10 @@ Honest list of what Kram still doesn't have, as of this writing:
   still deferred — it needs the same turn-pausing plumbing
   `ask_question` required, and no server in real use has forced building
   it yet.
-- ~~Test coverage.~~ Closed for now: 7 packages covered beyond the
-  agent-loop smoke tests (credentials, toolsettings, providercatalog,
-  router, memory store + tool, skills parser, mcp). Still nothing for
-  `internal/gateway`, `internal/provider`, or the CLI itself.
+- ~~Test coverage.~~ Closed for the current risk profile: gateway, provider,
+  TUI helpers/flows, daemon/CLI clients, onboarding, OAuth, routing, storage,
+  tools and the standalone entrypoint error/config paths are covered. The thin
+  `main` process loops remain primarily compile/smoke-tested by `verify.sh`.
 - ~~Evals.~~ Closed: `evals/` runs scripted scenarios against the real
   configured provider (same in-process gateway+daemon wiring as
   `cmd/kram`), each a regression test for a specific behavior — several
@@ -2853,13 +2901,13 @@ Honest list of what Kram still doesn't have, as of this writing:
   trigger phrase didn't get the model to call `skill_list`.
 - ~~Distribution.~~ Closed for prebuilt binaries: `scripts/build-release.sh`
   cross-compiles `cmd/kram` for linux/darwin × amd64/arm64 plus
-  windows/amd64, `.github/workflows/release.yml` runs it on a version tag
-  and attaches the archives (plus checksums) to a GitHub release. This
+  windows/amd64 and android/arm64; `scripts/release.sh` runs the local gate,
+  builds them and attaches the archives plus checksums to a GitHub release. This
   works with no cross-compiler toolchain and no per-platform build image
   — `CGO_ENABLED=0` — for the same reason cross-compiling has been free
   this whole project: the SQLite driver was chosen pure-Go specifically
   so the daemon's storage layer never needs cgo. Every target in the
-  matrix was hand-verified to actually build *and run* before being added
+  desktop matrix was hand-verified to actually build *and run* before being added
   (not just "cross-compiles without error" — modernc.org/sqlite is large
   enough that a target compiling cleanly isn't a given). A docs site is
   still open — narrower, and README + DECISIONS.md cover the same ground
@@ -2918,14 +2966,10 @@ safety, and reliability rather than raw feature count:
   Built out in full (five granular jobs plus classic commit-status
   publishing), then removed once diagnosis showed GitHub Actions
   couldn't execute at all on this account (billing/spending-limit, not a
-  workflow-content problem). Validation is manual (`go build`/`vet`/
-  `gofmt`/`test -race` locally before every push) until that's revisited.
+  workflow-content problem). Validation is local but reproducible through
+  `scripts/verify.sh` until hosted CI is revisited.
 
-Still open, in rough priority order: a **context policy engine** (deferred
-until artifact spill, above, had proven stable, which it now has — this
-was Wave 8 in the mission that drove the round *before* Combos v2's own
-numbering, worth being explicit about since this file now has two
-different "Wave 8"s from two different rounds), real per-attempt live
+Still open, in rough priority order: real per-attempt live
 routing progress (structurally blocked on the gateway's fallback loop
 running inside one HTTP round-trip — see "Route bar: per-model-call
 granularity" above), scheduling, async delegation with a real task-status

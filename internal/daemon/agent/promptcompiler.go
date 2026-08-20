@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"encoding/json"
 	"strings"
 
 	"github.com/codexmark/kram/internal/daemon/tools"
@@ -48,6 +49,22 @@ type PromptPart struct {
 	Refresh   RefreshPolicy
 	Source    string
 	Content   string
+}
+
+func estimatePromptPartTokens(parts []PromptPart) int {
+	chars := 0
+	for _, part := range parts {
+		chars += len(part.Content)
+	}
+	return chars / 4
+}
+
+func estimateToolDefinitionTokens(defs any) int {
+	b, err := json.Marshal(defs)
+	if err != nil {
+		return 0
+	}
+	return len(b) / 4
 }
 
 // toolsOverviewHeader/Footer bookend the generated tool list — Footer is

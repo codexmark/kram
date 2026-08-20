@@ -25,12 +25,16 @@ func main() {
 
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
 
-	cfg := daemon.Config{
-		Host: *host, Port: *port, DBPath: *dbPath, GatewayURL: *gatewayURL,
-		Model: *model, Workspace: *workspace, MaxTurns: *maxTurns,
-	}
+	cfg := daemonConfig(*host, *port, *dbPath, *gatewayURL, *model, *workspace, *maxTurns)
 	if err := daemon.Run(context.Background(), cfg, logger); err != nil {
 		logger.Error("fatal", "error", err)
 		os.Exit(1)
+	}
+}
+
+func daemonConfig(host string, port int, dbPath, gatewayURL, model, workspace string, maxTurns int) daemon.Config {
+	return daemon.Config{
+		Host: host, Port: port, DBPath: dbPath, GatewayURL: gatewayURL,
+		Model: model, Workspace: workspace, MaxTurns: maxTurns,
 	}
 }

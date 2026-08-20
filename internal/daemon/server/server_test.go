@@ -337,6 +337,55 @@ func TestHandleListToolsReturnsToolsAndSkills(t *testing.T) {
 	}
 }
 
+func TestHandleUpdateToolSettingsChangesLiveRegistry(t *testing.T) {
+	srv := newTestServer(t, nil)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	req, _ := http.NewRequest(http.MethodPut, ts.URL+"/tools/settings", strings.NewReader(`{"disabled":["bash"]}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("update status = %d, want 200", resp.StatusCode)
+	}
+
+	listResp, err := http.Get(ts.URL + "/tools")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listResp.Body.Close()
+	var body struct {
+		Tools []tools.ToolInfo `json:"tools"`
+	}
+	if err := json.NewDecoder(listResp.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range body.Tools {
+		if item.Name == "bash" && !item.Disabled {
+			t.Fatal("bash should be disabled in the already-running registry")
+		}
+	}
+}
+
+func TestHandleUpdateToolSettingsRejectsInvalidJSON(t *testing.T) {
+	srv := newTestServer(t, nil)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+	req, _ := http.NewRequest(http.MethodPut, ts.URL+"/tools/settings", strings.NewReader("{"))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", resp.StatusCode)
+	}
+}
+
 func TestHandleGetContextReturns404ForUnknownSession(t *testing.T) {
 	srv := newTestServer(t, nil)
 	ts := httptest.NewServer(srv.Handler())

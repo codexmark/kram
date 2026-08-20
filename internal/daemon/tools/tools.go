@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/codexmark/kram/internal/artifact"
 	"github.com/codexmark/kram/internal/daemon/store"
@@ -38,6 +39,7 @@ type Registry struct {
 	workspace  string
 	byName     map[string]Tool
 	delegator  Delegator
+	disabledMu sync.RWMutex
 	disabled   map[string]bool
 	processes  *processManager
 	permEval   *permission.Evaluator
@@ -196,6 +198,8 @@ func NewRegistry(workspace string, st *store.Store, disabled map[string]bool) *R
 // only for *some* patterns stays visible, since it's still sometimes
 // usable and the policy is enforced at call time either way.
 func (r *Registry) VisibleTools() []Tool {
+	r.disabledMu.RLock()
+	defer r.disabledMu.RUnlock()
 	out := make([]Tool, 0, len(r.byName))
 	for _, t := range r.byName {
 		if r.disabled[t.Name()] || r.permEval.FullyDenied(t.Name()) {
@@ -239,7 +243,10 @@ func (r *Registry) Definitions() []openai.Tool {
 // the same permission policy without each tool implementation needing to
 // know policy exists.
 func (r *Registry) Execute(ctx context.Context, name string, args json.RawMessage) (string, error) {
-	if r.disabled[name] {
+	r.disabledMu.RLock()
+	disabled := r.disabled[name]
+	r.disabledMu.RUnlock()
+	if disabled {
 		return fmt.Sprintf("error: tool %q is disabled", name), nil
 	}
 	t, ok := r.byName[name]
@@ -321,6 +328,8 @@ type ToolInfo struct {
 // order, for the settings screen — Definitions() deliberately can't be
 // reused here since it already filters disabled tools out.
 func (r *Registry) AllTools() []ToolInfo {
+	r.disabledMu.RLock()
+	defer r.disabledMu.RUnlock()
 	out := make([]ToolInfo, 0, len(r.byName))
 	for _, t := range r.byName {
 		out = append(out, ToolInfo{Name: t.Name(), Description: t.Description(), Disabled: r.disabled[t.Name()]})
@@ -334,10 +343,27 @@ func (r *Registry) AllTools() []ToolInfo {
 // registered as one fixed Tool each the way built-ins are.
 func (r *Registry) Skills() []Skill {
 	skills := discoverSkills(r.workspace)
+	r.disabledMu.RLock()
+	defer r.disabledMu.RUnlock()
 	for i := range skills {
 		skills[i].Disabled = r.disabled[skills[i].Name]
 	}
 	return skills
+}
+
+// ReplaceDisabled updates the effective tool/skill profile without restarting
+// the daemon. The CLI persists the same desired set first, then sends it here;
+// subsequent model calls and executions immediately observe the new profile.
+func (r *Registry) ReplaceDisabled(names []string) {
+	next := make(map[string]bool, len(names))
+	for _, name := range names {
+		if name != "" {
+			next[name] = true
+		}
+	}
+	r.disabledMu.Lock()
+	r.disabled = next
+	r.disabledMu.Unlock()
 }
 
 // resolvePath joins a tool-supplied relative path to the workspace root

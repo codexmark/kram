@@ -32,7 +32,9 @@ import (
 	"github.com/codexmark/kram/internal/customprovider"
 	"github.com/codexmark/kram/internal/kramhome"
 	"github.com/codexmark/kram/internal/mcp"
+	"github.com/codexmark/kram/internal/onboarding"
 	"github.com/codexmark/kram/internal/providercatalog"
+	"github.com/codexmark/kram/internal/toolsettings"
 )
 
 func renderWizardHeader(step int, title string) string {
@@ -434,6 +436,9 @@ func (m Model) renderWizardToolsPreset() string {
 			b.WriteString("  " + line + "\n")
 		}
 	}
+	if m.toolsStatus != "" {
+		b.WriteString("\n" + styleHint.Render(m.toolsStatus) + "\n")
+	}
 	b.WriteString("\n" + styleHint.Render("↑↓ escolher · enter aplica · Custom abre a tela individual"))
 	return b.String()
 }
@@ -455,25 +460,36 @@ func (m Model) handleWizardToolsPresetKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		opt := wizardToolsPresetOptions[m.wizardToolsPresetCursor]
 		m.wizardChosenToolsPreset = opt.key
 		switch opt.key {
-		case "minimal":
-			if m.toolSettings != nil {
-				var disable []string
-				for _, it := range m.toolToggleItems() {
-					if !wizardMinimalSafeTools[it.name] {
-						disable = append(disable, it.name)
-					}
-				}
-				_ = m.toolSettings.SetAllDisabled(disable, true)
+		case "recommended", "minimal":
+			if err := applyWizardToolPreset(m.toolSettings, m.toolToggleItems(), opt.key); err != nil {
+				m.toolsStatus = "erro ao salvar preset: " + err.Error()
+				return m, nil
 			}
+			m.toolsStatus = "aplicando ao daemon atual…"
+			m.wizardToolSettingsPending = true
+			return m, syncToolSettingsCmd(m.daemon, m.toolSettings)
 		case "custom":
 			m.phase = phaseTools
 			m.toolsStatus = ""
 			return m, nil
 		}
-		m.phase = phaseWizardSystemCheck
-		m.wizardStep = 7
 	}
 	return m, nil
+}
+
+func applyWizardToolPreset(settings *toolsettings.Store, items []toolToggleItem, preset string) error {
+	if settings == nil {
+		return fmt.Errorf("armazenamento de tools indisponível")
+	}
+	var disabled []string
+	if preset == "minimal" {
+		for _, item := range items {
+			if !wizardMinimalSafeTools[item.name] {
+				disabled = append(disabled, item.name)
+			}
+		}
+	}
+	return settings.ReplaceDisabled(disabled)
 }
 
 // ---- Step 7: System Check (Stage 2) ----
@@ -566,6 +582,9 @@ func (m Model) renderWizardSummary() string {
 	b.WriteString(row("Permissions", m.wizardChosenPermPreset))
 	b.WriteString(row("Tools/Skills", toolsPreset))
 	b.WriteString(row("Config", cfgPath))
+	if m.wizardCompletionErr != nil {
+		b.WriteString("\n" + styleErrBadge.Render("não foi possível concluir: "+m.wizardCompletionErr.Error()) + "\n")
+	}
 	b.WriteString("\n")
 	b.WriteString(styleHint.Render("enter abre uma sessão e começa a usar o kram · kram --setup reconfigura a qualquer momento"))
 	return b.String()
@@ -573,6 +592,11 @@ func (m Model) renderWizardSummary() string {
 
 func (m Model) handleWizardSummaryKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if msg.String() == "enter" {
+		if err := onboarding.Save(onboarding.State{ProjectsRoot: m.wizardProjectsRoot, LastWorkspace: m.workspace}); err != nil {
+			m.wizardCompletionErr = err
+			return m, nil
+		}
+		m.wizardCompletionErr = nil
 		title := filepath.Base(m.workspace)
 		if title == "" || title == "." || title == string(filepath.Separator) {
 			title = "kram"

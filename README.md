@@ -230,7 +230,7 @@ Kram ended up using several layers because no single technique solves the whole 
 
 - deterministic command-output filtering removes known noise;
 - large individual outputs spill to artifacts;
-- one model turn has an aggregate tool-output budget;
+- one context-policy plan allocates prompt, history, response reserve, and aggregate tool output from the same window;
 - old tool material is structurally pruned before expensive compaction;
 - compaction is capped instead of allowed to recurse forever;
 - the final model-call budget has a soft landing rather than an abrupt cutoff;
@@ -1166,7 +1166,7 @@ All process-backed capabilities share `internal/shell`.
 
 ### Unix
 
-Commands use `/bin/sh -c` and their own process group so cancellation can target the process tree.
+Commands resolve `sh` from `PATH` (with a Termux-prefix fallback and `/bin/sh` only as a last resort) and use their own process group so cancellation can target the process tree.
 
 ### Windows
 
@@ -1542,12 +1542,15 @@ Snapshots use isolated Git metadata, but they are not a complete host filesystem
 ## Go suite
 
 ```bash
+./scripts/verify.sh
+
+# individual commands used by the gate
 go test ./... -race
 go vet ./...
 go build ./...
 ```
 
-No automated CI runs these yet — GitHub Actions on this account currently requires a paid spending limit, so `go build ./...`, `go vet ./...`, `gofmt -l .`, and `go test ./... -race` are run locally before every push instead. See "Continuous integration" in [`DECISIONS.md`](DECISIONS.md).
+No automated CI runs these yet — GitHub Actions on this account currently requires a paid spending limit. `scripts/verify.sh` is therefore the reproducible local gate: diff/format checks, vet, a fresh race-enabled suite, host build, Windows and Android cross-builds, and installer tests. See "Continuous integration" in [`DECISIONS.md`](DECISIONS.md).
 
 Coverage includes areas such as:
 
@@ -1589,7 +1592,15 @@ Hard scenarios represent runtime invariants. Model-dependent soft scenarios rema
 curl -fsSL https://raw.githubusercontent.com/codexmark/kram-releases/master/install.sh | sh
 ```
 
-Downloads the right binary for your OS/architecture from GitHub Releases, verifies its SHA-256 checksum, and installs it to `$HOME/.local/bin` — no Go toolchain, no `sudo`, no shell config edited automatically. See [codexmark/kram-releases](https://github.com/codexmark/kram-releases) for version pinning (`KRAM_VERSION`) and a custom install directory (`KRAM_INSTALL_DIR`). Windows: download `kram-windows-amd64.zip` from the [latest release](https://github.com/codexmark/kram-releases/releases/latest).
+Downloads the right binary for your OS/architecture from GitHub Releases, verifies its SHA-256 checksum, and installs it to `$HOME/.local/bin` — or `$PREFIX/bin` in Termux. No Go toolchain or `sudo` is needed.
+
+Windows amd64 (PowerShell, no Administrator shell required):
+
+```powershell
+irm https://raw.githubusercontent.com/codexmark/kram-releases/master/install.ps1 | iex
+```
+
+Termux/Android arm64 uses the same shell command and automatically selects `kram-android-arm64.tar.gz`. Install its lightweight prerequisites first with `pkg install curl tar coreutils`; Git is recommended for snapshot features.
 
 # Building releases
 
@@ -1605,6 +1616,7 @@ linux/arm64
 darwin/amd64
 darwin/arm64
 windows/amd64
+android/arm64
 ```
 
 Release builds use:
@@ -1621,7 +1633,7 @@ Releases are built and published entirely from the maintainer's own machine rath
 ./scripts/release.sh v1.2.3
 ```
 
-This runs the full local gate (`gofmt`, `go vet`, `go test -race`), cross-compiles every target, generates `SHA256SUMS`, shows a summary, asks for confirmation, and publishes the GitHub Release to the public [codexmark/kram-releases](https://github.com/codexmark/kram-releases) repo — the source here (`codexmark/kram`) stays private; only binaries and the installer are public. See `scripts/release.sh --help` for flags (`--notes FILE`, `--yes`).
+This runs `scripts/verify.sh`, cross-compiles every target, generates `SHA256SUMS`, shows a summary, asks for confirmation, and publishes the GitHub Release to the separate [codexmark/kram-releases](https://github.com/codexmark/kram-releases) distribution repository. See `scripts/release.sh --help` for flags (`--notes FILE`, `--yes`).
 
 ---
 
@@ -1637,6 +1649,7 @@ This runs the full local gate (`gofmt`, `go vet`, `go test -race`), cross-compil
 | `internal/daemon/store` | SQLite sessions/messages/memory/FTS5 search. |
 | `internal/daemon/tools` | Tool registry and concrete capabilities. |
 | `internal/daemon/compaction` | Context pruning/summarization. |
+| `internal/daemon/contextpolicy` | Shared prompt/history/response/tool-output budget planning. |
 | `internal/router` | Combos v2 strategies, factors, affinity, gates, trace data. |
 | `internal/server` | Gateway HTTP surface. |
 | `internal/provider` | Provider adapters. |
@@ -1673,7 +1686,7 @@ Important current boundaries include:
 - streaming fallback is only possible before downstream commitment;
 - live route progress is currently per model call rather than true per-provider-attempt streaming;
 - scheduling/cron-style autonomous runs are not part of the current core;
-- the context policy layer continues to evolve;
+- context accounting is provider-agnostic and uses a documented chars/4 estimate rather than each provider's tokenizer;
 - aggregate per-turn output budgeting can still truncate with an explicit notice even though individual oversized producers are artifact-backed.
 
 These are documented engineering boundaries, not hidden limitations behind optimistic UI.

@@ -7,12 +7,11 @@
 # Releases, verifies its SHA-256 checksum against the release's own
 # SHA256SUMS file, and installs it to $HOME/.local/bin (override with
 # KRAM_INSTALL_DIR). No sudo, no shell-rc edits, no dependency beyond
-# curl/tar and a sha256 tool most systems already have. Windows isn't
-# handled here — see the repo README for the manual .zip download.
+# curl/tar and a sha256 tool most systems already have. Windows uses the
+# companion install.ps1 script.
 set -euo pipefail
 
 REPO="${KRAM_RELEASES_REPO:-codexmark/kram-releases}"
-INSTALL_DIR="${KRAM_INSTALL_DIR:-$HOME/.local/bin}"
 REQUESTED_VERSION="${KRAM_VERSION:-}"
 
 echo "Kram installer"
@@ -22,7 +21,15 @@ echo
 
 os_raw="$(uname -s)"
 case "$os_raw" in
-  Linux) os="linux" ;;
+  Linux)
+    os="linux"
+    # Require both Termux's marker and canonical prefix. This avoids
+    # misclassifying an ordinary Linux environment with a coincidental
+    # PREFIX variable and giving it an Android/Bionic binary.
+    if [ -n "${TERMUX_VERSION:-}" ] && [ "${PREFIX:-}" = "/data/data/com.termux/files/usr" ]; then
+      os="android"
+    fi
+    ;;
   Darwin) os="darwin" ;;
   *)
     echo "Kram: unsupported OS: $os_raw" >&2
@@ -31,6 +38,14 @@ case "$os_raw" in
     exit 1
     ;;
 esac
+
+if [ -n "${KRAM_INSTALL_DIR:-}" ]; then
+  INSTALL_DIR="$KRAM_INSTALL_DIR"
+elif [ "$os" = "android" ]; then
+  INSTALL_DIR="$PREFIX/bin"
+else
+  INSTALL_DIR="$HOME/.local/bin"
+fi
 
 arch_raw="$(uname -m)"
 case "$arch_raw" in

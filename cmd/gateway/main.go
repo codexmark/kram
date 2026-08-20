@@ -21,15 +21,16 @@ func main() {
 	flag.Parse()
 
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
-
-	cfg, err := config.Load(*configPath)
-	if err != nil {
-		logger.Error("fatal", "error", fmt.Errorf("loading config: %w", err))
-		os.Exit(1)
-	}
-
-	if err := gateway.Run(context.Background(), cfg, logger, nil); err != nil {
+	if err := run(context.Background(), *configPath, logger); err != nil {
 		logger.Error("fatal", "error", err)
 		os.Exit(1)
 	}
+}
+
+func run(ctx context.Context, configPath string, logger *slog.Logger) error {
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		return fmt.Errorf("loading config: %w", err)
+	}
+	return gateway.Run(ctx, cfg, logger, nil)
 }

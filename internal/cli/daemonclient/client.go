@@ -267,6 +267,13 @@ func (c *Client) ListTools(ctx context.Context) ([]ToolInfo, []Skill, error) {
 	return out.Tools, out.Skills, err
 }
 
+// UpdateToolSettings applies the already-persisted disabled set to the live
+// daemon. This keeps the settings UI and the registry used by the next model
+// call coherent without requiring a process restart.
+func (c *Client) UpdateToolSettings(ctx context.Context, disabled []string) error {
+	return c.doJSON(ctx, http.MethodPut, "/tools/settings", map[string]any{"disabled": disabled}, nil)
+}
+
 // ContextCategory is one real contributor to a session's context-window usage.
 type ContextCategory struct {
 	Name   string `json:"name"`

@@ -90,6 +90,11 @@ if ! gh auth status >/dev/null 2>&1; then
   echo "error: gh is not authenticated — run 'gh auth login' first" >&2
   exit 1
 fi
+GH_LOGIN="$(gh api user --jq .login)"
+if [ "$GH_LOGIN" != "codexmark" ]; then
+  echo "error: releases must be published as codexmark (gh is authenticated as '$GH_LOGIN')" >&2
+  exit 1
+fi
 echo "  ok"
 
 echo "==> checking git working tree"
@@ -101,22 +106,8 @@ fi
 COMMIT="$(git rev-parse HEAD)"
 echo "  publishing commit: $COMMIT"
 
-echo "==> gofmt"
-UNFORMATTED="$(gofmt -l .)"
-if [ -n "$UNFORMATTED" ]; then
-  echo "error: the following files are not gofmt-clean:" >&2
-  echo "$UNFORMATTED" >&2
-  exit 1
-fi
-echo "  ok"
-
-echo "==> go vet"
-go vet ./...
-echo "  ok"
-
-echo "==> go test -race"
-go test ./... -race
-echo "  ok"
+echo "==> full local verification"
+scripts/verify.sh
 
 echo "==> building release artifacts"
 scripts/build-release.sh "$VERSION"
@@ -159,13 +150,43 @@ gh release create "$VERSION" \
   dist/kram-darwin-amd64.tar.gz \
   dist/kram-darwin-arm64.tar.gz \
   dist/kram-windows-amd64.zip \
+  dist/kram-android-arm64.tar.gz \
   dist/SHA256SUMS \
   --repo "$RELEASES_REPO" \
   --title "Kram $VERSION" \
   --notes-file "$NOTES_FILE"
+
+echo "==> synchronizing public installer files"
+RELEASES_BRANCH="$(gh api "repos/${RELEASES_REPO}" --jq .default_branch)"
+publish_dist_file() {
+  local source_path="$1"
+  local destination_path="$2"
+  local encoded current_sha
+  local -a args
+  encoded="$(base64 < "$source_path")"
+  current_sha="$(gh api "repos/${RELEASES_REPO}/contents/${destination_path}?ref=${RELEASES_BRANCH}" --jq .sha 2>/dev/null || true)"
+
+  args=(
+    --method PUT
+    "repos/${RELEASES_REPO}/contents/${destination_path}"
+    -f "message=Update ${destination_path} for ${VERSION}"
+    -f "content=${encoded}"
+    -f "branch=${RELEASES_BRANCH}"
+  )
+  if [ -n "$current_sha" ]; then
+    args+=(-f "sha=${current_sha}")
+  fi
+  gh api "${args[@]}" --silent
+  echo "  -> ${destination_path}"
+}
+
+publish_dist_file scripts/dist-repo/install.sh install.sh
+publish_dist_file scripts/dist-repo/install.ps1 install.ps1
+publish_dist_file scripts/dist-repo/README.md README.md
 
 echo
 echo "✓ Release published: $VERSION"
 echo
 echo "Install with:"
 echo "  curl -fsSL https://raw.githubusercontent.com/${RELEASES_REPO}/master/install.sh | sh"
+echo "  irm https://raw.githubusercontent.com/${RELEASES_REPO}/master/install.ps1 | iex"

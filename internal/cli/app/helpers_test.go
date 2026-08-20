@@ -291,6 +291,52 @@ func TestWizardHasProviderTrueWithOneEnvVarSet(t *testing.T) {
 	}
 }
 
+func TestWizardOperationalProviderAcceptsOKAndDegradedOnly(t *testing.T) {
+	for _, status := range []providerping.Status{providerping.StatusOK, providerping.StatusDegraded} {
+		m := &Model{accountsPings: map[string]providerping.Result{"K": {Status: status}}}
+		if !m.wizardHasOperationalProvider() {
+			t.Errorf("status %v should be operational", status)
+		}
+	}
+	for _, status := range []providerping.Status{providerping.StatusUnknown, providerping.StatusDown} {
+		m := &Model{accountsPings: map[string]providerping.Result{"K": {Status: status}}}
+		if m.wizardHasOperationalProvider() {
+			t.Errorf("status %v must not be operational", status)
+		}
+	}
+}
+
+func TestWizardProviderNormalContinueRequiresOperationalPing(t *testing.T) {
+	clearAllCatalogProviderEnvVars(t)
+	t.Setenv("ANTHROPIC_API_KEY", "configured")
+	m := Model{wizardMode: true, phase: phaseAccounts, accountsPings: map[string]providerping.Result{
+		"ANTHROPIC_API_KEY": {Status: providerping.StatusDown},
+	}}
+	next, _ := m.handleAccountsKey(keyMsg("n"))
+	got := next.(Model)
+	if got.phase != phaseAccounts || !got.wizardProviderOverrideVisible {
+		t.Fatalf("ordinary n must stay on providers and expose a separate override: phase=%v override=%v", got.phase, got.wizardProviderOverrideVisible)
+	}
+
+	next, _ = got.handleAccountsKey(keyMsg("c"))
+	got = next.(Model)
+	if got.phase != phaseWizardRouting {
+		t.Fatalf("explicit c override should advance, got phase %v", got.phase)
+	}
+}
+
+func TestWizardProviderNormalContinueAcceptsDegraded(t *testing.T) {
+	clearAllCatalogProviderEnvVars(t)
+	t.Setenv("ANTHROPIC_API_KEY", "configured")
+	m := Model{wizardMode: true, phase: phaseAccounts, accountsPings: map[string]providerping.Result{
+		"ANTHROPIC_API_KEY": {Status: providerping.StatusDegraded},
+	}}
+	next, _ := m.handleAccountsKey(keyMsg("n"))
+	if got := next.(Model); got.phase != phaseWizardRouting {
+		t.Fatalf("a provider that responded successfully but slowly should advance, got phase %v", got.phase)
+	}
+}
+
 func TestWizardHavePaidProviderFalseForFreeTierOnly(t *testing.T) {
 	clearAllCatalogProviderEnvVars(t)
 	t.Setenv("OPENROUTER_API_KEY", "sk-or-test") // every openrouter-* entry is FreeTier

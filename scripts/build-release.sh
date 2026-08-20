@@ -6,8 +6,9 @@
 # project: the SQLite driver is modernc.org/sqlite, a pure-Go transpile
 # of SQLite's C source, specifically so the daemon's storage layer never
 # needs cgo. CGO_ENABLED=0 below is that choice paying off: every target
-# in this matrix was verified to actually build and run, not just
-# theoretically cross-compile (see DECISIONS.md).
+# desktop target in this matrix was verified to build and run. Android is
+# cross-build verified here and requires a separate real-Termux acceptance
+# pass for terminal/process/provider behavior (see DECISIONS.md).
 #
 # Asset names are stable — kram-linux-amd64.tar.gz, never
 # kram-v0.2.3-linux-amd64.tar.gz — and the binary inside every archive is
@@ -53,6 +54,7 @@ TARGETS=(
   "darwin amd64"
   "darwin arm64"
   "windows amd64"
+  "android arm64"
 )
 
 for target in "${TARGETS[@]}"; do

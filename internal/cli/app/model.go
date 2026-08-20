@@ -206,29 +206,32 @@ type Model struct {
 	// daemon/gateway exist; the Stage-2 continuation (tools preset/system
 	// check/summary) runs in the normal post-daemon program instead, with
 	// wizardMode left false, since it needs a live daemon connection.
-	wizardMode              bool
-	wizardWorkspaceLocked   bool // true when -workspace was passed explicitly; skips the workspace question
-	wizardStep              int  // 1..8, drives the shared "N/8 Title" header
-	wizardCWD               string
-	wizardHasGit            bool
-	wizardHomeDir           string
-	wizardProjectsRootInput textinput.Model
-	wizardWorkspaceInput    textinput.Model
-	wizardProjectsField     int // 0 = editing projects root, 1 = editing workspace
-	wizardWorkspaceErr      error
-	wizardChosenWorkspace   string
-	wizardProjectsRoot      string
-	wizardRoutingCursor     int
-	wizardChosenStrategy    string // "" (Auto), "smart", "round-robin"
-	wizardPermCursor        int
-	wizardChosenPermPreset  string // "recommended", "strict", "autonomous"
-	wizardDone              bool
-	wizardCancelled         bool
+	wizardMode                    bool
+	wizardWorkspaceLocked         bool // true when -workspace was passed explicitly; skips the workspace question
+	wizardStep                    int  // 1..8, drives the shared "N/8 Title" header
+	wizardCWD                     string
+	wizardHasGit                  bool
+	wizardHomeDir                 string
+	wizardProjectsRootInput       textinput.Model
+	wizardWorkspaceInput          textinput.Model
+	wizardProjectsField           int // 0 = editing projects root, 1 = editing workspace
+	wizardWorkspaceErr            error
+	wizardChosenWorkspace         string
+	wizardProjectsRoot            string
+	wizardRoutingCursor           int
+	wizardChosenStrategy          string // "" (Auto), "smart", "round-robin"
+	wizardPermCursor              int
+	wizardChosenPermPreset        string // "recommended", "strict", "autonomous"
+	wizardDone                    bool
+	wizardCancelled               bool
+	wizardProviderOverrideVisible bool
 
 	// Stage-2 continuation (post-daemon) — reached only right after a
 	// successful Stage-1 wizard run.
-	wizardToolsPresetCursor int
-	wizardChosenToolsPreset string // "recommended", "minimal", "custom"
+	wizardToolsPresetCursor   int
+	wizardToolSettingsPending bool
+	wizardCompletionErr       error
+	wizardChosenToolsPreset   string // "recommended", "minimal", "custom"
 	// wizardWelcomeSession is set right before creating the wizard's
 	// final session, so the very first (empty) transcript render can show
 	// a one-time, client-side-only welcome banner — never persisted as a
@@ -317,6 +320,7 @@ func New(daemon *daemonclient.Client, gateway *statusclient.Client, sessionID, c
 		m.toolsLoading = true
 		m.wizardChosenStrategy = wizard.Strategy
 		m.wizardChosenPermPreset = wizard.PermPreset
+		m.wizardProjectsRoot = wizard.ProjectsRoot
 	default:
 		m.phase = phasePicker
 		m.pickerBusy = true
@@ -444,6 +448,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case pingResultsMsg:
 		m.accountsPinging = false
 		m.accountsPings = msg.results
+		m.wizardProviderOverrideVisible = m.wizardMode && m.wizardHasProvider() && !m.wizardHasOperationalProvider()
 		return m, nil
 
 	case oauthURLMsg:
@@ -491,6 +496,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err == nil {
 			m.toolsList = msg.tools
 			m.skillsList = msg.skills
+		}
+		return m, nil
+
+	case toolSettingsUpdatedMsg:
+		if msg.err != nil {
+			m.toolsStatus = "erro ao aplicar no daemon: " + msg.err.Error()
+			m.wizardToolSettingsPending = false
+			return m, nil
+		}
+		m.toolsStatus = "configuração aplicada ao daemon atual."
+		if m.wizardToolSettingsPending {
+			m.wizardToolSettingsPending = false
+			m.phase = phaseWizardSystemCheck
+			m.wizardStep = 7
 		}
 		return m, nil
 
