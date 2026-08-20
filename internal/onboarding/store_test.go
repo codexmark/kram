@@ -40,6 +40,38 @@ func TestSaveRoundTrip(t *testing.T) {
 	}
 }
 
+func TestSaveProgressRetainsFieldsButStillNeedsSetup(t *testing.T) {
+	isolate(t)
+
+	if err := SaveProgress(State{ProjectsRoot: "/projects", LastWorkspace: "/projects/kram"}); err != nil {
+		t.Fatal(err)
+	}
+	reloaded, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reloaded.NeedsSetup() || reloaded.Completed {
+		t.Fatalf("progress state must remain incomplete: %+v", reloaded)
+	}
+	if reloaded.Version != currentVersion || reloaded.ProjectsRoot != "/projects" || reloaded.LastWorkspace != "/projects/kram" {
+		t.Errorf("progress metadata did not round-trip: %+v", reloaded)
+	}
+}
+
+func TestSaveProgressReopensPreviouslyCompletedSetup(t *testing.T) {
+	isolate(t)
+	if err := Save(State{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveProgress(State{LastWorkspace: "/new"}); err != nil {
+		t.Fatal(err)
+	}
+	reloaded, _ := Load()
+	if !reloaded.NeedsSetup() {
+		t.Fatal("starting a new setup run must leave onboarding incomplete until Ready")
+	}
+}
+
 func TestOlderVersionNeedsSetupAgain(t *testing.T) {
 	isolate(t)
 	if err := Save(State{}); err != nil {

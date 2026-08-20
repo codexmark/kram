@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/codexmark/kram/internal/daemon/compaction"
+	"github.com/codexmark/kram/internal/daemon/contextpolicy"
 	"github.com/codexmark/kram/internal/daemon/gatewayclient"
 	"github.com/codexmark/kram/internal/daemon/session"
 	"github.com/codexmark/kram/internal/daemon/store"
@@ -202,6 +203,10 @@ func (s *Service) Tools() []tools.ToolInfo { return s.tools.AllTools() }
 // Skills passes through the registry's discovered-skills listing for the
 // same endpoint.
 func (s *Service) Skills() []tools.Skill { return s.tools.Skills() }
+
+// ReplaceDisabledTools applies a persisted tools/skills profile to this live
+// daemon so the first post-setup session cannot observe startup-time settings.
+func (s *Service) ReplaceDisabledTools(names []string) { s.tools.ReplaceDisabled(names) }
 
 // AnswerQuestion delivers ans to the ask_question call waiting on id, if
 // any is still pending. Returns false if id is unknown — already
@@ -440,24 +445,34 @@ func (s *Service) runLoop(ctx context.Context, sessionID, model string, depth in
 		}
 		effective := compaction.EffectiveHistory(all)
 
-		if compaction.NeedsCompaction(effective, s.cfg.MaxContextTokens) {
+		nearBudget := turn == s.cfg.MaxTurns-1
+		projectContext, haveProjectContext := loadProjectContext(s.cfg.Workspace)
+		preambleParts := compilePreamble(s.cfg.Workspace, projectContext, haveProjectContext, memoryMsg, haveMemory, s.tools)
+		postscriptParts := compileTurnPostscript(emptyRetryUsed, nearBudget)
+		toolDefs := s.tools.Definitions()
+		if nearBudget {
+			toolDefs = nil
+		}
+		fixedTokens := estimatePromptPartTokens(append(append([]PromptPart{}, preambleParts...), postscriptParts...)) + estimateToolDefinitionTokens(toolDefs)
+		policy := contextpolicy.New(s.cfg.MaxContextTokens, fixedTokens)
+		pruned := compaction.PruneForModel(effective)
+		switch policy.Action(compaction.EstimateTokens(effective), compaction.EstimateTokens(pruned)) {
+		case contextpolicy.Compact:
 			if compactions >= s.cfg.MaxCompactionsPerRun {
 				return RunResult{}, ErrContextOverflow
 			}
-			pruned := compaction.PruneForModel(effective)
-			if compaction.NeedsCompaction(pruned, s.cfg.MaxContextTokens) {
-				marker, err := compaction.Compact(ctx, s.gateway, model, pruned)
-				if err != nil {
-					return RunResult{}, fmt.Errorf("compacting session: %w", err)
-				}
-				if _, err := s.store.AppendMessage(sessionID, marker); err != nil {
-					return RunResult{}, fmt.Errorf("persisting compaction summary: %w", err)
-				}
-				compactions++
-				result.Compactions = compactions
-				emit(onEvent, Event{Kind: EventNotice, Notice: "session history was compacted to stay in budget"})
-				continue // reload the now-much-shorter effective history before calling the model
+			marker, err := compaction.Compact(ctx, s.gateway, model, pruned)
+			if err != nil {
+				return RunResult{}, fmt.Errorf("compacting session: %w", err)
 			}
+			if _, err := s.store.AppendMessage(sessionID, marker); err != nil {
+				return RunResult{}, fmt.Errorf("persisting compaction summary: %w", err)
+			}
+			compactions++
+			result.Compactions = compactions
+			emit(onEvent, Event{Kind: EventNotice, Notice: "session history was compacted to stay in budget"})
+			continue // reload the now-much-shorter effective history before calling the model
+		case contextpolicy.Prune:
 			effective = pruned
 		}
 
@@ -473,23 +488,15 @@ func (s *Service) runLoop(ctx context.Context, sessionID, model string, depth in
 		// PromptPart values instead of inline literals, so the ordering and
 		// per-part refresh cadence are real, inspectable data instead of
 		// implicit in append-call order.
-		nearBudget := turn == s.cfg.MaxTurns-1
-
-		projectContext, haveProjectContext := loadProjectContext(s.cfg.Workspace)
-		preamble := partsToMessages(compilePreamble(s.cfg.Workspace, projectContext, haveProjectContext, memoryMsg, haveMemory, s.tools))
+		preamble := partsToMessages(preambleParts)
 		modelMessages := append(preamble, toModelMessages(effective)...)
-		modelMessages = append(modelMessages, partsToMessages(compileTurnPostscript(emptyRetryUsed, nearBudget))...)
+		modelMessages = append(modelMessages, partsToMessages(postscriptParts)...)
 
 		// Soft landing (Hermes's pattern) on the final allowed turn: stop
 		// offering tools and ask directly for a wrap-up, rather than
 		// hard-cutting mid-tool-loop. Tool *visibility* is a runtime/policy
 		// concern, not prompt content — deliberately kept out of the
 		// compiler above.
-		toolDefs := s.tools.Definitions()
-		if nearBudget {
-			toolDefs = nil
-		}
-
 		emit(onEvent, Event{Kind: EventRouteStart})
 		callResult, err := s.callModelWithRetry(ctx, model, modelMessages, toolDefs, onEvent)
 		if err != nil {
@@ -545,12 +552,13 @@ func (s *Service) runLoop(ctx context.Context, sessionID, model string, depth in
 		// result, but several individually-fine results still add up —
 		// see enforceTurnOutputBudget's doc comment.
 		turnOutputChars := 0
+		turnOutputBudget := policy.ToolOutputBudgetChars(compaction.EstimateTokens(effective), maxTurnToolOutputChars)
 		for _, tc := range callResult.ToolCalls {
 			emit(onEvent, Event{Kind: EventToolStart, ToolName: tc.Function.Name, ToolArgs: tc.Function.Arguments})
 			activity, toolMsg := s.runTool(ctx, tc)
 
 			original := len(toolMsg.Content)
-			if truncated, hit := enforceTurnOutputBudget(toolMsg.Content, turnOutputChars, maxTurnToolOutputChars); hit {
+			if truncated, hit := enforceTurnOutputBudget(toolMsg.Content, turnOutputChars, turnOutputBudget); hit {
 				toolMsg.Content = truncated
 				activity.Result = truncated
 			}

@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"sort"
 
 	"github.com/codexmark/kram/internal/kramhome"
 )
@@ -85,6 +86,20 @@ func (s *Store) SetAllDisabled(names []string, disabled bool) error {
 	return s.save()
 }
 
+// ReplaceDisabled atomically reconciles the store to exactly names. Presets
+// use this instead of incremental toggles so applying Recommended or Minimal
+// has the same result regardless of whatever a previous setup run disabled.
+func (s *Store) ReplaceDisabled(names []string) error {
+	next := make(map[string]bool, len(names))
+	for _, n := range names {
+		if n != "" {
+			next[n] = true
+		}
+	}
+	s.disabled = next
+	return s.save()
+}
+
 func (s *Store) save() error {
 	if err := os.MkdirAll(filepath.Dir(s.path), 0o700); err != nil {
 		return err
@@ -93,6 +108,7 @@ func (s *Store) save() error {
 	for n := range s.disabled {
 		names = append(names, n)
 	}
+	sort.Strings(names)
 	data, err := json.MarshalIndent(names, "", "  ")
 	if err != nil {
 		return err

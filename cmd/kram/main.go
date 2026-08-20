@@ -106,7 +106,7 @@ func run(opts runOptions) error {
 	// produce.
 	onboardState, _ := onboarding.Load() // zero value (NeedsSetup() == true) on any load error — same "missing file is normal" convention every local store here uses
 	workspace := opts.workspace
-	wizardCompleted := false
+	wizardStage1Completed := false
 	var wizardResult app.WizardResult
 
 	// Loaded once and threaded through everywhere a credential might be
@@ -160,11 +160,14 @@ func run(opts runOptions) error {
 				return fmt.Errorf("saving generated permissions: %w", err)
 			}
 
-			// Best-effort: a failure here means the wizard may simply run
-			// again next time, which is annoying but never destructive —
-			// not worth failing the whole run over.
-			_ = onboarding.Save(onboarding.State{ProjectsRoot: result.ProjectsRoot, LastWorkspace: workspace})
-			wizardCompleted = true
+			// Stage 1 made the runtime startable, but setup is not complete
+			// until the post-daemon Tools/System Check/Ready stages finish.
+			// Persist the seed data with Completed=false so exiting anywhere
+			// in Stage 2 reliably reopens setup on the next launch.
+			if err := onboarding.SaveProgress(onboarding.State{ProjectsRoot: result.ProjectsRoot, LastWorkspace: workspace}); err != nil {
+				return fmt.Errorf("saving setup progress: %w", err)
+			}
+			wizardStage1Completed = true
 		}
 		// Cancelled: fall through with the original workspace/opts
 		// untouched — loadOrDetectGatewayConfig below reproduces exactly
@@ -287,9 +290,9 @@ func run(opts runOptions) error {
 	}
 
 	// app.New itself prioritizes an explicit sid over openOnToolsPreset, so
-	// passing wizardCompleted here is safe even if -title also created a
+	// passing wizardStage1Completed here is safe even if -title also created a
 	// session in the same run.
-	m := app.New(daemonC, gatewayC, sid, opts.combo, absWorkspace, wizardCompleted, wizardResult)
+	m := app.New(daemonC, gatewayC, sid, opts.combo, absWorkspace, wizardStage1Completed, wizardResult)
 	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
 	_, cliErr := p.Run()
 

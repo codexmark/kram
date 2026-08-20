@@ -1,6 +1,8 @@
 package app
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -8,7 +10,58 @@ import (
 	"github.com/codexmark/kram/internal/credentials"
 	"github.com/codexmark/kram/internal/customprovider"
 	"github.com/codexmark/kram/internal/providercatalog"
+	"github.com/codexmark/kram/internal/toolsettings"
 )
+
+func TestBrowserCommandPrefersTermuxOpenURL(t *testing.T) {
+	dir := t.TempDir()
+	opener := filepath.Join(dir, "termux-open-url")
+	if err := os.WriteFile(opener, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir)
+	t.Setenv("TERMUX_VERSION", "test")
+	cmd := browserCommand("https://example.com")
+	if cmd.Path != opener {
+		t.Errorf("browserCommand path = %q, want Termux opener %q", cmd.Path, opener)
+	}
+	if len(cmd.Args) != 2 || cmd.Args[1] != "https://example.com" {
+		t.Errorf("browserCommand args = %v", cmd.Args)
+	}
+}
+
+func TestWizardRecommendedPresetClearsDirtyDisabledState(t *testing.T) {
+	isolateAccountsTest(t)
+	s, _ := toolsettings.Load()
+	_ = s.SetAllDisabled([]string{"bash", "read_file", "old-skill"}, true)
+	items := []toolToggleItem{{name: "bash"}, {name: "read_file"}}
+	if err := applyWizardToolPreset(s, items, "recommended"); err != nil {
+		t.Fatal(err)
+	}
+	if len(s.Disabled()) != 0 {
+		t.Errorf("Recommended must converge to everything enabled, got %v", s.Disabled())
+	}
+}
+
+func TestWizardMinimalPresetIsIdempotentAndReenablesSafeTools(t *testing.T) {
+	isolateAccountsTest(t)
+	s, _ := toolsettings.Load()
+	_ = s.SetAllDisabled([]string{"read_file", "bash", "stale"}, true)
+	items := []toolToggleItem{{name: "read_file"}, {name: "bash"}, {name: "mcp__remote__write"}}
+	if err := applyWizardToolPreset(s, items, "minimal"); err != nil {
+		t.Fatal(err)
+	}
+	first := s.Disabled()
+	if s.IsDisabled("read_file") || !s.IsDisabled("bash") || !s.IsDisabled("mcp__remote__write") || s.IsDisabled("stale") {
+		t.Errorf("Minimal did not converge to its desired state: %v", first)
+	}
+	if err := applyWizardToolPreset(s, items, "minimal"); err != nil {
+		t.Fatal(err)
+	}
+	if len(first) != len(s.Disabled()) {
+		t.Errorf("reapplying Minimal changed the result: before=%v after=%v", first, s.Disabled())
+	}
+}
 
 // isolateAccountsTest points every local store this package touches at a
 // fresh temp dir, same isolation pattern internal/credentials'/

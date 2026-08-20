@@ -14,10 +14,13 @@ import (
 // invented categories like "skills" or "MCP tools" that Kram doesn't have.
 var categoryLabels = map[string]string{
 	"messages":           "mensagens",
+	"system_prompt":      "prompt do sistema",
+	"tool_overview":      "visão geral de tools",
 	"tool_definitions":   "definições de tools",
 	"project_context":    "contexto do projeto (AGENTS.md)",
 	"memory":             "memória entre sessões",
 	"compaction_summary": "resumo de compactação",
+	"response_reserve":   "reserva para resposta",
 	"free":               "espaço livre",
 }
 
@@ -25,7 +28,7 @@ func categoryStyle(name string) lipgloss.Style {
 	switch name {
 	case "messages":
 		return styleBadgeAccent
-	case "tool_definitions":
+	case "tool_definitions", "tool_overview", "response_reserve":
 		return styleBadgeWarn
 	case "project_context":
 		return styleBadgeOK

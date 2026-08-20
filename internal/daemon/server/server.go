@@ -43,6 +43,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /sessions/{id}/answer", s.handleAnswerQuestion)
 	mux.HandleFunc("POST /sessions/{id}/approve", s.handleAnswerApproval)
 	mux.HandleFunc("GET /tools", s.handleListTools)
+	mux.HandleFunc("PUT /tools/settings", s.handleUpdateToolSettings)
 	return s.recoverMiddleware(s.logMiddleware(mux))
 }
 
@@ -296,6 +297,20 @@ func (s *Server) handleListTools(w http.ResponseWriter, r *http.Request) {
 		"tools":  s.agent.Tools(),
 		"skills": s.agent.Skills(),
 	})
+}
+
+type updateToolSettingsRequest struct {
+	Disabled []string `json:"disabled"`
+}
+
+func (s *Server) handleUpdateToolSettings(w http.ResponseWriter, r *http.Request) {
+	var req updateToolSettingsRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
+		return
+	}
+	s.agent.ReplaceDisabledTools(req.Disabled)
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

@@ -10,14 +10,15 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/codexmark/kram/internal/cli/daemonclient"
+	"github.com/codexmark/kram/internal/toolsettings"
 )
 
 // toolToggleItem is one row on the tools/skills screen — a built-in tool
 // or a discovered skill, whichever the daemon reported. Name/description
 // come from the daemon (it's the only thing that actually knows what's
 // registered); on/off state comes from the CLI's own local
-// toolsettings.Store, same split as the accounts screen: mutate here,
-// takes effect on the daemon's next restart.
+// toolsettings.Store. Every mutation is also reconciled into the live daemon
+// so the current and subsequent sessions observe the same effective state.
 type toolToggleItem struct {
 	name        string
 	description string
@@ -89,7 +90,7 @@ func (m Model) renderToolsToggle() string {
 	if m.toolsStatus != "" {
 		b.WriteString(styleHint.Render(m.toolsStatus) + "\n\n")
 	}
-	b.WriteString(styleHint.Render("↑↓ escolher · espaço/enter liga/desliga · a liga tudo · d desliga tudo · esc volta (reinicie o kram pra aplicar)"))
+	b.WriteString(styleHint.Render("↑↓ escolher · espaço/enter liga/desliga · a liga tudo · d desliga tudo · esc volta"))
 	return b.String()
 }
 
@@ -97,9 +98,12 @@ func (m Model) handleToolsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc":
 		if m.wizardChosenToolsPreset == "custom" {
-			m.phase = phaseWizardSystemCheck
-			m.wizardStep = 7
-			return m, nil
+			// Reconcile once more before leaving Custom. This prevents a quick
+			// final toggle+Esc (or a transient earlier sync failure) from letting
+			// the first session start with startup-time daemon settings.
+			m.toolsStatus = "aplicando ao daemon atual…"
+			m.wizardToolSettingsPending = true
+			return m, syncToolSettingsCmd(m.daemon, m.toolSettings)
 		}
 		m.phase = phasePicker
 		return m, nil
@@ -126,6 +130,7 @@ func (m Model) handleToolsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		} else {
 			m.toolsStatus = it.name + ": ligado."
 		}
+		return m, syncToolSettingsCmd(m.daemon, m.toolSettings)
 	case "a", "d":
 		if m.toolSettings == nil {
 			return m, nil
@@ -139,8 +144,28 @@ func (m Model) handleToolsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		} else {
 			m.toolsStatus = fmt.Sprintf("%d ligados.", len(names))
 		}
+		return m, syncToolSettingsCmd(m.daemon, m.toolSettings)
 	}
 	return m, nil
+}
+
+type toolSettingsUpdatedMsg struct{ err error }
+
+func syncToolSettingsCmd(c *daemonclient.Client, settings *toolsettings.Store) tea.Cmd {
+	return func() tea.Msg {
+		if c == nil || settings == nil {
+			return toolSettingsUpdatedMsg{err: fmt.Errorf("daemon or tool settings unavailable")}
+		}
+		disabledMap := settings.Disabled()
+		names := make([]string, 0, len(disabledMap))
+		for name := range disabledMap {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		return toolSettingsUpdatedMsg{err: c.UpdateToolSettings(ctx, names)}
+	}
 }
 
 func toolToggleNames(items []toolToggleItem) []string {

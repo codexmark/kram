@@ -160,7 +160,36 @@ func TestCommandTimeoutKillsWholeTree(t *testing.T) {
 }
 
 func TestDescribeReportsPosixShell(t *testing.T) {
-	if Describe() != "/bin/sh -c" {
-		t.Errorf("Describe() = %q, want /bin/sh -c", Describe())
+	if got := Describe(); got != shellExecutable()+" -c" {
+		t.Errorf("Describe() = %q, want resolved shell %q", got, shellExecutable()+" -c")
+	}
+}
+
+func TestShellExecutableUsesPathBeforeFHSFallback(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sh")
+	if err := os.WriteFile(path, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir)
+	if got := shellExecutable(); got != path {
+		t.Errorf("shellExecutable() = %q, want PATH-resolved %q", got, path)
+	}
+}
+
+func TestShellExecutableUsesTermuxPrefixWhenPathHasNoShell(t *testing.T) {
+	prefix := t.TempDir()
+	path := filepath.Join(prefix, "bin", "sh")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", t.TempDir())
+	t.Setenv("TERMUX_VERSION", "test")
+	t.Setenv("PREFIX", prefix)
+	if got := shellExecutable(); got != path {
+		t.Errorf("shellExecutable() = %q, want Termux prefix shell %q", got, path)
 	}
 }

@@ -104,6 +104,27 @@ func TestListToolsDecodesToolsAndSkills(t *testing.T) {
 	}
 }
 
+func TestUpdateToolSettingsPutsDisabledSet(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPut || r.URL.Path != "/tools/settings" {
+			t.Errorf("request = %s %s, want PUT /tools/settings", r.Method, r.URL.Path)
+		}
+		var body struct {
+			Disabled []string `json:"disabled"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if len(body.Disabled) != 2 || body.Disabled[0] != "bash" || body.Disabled[1] != "write_file" {
+			t.Errorf("disabled = %v", body.Disabled)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
+	}))
+	defer srv.Close()
+	if err := New(srv.URL).UpdateToolSettings(context.Background(), []string{"bash", "write_file"}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestGetContextDecodesUsage(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/sessions/ses_1/context" {

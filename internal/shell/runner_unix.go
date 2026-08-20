@@ -4,7 +4,10 @@ package shell
 
 import (
 	"context"
+	"os"
 	"os/exec"
+	"path/filepath"
+	"runtime"
 	"syscall"
 	"time"
 )
@@ -16,7 +19,7 @@ import (
 const killTreeGracePeriod = 4 * time.Second
 
 func newShellCmd(ctx context.Context, command string) *exec.Cmd {
-	cmd := exec.CommandContext(ctx, "/bin/sh", "-c", command)
+	cmd := exec.CommandContext(ctx, shellExecutable(), "-c", command)
 	// Setpgid makes the shell the leader of its own new process group
 	// (pgid == its own pid), rather than inheriting the daemon's group.
 	// That's what lets killTree below signal the whole group — including
@@ -25,6 +28,24 @@ func newShellCmd(ctx context.Context, command string) *exec.Cmd {
 	// only ever being able to reach the shell itself.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	return cmd
+}
+
+// shellExecutable avoids assuming an FHS /bin on every Unix-like target.
+// Termux exposes sh under its own prefix; ordinary Linux/macOS still resolve
+// their normal PATH entry and retain /bin/sh as a conservative last resort.
+func shellExecutable() string {
+	if path, err := exec.LookPath("sh"); err == nil {
+		return path
+	}
+	if runtime.GOOS == "android" || os.Getenv("TERMUX_VERSION") != "" {
+		if prefix := os.Getenv("PREFIX"); prefix != "" {
+			candidate := filepath.Join(prefix, "bin", "sh")
+			if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+				return candidate
+			}
+		}
+	}
+	return "/bin/sh"
 }
 
 // afterStart: nothing left to do on Unix. Setpgid (set before Start,
@@ -74,4 +95,4 @@ func groupAlive(pgid int) bool {
 	return syscall.Kill(-pgid, 0) == nil
 }
 
-func describe() string { return "/bin/sh -c" }
+func describe() string { return shellExecutable() + " -c" }

@@ -57,6 +57,18 @@ func (m *Model) wizardHasProvider() bool {
 	return len(m.customProviders) > 0
 }
 
+// wizardHasOperationalProvider separates "configured" from "working".
+// Degraded is allowed to proceed because the provider answered successfully;
+// the yellow status already makes the latency/soft issue visible.
+func (m *Model) wizardHasOperationalProvider() bool {
+	for _, result := range m.accountsPings {
+		if result.Status == providerping.StatusOK || result.Status == providerping.StatusDegraded {
+			return true
+		}
+	}
+	return false
+}
+
 // accountsRowCounts returns the cursor layout for the combined accounts
 // list: staticCount catalog rows, then customCount registered custom
 // providers, then exactly one "+ add" row — every cursor-position check
@@ -242,8 +254,10 @@ func (m Model) renderAccounts() string {
 	}
 	if m.wizardMode {
 		hint += " · r verifica de novo"
-		if m.wizardHasProvider() {
+		if m.wizardHasOperationalProvider() {
 			hint += " · n continua"
+		} else if m.wizardProviderOverrideVisible && !m.accountsPinging {
+			hint += " · c continua mesmo assim"
 		}
 		if m.wizardWorkspaceLocked {
 			hint += " · esc cancela"
@@ -492,16 +506,28 @@ func (m Model) handleAccountsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case "r":
 		m.accountsPinging = true
+		m.wizardProviderOverrideVisible = false
 		m.accountsStatus = ""
 		return m, pingAccountsCmd(m.credStore, m.customProviders)
 	case "n":
-		if m.wizardMode && m.wizardHasProvider() {
+		if m.wizardMode && m.wizardHasOperationalProvider() {
 			m.phase = phaseWizardRouting
 			m.wizardStep = 4
 			return m, nil
 		}
-		if m.wizardMode {
+		if m.wizardMode && !m.wizardHasProvider() {
 			m.accountsStatus = "configure ao menos um provedor antes de continuar."
+		} else if m.wizardMode && m.accountsPinging {
+			m.accountsStatus = "aguarde a verificação terminar ou pressione r para tentar novamente."
+		} else if m.wizardMode {
+			m.wizardProviderOverrideVisible = true
+			m.accountsStatus = "nenhum provedor operacional — pressione r para tentar novamente ou c para continuar mesmo assim."
+		}
+	case "c":
+		if m.wizardMode && m.wizardProviderOverrideVisible && m.wizardHasProvider() && !m.accountsPinging && !m.wizardHasOperationalProvider() {
+			m.accountsStatus = "continuando por escolha explícita, apesar da falha de validação."
+			m.phase = phaseWizardRouting
+			m.wizardStep = 4
 		}
 	}
 	return m, nil
@@ -729,14 +755,22 @@ func saveOAuthResult(credStore *credentials.Store, msg oauthResultMsg) (status s
 // (headless, unusual $PATH, sandboxed) still leaves the user a working
 // path forward: copy the link themselves.
 func openBrowser(url string) {
-	var cmd *exec.Cmd
+	cmd := browserCommand(url)
+	_ = cmd.Start()
+}
+
+func browserCommand(url string) *exec.Cmd {
+	if runtime.GOOS == "android" || os.Getenv("TERMUX_VERSION") != "" {
+		if path, err := exec.LookPath("termux-open-url"); err == nil {
+			return exec.Command(path, url)
+		}
+	}
 	switch runtime.GOOS {
 	case "darwin":
-		cmd = exec.Command("open", url)
+		return exec.Command("open", url)
 	case "windows":
-		cmd = exec.Command("cmd", "/c", "start", url)
+		return exec.Command("cmd", "/c", "start", url)
 	default:
-		cmd = exec.Command("xdg-open", url)
+		return exec.Command("xdg-open", url)
 	}
-	_ = cmd.Start()
 }
