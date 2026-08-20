@@ -145,7 +145,7 @@ if [ "$ASSUME_YES" -ne 1 ]; then
   esac
 fi
 
-echo "==> publishing to $RELEASES_REPO"
+echo "==> creating draft release in $RELEASES_REPO"
 gh release create "$VERSION" \
   dist/kram-linux-amd64.tar.gz \
   dist/kram-linux-arm64.tar.gz \
@@ -156,7 +156,8 @@ gh release create "$VERSION" \
   dist/SHA256SUMS \
   --repo "$RELEASES_REPO" \
   --title "Kram $VERSION" \
-  --notes-file "$NOTES_FILE"
+  --notes-file "$NOTES_FILE" \
+  --draft
 
 echo "==> synchronizing public installer files"
 RELEASES_BRANCH="$(gh api "repos/${RELEASES_REPO}" --jq .default_branch)"
@@ -185,6 +186,27 @@ publish_dist_file() {
 publish_dist_file scripts/dist-repo/install.sh install.sh
 publish_dist_file scripts/dist-repo/install.ps1 install.ps1
 publish_dist_file scripts/dist-repo/README.md README.md
+
+echo "==> verifying public installer blobs"
+verify_dist_file() {
+  local source_path="$1"
+  local destination_path="$2"
+  local local_sha remote_sha
+  local_sha="$(git hash-object "$source_path")"
+  remote_sha="$(gh api "repos/${RELEASES_REPO}/contents/${destination_path}?ref=${RELEASES_BRANCH}" --jq .sha)"
+  if [ "$local_sha" != "$remote_sha" ]; then
+    echo "error: published ${destination_path} does not match ${source_path}; ${VERSION} remains a draft" >&2
+    return 1
+  fi
+  echo "  ✓ ${destination_path}"
+}
+
+verify_dist_file scripts/dist-repo/install.sh install.sh
+verify_dist_file scripts/dist-repo/install.ps1 install.ps1
+verify_dist_file scripts/dist-repo/README.md README.md
+
+echo "==> promoting verified release to latest"
+gh release edit "$VERSION" --repo "$RELEASES_REPO" --draft=false --latest
 
 echo
 echo "✓ Release published: $VERSION"

@@ -2,6 +2,7 @@ package app
 
 import (
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 
@@ -20,12 +21,10 @@ const (
 
 // renderRouteBar draws the discreet top status strip: the active
 // strategy name plus, once known, the real fallback trail for the
-// current turn's most recent model call. Nothing here is simulated —
-// outside of a generic "routing…" pulse while a call is actually in
-// flight (there is no per-attempt progress to show mid-call; the
-// gateway's own fallback loop happens inside one HTTP round-trip the
-// daemon only ever sees the result of, see DECISIONS.md), every glyph and
-// number comes from a real route_done/done event.
+// current turn's most recent model call. While a call is in flight, an
+// animated rail uses the real number of configured candidates without
+// pretending it knows which individual provider the gateway is currently
+// trying (that arrives only with route_done; see DECISIONS.md).
 func (m Model) renderRouteBar() string {
 	strategy := m.routeBarStrategyLabel()
 	if strategy == "" {
@@ -35,16 +34,17 @@ func (m Model) renderRouteBar() string {
 	var trail string
 	switch {
 	case m.routeRunning:
-		trail = styleBadgeWarn.Render("◉ roteando…")
+		trail = m.renderRoutingActivity()
 	case m.routeCall != nil && len(m.routeCall.Attempts) > 0:
 		trail = m.renderRouteAttempts(m.routeCall.Attempts)
 	}
 
-	left := joinNonEmpty("   ", styleBadgeAccent.Render(strings.ToUpper(strategy)), trail)
+	strategyBlock := styleHint.Render("estratégia:") + " " + styleBadgeAccent.Render(strings.ToUpper(strategy))
+	left := joinNonEmpty("   ", strategyBlock, trail)
 
 	right := ""
-	if m.routeCall != nil && len(m.routeCall.Attempts) > 0 {
-		right = styleHint.Render(fmt.Sprintf("call %d", m.routeCall.Index))
+	if index := m.routeBarCallIndex(); index > 0 {
+		right = styleHint.Render(fmt.Sprintf("call %d", index))
 	}
 	// padBetween already drops the right block when nothing fits, but a
 	// long enough left side (real provider IDs have no length limit) can
@@ -60,6 +60,71 @@ func (m Model) renderRouteBar() string {
 		return truncate.StringWithTail(result, uint(m.width), "…")
 	}
 	return result
+}
+
+// renderRoutingActivity is intentionally a candidate rail, not a fake live
+// attempt trace. route_start tells the CLI that routing is active and the
+// status snapshot tells it how many candidates exist; the provider identity
+// and outcome of each real attempt arrive together in route_done and replace
+// this rail immediately.
+func (m Model) renderRoutingActivity() string {
+	candidates := m.routeCandidateCount()
+	nodes := candidates
+	if nodes == 0 {
+		nodes = 3 // generic motion when status has not loaded; no count is claimed
+	}
+	if nodes > 5 {
+		nodes = 5
+	}
+
+	active := positiveModulo(m.animFrame/2, nodes)
+	parts := make([]string, nodes)
+	for i := range parts {
+		if i != active {
+			parts[i] = styleHint.Render("○")
+			continue
+		}
+		phase := float64(m.animFrame)*0.35 + float64(i)*math.Pi/2
+		blend := (math.Sin(phase) + 1) / 2
+		color := shimmerFrom.BlendLuv(shimmerTo, blend)
+		parts[i] = lipgloss.NewStyle().Foreground(lipgloss.Color(color.Hex())).Bold(true).Render("◉")
+	}
+	rail := strings.Join(parts, styleFaintTrack.Render("─"))
+
+	switch {
+	case m.width >= routeBarWideMin && candidates > 0:
+		return rail + " " + styleMeta.Render(fmt.Sprintf("avaliando %d upstreams", candidates))
+	case m.width >= routeBarMediumMin && candidates > 0:
+		return rail + " " + styleMeta.Render(fmt.Sprintf("%d rotas", candidates))
+	default:
+		return rail
+	}
+}
+
+func (m Model) routeCandidateCount() int {
+	if combo := m.currentCombo(); combo != nil {
+		return len(combo.Providers)
+	}
+	if m.routeCall != nil {
+		if len(m.routeCall.Ranking) > 0 {
+			return len(m.routeCall.Ranking)
+		}
+		return len(m.routeCall.Attempts)
+	}
+	return 0
+}
+
+func (m Model) routeBarCallIndex() int {
+	if m.routeRunning {
+		if m.routeCall != nil {
+			return m.routeCall.Index + 1
+		}
+		return 1
+	}
+	if m.routeCall != nil && len(m.routeCall.Attempts) > 0 {
+		return m.routeCall.Index
+	}
+	return 0
 }
 
 // routeBarStrategyLabel prefers the strategy the most recent real

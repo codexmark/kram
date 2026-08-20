@@ -38,12 +38,22 @@ import (
 	"github.com/codexmark/kram/internal/providercatalog"
 )
 
+var (
+	evalDetectGatewayConfig = detectGatewayConfig
+	evalFreePort            = freePort
+	evalWaitHealthy         = waitHealthy
+	evalGatewayRun          = gateway.Run
+	evalDaemonRun           = daemon.Run
+	evalNewDaemonClient     = daemonclient.New
+	evalScenarios           = scenarios
+)
+
 func main() {
 	os.Exit(run())
 }
 
 func run() int {
-	gwCfg, err := detectGatewayConfig()
+	gwCfg, err := evalDetectGatewayConfig()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "evals:", err)
 		fmt.Fprintln(os.Stderr, "evals need a real provider configured — export an API key or add one via the accounts screen.")
@@ -71,20 +81,21 @@ func run() int {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	gwPort, err := freePort()
+	gwPort, err := evalFreePort()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "evals:", err)
 		return 1
 	}
 	gwCfg.Port = gwPort
-	daemonPort, err := freePort()
+	daemonPort, err := evalFreePort()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "evals:", err)
 		return 1
 	}
 
 	errCh := make(chan error, 2)
-	go func() { errCh <- gateway.Run(ctx, &gwCfg, logger, nil) }()
+	gatewayRun := evalGatewayRun
+	go func() { errCh <- gatewayRun(ctx, &gwCfg, logger, nil) }()
 
 	dbPath := filepath.Join(workspace, "eval.db")
 	daemonCfg := daemon.Config{
@@ -93,24 +104,25 @@ func run() int {
 		GatewayURL: fmt.Sprintf("http://127.0.0.1:%d", gwPort),
 		Model:      "default", Workspace: workspace, MaxTurns: 20,
 	}
-	go func() { errCh <- daemon.Run(ctx, daemonCfg, logger) }()
+	daemonRun := evalDaemonRun
+	go func() { errCh <- daemonRun(ctx, daemonCfg, logger) }()
 
 	gatewayURL := fmt.Sprintf("http://127.0.0.1:%d", gwPort)
 	daemonURL := fmt.Sprintf("http://127.0.0.1:%d", daemonPort)
-	if err := waitHealthy(ctx, gatewayURL, 10*time.Second); err != nil {
+	if err := evalWaitHealthy(ctx, gatewayURL, 10*time.Second); err != nil {
 		fmt.Fprintln(os.Stderr, "evals: gateway didn't come up:", err)
 		return 1
 	}
-	if err := waitHealthy(ctx, daemonURL, 10*time.Second); err != nil {
+	if err := evalWaitHealthy(ctx, daemonURL, 10*time.Second); err != nil {
 		fmt.Fprintln(os.Stderr, "evals: daemon didn't come up:", err)
 		return 1
 	}
 
-	client := daemonclient.New(daemonURL)
+	client := evalNewDaemonClient(daemonURL)
 	env := &env{ctx: ctx, client: client, workspace: workspace}
 
-	results := make([]result, 0, len(scenarios))
-	for _, sc := range scenarios {
+	results := make([]result, 0, len(evalScenarios))
+	for _, sc := range evalScenarios {
 		fmt.Printf("running %-32s ", sc.name)
 		res := runScenario(env, sc)
 		results = append(results, res)

@@ -19,8 +19,40 @@ fi
 echo "==> go vet"
 go vet ./...
 
-echo "==> go test -race"
-go test ./... -race -count=1
+echo "==> go test -race with global coverage"
+coverage_profile="$tmp_dir/coverage.out"
+# devtools/ is intentionally gitignored local scratch space, so it must not
+# make the reproducible repository gate depend on whichever disposable mocks
+# happen to exist on one maintainer's machine.
+package_output="$(go list ./...)"
+coverage_packages=()
+while IFS= read -r package; do
+  case "$package" in
+    */devtools/*) ;;
+    *) coverage_packages+=("$package") ;;
+  esac
+done <<< "$package_output"
+if [ "${#coverage_packages[@]}" -eq 0 ]; then
+  echo "coverage gate failed: go list returned no tracked packages" >&2
+  exit 1
+fi
+go test "${coverage_packages[@]}" -race -count=1 -covermode=atomic -coverprofile="$coverage_profile"
+coverage_stats="$(awk 'NR > 1 {
+  total += $2
+  if ($3 > 0) covered += $2
+}
+END {
+  if (total <= 0) exit 1
+  printf "%d %d %.6f", covered, total, covered * 100 / total
+}' "$coverage_profile")"
+read -r coverage_covered coverage_statements coverage_percent <<< "$coverage_stats"
+echo "  total statement coverage: ${coverage_percent}% (${coverage_covered}/${coverage_statements})"
+awk -v covered="$coverage_covered" -v total="$coverage_statements" 'BEGIN {
+  if (covered * 100 < total * 90) {
+    printf "coverage gate failed: %.6f%% is below 90.0%%\n", covered * 100 / total > "/dev/stderr"
+    exit 1
+  }
+}'
 
 echo "==> host build"
 go build ./...

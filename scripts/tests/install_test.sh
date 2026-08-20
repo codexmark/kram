@@ -25,7 +25,7 @@ make_asset android-arm64
 
 linux_install="$TMP/linux-install"
 HOME="$TMP/home" KRAM_BASE_URL="file://$RELEASE" KRAM_INSTALL_DIR="$linux_install" \
-  bash "$ROOT/scripts/dist-repo/install.sh" >/dev/null
+  sh "$ROOT/scripts/dist-repo/install.sh" >/dev/null
 test "$("$linux_install/kram" -version)" = "kram test-linux-amd64"
 
 fake_bin="$TMP/fake-bin"
@@ -35,13 +35,13 @@ chmod 755 "$fake_bin/uname"
 android_install="$TMP/android-install"
 PATH="$fake_bin:$PATH" HOME="$TMP/home" TERMUX_VERSION="test" PREFIX="/data/data/com.termux/files/usr" \
   KRAM_BASE_URL="file://$RELEASE" KRAM_INSTALL_DIR="$android_install" \
-  bash "$ROOT/scripts/dist-repo/install.sh" >/dev/null
+  sh "$ROOT/scripts/dist-repo/install.sh" >/dev/null
 test "$("$android_install/kram" -version)" = "kram test-android-arm64"
 
 # A checksum failure must leave a previously installed binary untouched.
 printf 'tampered' >> "$RELEASE/kram-linux-amd64.tar.gz"
 if HOME="$TMP/home" KRAM_BASE_URL="file://$RELEASE" KRAM_INSTALL_DIR="$linux_install" \
-  bash "$ROOT/scripts/dist-repo/install.sh" >/dev/null 2>&1; then
+  sh "$ROOT/scripts/dist-repo/install.sh" >/dev/null 2>&1; then
   echo "installer accepted a bad checksum" >&2
   exit 1
 fi

@@ -1233,20 +1233,22 @@ the same code path that decides when to compact. Combos v2 extends this
 same rule to routing: the route bar, the Ctrl+R trace, and Ctrl+P's score
 breakdown all render facts the router/gateway already decided — nothing
 is guessed, interpolated, or recomputed in the TUI. The one deliberate
-exception is a generic "routing…" pulse while a model call is actually in
-flight, and even that's disclosed as a generic pulse rather than faked
-per-attempt progress (see "Route bar: per-model-call granularity, not
-per-attempt" below) — there was never a version of this that simulated
-which candidate was "currently" being tried.
+exception is a candidate rail while a model call is actually in flight: its
+node count comes from the real combo, but the moving highlight is explicitly
+generic activity rather than faked per-attempt progress (see "Route bar:
+per-model-call granularity, not per-attempt" below) — there was never a
+version of this that simulated which candidate was "currently" being tried.
 
 **Why:** a panel that can disagree with reality is worse than no panel. It
 also means the two can never drift.
 
 ### Route bar: per-model-call granularity, not per-attempt
 
-The route bar shows a generic "routing…" pulse while a model call is in
-flight, then the real fallback trail once it's done — it does not show
-"now trying candidate 2 of 3" live, mid-call.
+The route bar shows an animated rail with the real number of configured
+candidates while a model call is in flight, then the real fallback trail once
+it's done — it does not show "now trying candidate 2 of 3" live, mid-call. The
+rail's moving focus means only "routing is active"; provider names, outcomes,
+and latencies appear only when `route_done` makes them facts.
 
 **Why this isn't a shortcut:** it's structurally true, not a scope cut.
 The gateway's fallback loop (try candidate 1, try candidate 2, ...) runs
@@ -3010,3 +3012,12 @@ The full composition requires 84 columns. Medium terminals show the exact
 central wordmark and motto; narrow terminals show `KRAM`. The picker itself no
 longer repeats the banner: a boot splash that remains on the next screen did
 not actually disappear and consumed useful session-list height.
+
+The in-flight transcript indicator repeats that identity at micro scale: two
+Braille cells pack a nine-point `K` into one terminal row. Its explicit 4x4
+silhouette keeps the stem continuous and joins two diagonal arms at the center;
+adding more dots was rejected because it filled the counter and made the glyph
+read like a curve. A color crest alternates between its two cells. It replaces
+the generic inline dot spinner only for the agent's "thinking" placeholder;
+tool activity and loading states retain conventional status marks because there
+the symbol communicates operation state rather than brand identity.

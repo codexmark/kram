@@ -6,30 +6,47 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
+	"io"
 	"log/slog"
 	"os"
 
 	"github.com/codexmark/kram/internal/daemon"
 )
 
+var daemonRun = daemon.Run
+
 func main() {
-	host := flag.String("host", "127.0.0.1", "listen host")
-	port := flag.Int("port", 20130, "listen port")
-	dbPath := flag.String("db", "kram-daemon.db", "path to the SQLite database file")
-	gatewayURL := flag.String("gateway", "http://127.0.0.1:20128", "base URL of a running kram-gateway")
-	model := flag.String("model", "default", "gateway combo/model used for new messages")
-	workspace := flag.String("workspace", ".", "project root the agent's tools (read/write/grep/bash) operate within")
-	maxTurns := flag.Int("max-turns", 50, "iteration budget per agent run, tool round-trips included")
-	flag.Parse()
+	os.Exit(mainExit(context.Background(), os.Args[1:], os.Stdout))
+}
 
-	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
-
-	cfg := daemonConfig(*host, *port, *dbPath, *gatewayURL, *model, *workspace, *maxTurns)
-	if err := daemon.Run(context.Background(), cfg, logger); err != nil {
-		logger.Error("fatal", "error", err)
-		os.Exit(1)
+func mainExit(ctx context.Context, args []string, stdout io.Writer) int {
+	if err := runMain(ctx, args, stdout); err != nil {
+		slog.New(slog.NewTextHandler(stdout, nil)).Error("fatal", "error", err)
+		return 1
 	}
+	return 0
+}
+
+func runMain(ctx context.Context, args []string, output io.Writer) error {
+	fs := flag.NewFlagSet("kram-daemon", flag.ContinueOnError)
+	fs.SetOutput(output)
+	host := fs.String("host", "127.0.0.1", "listen host")
+	port := fs.Int("port", 20130, "listen port")
+	dbPath := fs.String("db", "kram-daemon.db", "path to the SQLite database file")
+	gatewayURL := fs.String("gateway", "http://127.0.0.1:20128", "base URL of a running kram-gateway")
+	model := fs.String("model", "default", "gateway combo/model used for new messages")
+	workspace := fs.String("workspace", ".", "project root the agent's tools (read/write/grep/bash) operate within")
+	maxTurns := fs.Int("max-turns", 50, "iteration budget per agent run, tool round-trips included")
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
+		return err
+	}
+	logger := slog.New(slog.NewTextHandler(output, nil))
+	return daemonRun(ctx, daemonConfig(*host, *port, *dbPath, *gatewayURL, *model, *workspace, *maxTurns), logger)
 }
 
 func daemonConfig(host string, port int, dbPath, gatewayURL, model, workspace string, maxTurns int) daemon.Config {
