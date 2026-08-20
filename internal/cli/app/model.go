@@ -115,8 +115,8 @@ type Model struct {
 	// without one, e.g. an error before any model call went out).
 	// routeCall is the most recently *completed* model call's routing
 	// story for the current turn; true per-attempt progress isn't
-	// observable while routeRunning (see DECISIONS.md), so the bar shows
-	// a generic pulse until the real trail lands.
+	// observable while routeRunning (see DECISIONS.md), so the bar animates
+	// the real candidate count until the real trail lands.
 	routeRunning bool
 	routeCall    *daemonclient.RouteCall
 	// routeTrace is the full routing story for the most recently
@@ -896,8 +896,8 @@ func (m Model) handleStreamEvent(msg streamEventMsg) (tea.Model, tea.Cmd) {
 	case "route_start":
 		// A model call is going out — real per-attempt progress isn't
 		// observable until it finishes (the gateway's own fallback loop
-		// happens inside one HTTP round-trip), so the route bar shows a
-		// generic pulse from here until route_done lands.
+		// happens inside one HTTP round-trip), so the route bar animates
+		// the known candidate count until route_done lands.
 		m.routeRunning = true
 
 	case "route_done":

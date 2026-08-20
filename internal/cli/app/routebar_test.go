@@ -27,6 +27,9 @@ func TestRenderRouteBarShowsStrategyFromCombo(t *testing.T) {
 	if !strings.Contains(got, "SMART") {
 		t.Errorf("expected the route bar to show the combo's strategy name, got %q", got)
 	}
+	if !strings.Contains(got, "estratégia:") {
+		t.Errorf("expected a discreet strategy label before the name, got %q", got)
+	}
 }
 
 func TestRenderRouteBarEmptyStrategyMeansPriority(t *testing.T) {
@@ -42,12 +45,93 @@ func TestRenderRouteBarEmptyStrategyMeansPriority(t *testing.T) {
 
 func TestRenderRouteBarShowsRunningPulse(t *testing.T) {
 	m := Model{
-		width: 80, combo: "default", routeRunning: true,
-		strategyData: statusclient.Status{Combos: []statusclient.Combo{{ID: "default", Strategy: "smart"}}},
+		width: 80, combo: "default", routeRunning: true, animFrame: 2,
+		strategyData: statusclient.Status{Combos: []statusclient.Combo{{ID: "default", Strategy: "smart", Providers: []string{"a", "b", "c"}}}},
 	}
 	got := m.renderRouteBar()
-	if !strings.Contains(got, "roteando") {
-		t.Errorf("expected a running pulse while routeRunning is true, got %q", got)
+	if !strings.Contains(got, "avaliando 3 upstreams") || !strings.Contains(got, "call 1") {
+		t.Errorf("expected a candidate rail while routeRunning is true, got %q", got)
+	}
+	if !strings.Contains(got, "◉") || strings.Count(got, "○") != 2 {
+		t.Errorf("expected one active and two idle candidate nodes, got %q", got)
+	}
+	first := got
+	m.animFrame = 4
+	if second := m.renderRouteBar(); second == first {
+		t.Errorf("candidate rail did not animate between frames: %q", first)
+	}
+}
+
+func TestRouteBarRunningCallIndexFollowsCompletedCall(t *testing.T) {
+	m := Model{
+		width: 100, combo: "default", routeRunning: true,
+		strategyData: statusclient.Status{Combos: []statusclient.Combo{{ID: "default", Strategy: "round-robin", Providers: []string{"a", "b"}}}},
+		routeCall:    &daemonclient.RouteCall{Index: 2, Attempts: []openai.AttemptInfo{{Provider: "a", Outcome: openai.OutcomeSuccess}}},
+	}
+	if got := m.renderRouteBar(); !strings.Contains(got, "call 3") {
+		t.Errorf("running bar should identify the next model call, got %q", got)
+	}
+}
+
+func TestRoutingActivityDegradesWithoutInventingCandidateCount(t *testing.T) {
+	m := Model{width: 20, routeRunning: true, animFrame: 2}
+	got := m.renderRoutingActivity()
+	if strings.Count(got, "○") != 2 || !strings.Contains(got, "◉") {
+		t.Fatalf("generic activity should keep a three-node rail, got %q", got)
+	}
+	if strings.Contains(got, "rotas") || strings.Contains(got, "upstreams") {
+		t.Fatalf("activity without status must not invent a candidate count, got %q", got)
+	}
+}
+
+func TestRoutingActivityCapsRailButReportsRealCountAcrossWidths(t *testing.T) {
+	providers := []string{"a", "b", "c", "d", "e", "f", "g"}
+	status := statusclient.Status{Combos: []statusclient.Combo{{ID: "default", Strategy: "smart", Providers: providers}}}
+
+	wide := Model{width: routeBarWideMin, combo: "default", strategyData: status}
+	wideText := wide.renderRoutingActivity()
+	if nodes := strings.Count(wideText, "○") + strings.Count(wideText, "◉"); nodes != 5 {
+		t.Fatalf("wide rail nodes = %d, want visual cap of 5: %q", nodes, wideText)
+	}
+	if !strings.Contains(wideText, "avaliando 7 upstreams") {
+		t.Fatalf("wide rail lost the real candidate count: %q", wideText)
+	}
+
+	medium := wide
+	medium.width = routeBarMediumMin
+	if got := medium.renderRoutingActivity(); !strings.Contains(got, "7 rotas") {
+		t.Fatalf("medium rail should use the compact count label, got %q", got)
+	}
+
+	narrow := wide
+	narrow.width = routeBarMediumMin - 1
+	if got := narrow.renderRoutingActivity(); strings.Contains(got, "7") {
+		t.Fatalf("narrow rail should omit the count label, got %q", got)
+	}
+}
+
+func TestRouteBarFallbackFactsComeFromCompletedCall(t *testing.T) {
+	ranking := []openai.RankedProviderInfo{{Provider: "a"}, {Provider: "b"}}
+	m := Model{routeCall: &daemonclient.RouteCall{Index: 4, Ranking: ranking}}
+	if got := m.routeCandidateCount(); got != 2 {
+		t.Fatalf("ranking candidate count = %d, want 2", got)
+	}
+	if got := m.routeBarCallIndex(); got != 0 {
+		t.Fatalf("call without attempts should not be presented as completed, got %d", got)
+	}
+
+	m.routeCall.Ranking = nil
+	m.routeCall.Attempts = []openai.AttemptInfo{{Provider: "a"}}
+	if got := m.routeCandidateCount(); got != 1 {
+		t.Fatalf("attempt candidate count = %d, want 1", got)
+	}
+	if got := m.routeBarCallIndex(); got != 4 {
+		t.Fatalf("completed call index = %d, want 4", got)
+	}
+
+	m.routeCall = nil
+	if got := m.routeCandidateCount(); got != 0 {
+		t.Fatalf("missing route facts produced candidate count %d", got)
 	}
 }
 

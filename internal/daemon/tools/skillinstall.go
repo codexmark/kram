@@ -18,9 +18,13 @@ import (
 // responding shouldn't park an agent turn indefinitely.
 const skillInstallTimeout = 90 * time.Second
 
-type skillInstall struct{}
+type skillInstall struct {
+	clone func(context.Context, string, string) ([]byte, error)
+}
 
-func newSkillInstall() *skillInstall { return &skillInstall{} }
+func newSkillInstall() *skillInstall {
+	return &skillInstall{clone: cloneSkillRepository}
+}
 
 func (t *skillInstall) Name() string { return "skill_install" }
 func (t *skillInstall) Description() string {
@@ -41,6 +45,15 @@ func (t *skillInstall) Schema() json.RawMessage {
 type skillInstallArgs struct {
 	Repo   string   `json:"repo"`
 	Skills []string `json:"skills"`
+}
+
+// cloneSkillRepository is a narrow test seam around the only external
+// process in skill installation. Production always uses git with the same
+// shallow-clone arguments; tests can substitute a deterministic local copy
+// without standing up a smart-HTTP Git server.
+func cloneSkillRepository(ctx context.Context, repo, dst string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, "git", "clone", "--depth", "1", "--quiet", repo, dst)
+	return cmd.CombinedOutput()
 }
 
 func (t *skillInstall) Execute(ctx context.Context, raw json.RawMessage) (string, error) {
@@ -65,8 +78,7 @@ func (t *skillInstall) Execute(ctx context.Context, raw json.RawMessage) (string
 
 	cloneCtx, cancel := context.WithTimeout(ctx, skillInstallTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(cloneCtx, "git", "clone", "--depth", "1", "--quiet", args.Repo, tmp)
-	if out, err := cmd.CombinedOutput(); err != nil {
+	if out, err := t.clone(cloneCtx, args.Repo, tmp); err != nil {
 		return fmt.Sprintf("error: cloning %s failed: %v\n%s", args.Repo, err, strings.TrimSpace(string(out))), nil
 	}
 

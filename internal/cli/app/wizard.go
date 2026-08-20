@@ -319,12 +319,7 @@ func newWizardModel(explicitWorkspace string, workspaceExplicit bool) Model {
 	}
 
 	cwd, _ := os.Getwd()
-	hasGit := false
-	if cwd != "" {
-		if _, err := os.Stat(filepath.Join(cwd, ".git")); err == nil {
-			hasGit = true
-		}
-	}
+	hasGit, cwdIsRepo := wizardEnvironment(cwd)
 	home, _ := os.UserHomeDir()
 
 	rootInput := textinput.New()
@@ -334,7 +329,7 @@ func newWizardModel(explicitWorkspace string, workspaceExplicit bool) Model {
 	rootInput.Focus()
 
 	wsDefault := suggestedProjectsRoot(home)
-	if hasGit && cwd != "" {
+	if cwdIsRepo && cwd != "" {
 		wsDefault = cwd
 	}
 	wsInput := textinput.New()
@@ -364,6 +359,21 @@ func newWizardModel(explicitWorkspace string, workspaceExplicit bool) Model {
 		}
 	}
 	return m
+}
+
+// wizardEnvironment keeps two different facts separate: whether Git is
+// installed (shown on the Environment screen) and whether the current
+// directory is already a repository (used only as the workspace default).
+// Conflating them made a fresh Termux home report "Git not found" even after
+// the git package had been installed successfully.
+func wizardEnvironment(cwd string) (hasGit, cwdIsRepo bool) {
+	_, gitErr := exec.LookPath("git")
+	hasGit = gitErr == nil
+	if cwd != "" {
+		_, statErr := os.Stat(filepath.Join(cwd, ".git"))
+		cwdIsRepo = statErr == nil
+	}
+	return hasGit, cwdIsRepo
 }
 
 // suggestedProjectsRoot follows the same convention on Linux and macOS

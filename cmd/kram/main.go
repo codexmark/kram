@@ -8,8 +8,10 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -40,45 +42,71 @@ import (
 // wasn't built through the release process.
 var version = "dev"
 
+// programRunner is the narrow seam run needs from Bubble Tea. Keeping the
+// constructor replaceable lets tests exercise the complete gateway/daemon
+// orchestration without requiring a real TTY or weakening production setup.
+type programRunner interface {
+	Run() (tea.Model, error)
+}
+
+var newProgram = func(m app.Model) programRunner {
+	return tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
+}
+
+var runWizard = app.RunWizard
+var runKram = run
+var kramGatewayRun = gateway.Run
+var kramDaemonRun = daemon.Run
+var kramWaitHealthy = waitHealthy
+var kramFreePort = freePort
+
 func main() {
-	workspace := flag.String("workspace", ".", "project root")
-	gatewayConfigPath := flag.String("config", "", "path to a gateway config.yaml (auto-detected from known API-key env vars if omitted)")
-	strategy := flag.String("strategy", "", "routing strategy for the auto-detected combo (priority, round-robin, prefix-affinity, smart, quality, fast, cheap, reliable, lkgp, p2c) — empty keeps the old default (priority order with a paid provider present, round-robin for free-tier-only). Ignored when -config points at a full gateway config.yaml, which sets strategy per combo instead.")
-	combo := flag.String("model", "default", "gateway combo used for messages in this session")
-	sessionID := flag.String("session", "", "resume an existing session ID instead of starting a new one")
-	title := flag.String("title", "", "title for a newly created session")
-	maxTurns := flag.Int("max-turns", 50, "iteration budget per agent run, tool round-trips included")
-	gatewayPort := flag.Int("gateway-port", 0, "gateway port (0 = pick a free port)")
-	daemonPort := flag.Int("daemon-port", 0, "daemon port (0 = pick a free port)")
-	showVersion := flag.Bool("version", false, "print the version and exit")
-	setup := flag.Bool("setup", false, "re-run the first-run setup wizard even if it already completed")
-	flag.Parse()
+	os.Exit(mainExit(os.Args[1:], os.Stdout, os.Stderr))
+}
 
-	if *showVersion {
-		fmt.Println("kram", version)
-		return
+func mainExit(args []string, stdout, stderr io.Writer) int {
+	if err := runMain(args, stdout, stderr); err != nil {
+		fmt.Fprintln(stderr, "kram:", err)
+		return 1
 	}
+	return 0
+}
 
-	// flag.Visit only visits flags actually present on the command line —
-	// this is how the wizard knows whether to ask about the workspace
-	// directory at all, versus respecting an explicit -workspace as
-	// already decided (see cmd/kram/main.go's run() and
-	// internal/cli/app.RunWizard).
+func runMain(args []string, stdout, stderr io.Writer) error {
+	fs := flag.NewFlagSet("kram", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	workspace := fs.String("workspace", ".", "project root")
+	gatewayConfigPath := fs.String("config", "", "path to a gateway config.yaml (auto-detected from known API-key env vars if omitted)")
+	strategy := fs.String("strategy", "", "routing strategy for the auto-detected combo (priority, round-robin, prefix-affinity, smart, quality, fast, cheap, reliable, lkgp, p2c) — empty keeps the old default")
+	combo := fs.String("model", "default", "gateway combo used for messages in this session")
+	sessionID := fs.String("session", "", "resume an existing session ID instead of starting a new one")
+	title := fs.String("title", "", "title for a newly created session")
+	maxTurns := fs.Int("max-turns", 50, "iteration budget per agent run, tool round-trips included")
+	gatewayPort := fs.Int("gateway-port", 0, "gateway port (0 = pick a free port)")
+	daemonPort := fs.Int("daemon-port", 0, "daemon port (0 = pick a free port)")
+	showVersion := fs.Bool("version", false, "print the version and exit")
+	setup := fs.Bool("setup", false, "re-run the first-run setup wizard even if it already completed")
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
+		return err
+	}
+	if *showVersion {
+		fmt.Fprintln(stdout, "kram", version)
+		return nil
+	}
 	workspaceExplicit := false
-	flag.Visit(func(f *flag.Flag) {
+	fs.Visit(func(f *flag.Flag) {
 		if f.Name == "workspace" {
 			workspaceExplicit = true
 		}
 	})
-
-	if err := run(runOptions{
+	return runKram(runOptions{
 		workspace: *workspace, workspaceExplicit: workspaceExplicit, gatewayConfigPath: *gatewayConfigPath, combo: *combo,
 		sessionID: *sessionID, title: *title, maxTurns: *maxTurns,
 		gatewayPort: *gatewayPort, daemonPort: *daemonPort, strategy: *strategy, setup: *setup,
-	}); err != nil {
-		fmt.Fprintln(os.Stderr, "kram:", err)
-		os.Exit(1)
-	}
+	})
 }
 
 type runOptions struct {
@@ -118,7 +146,7 @@ func run(opts runOptions) error {
 	credStore, _ := credentials.Load()
 
 	if (opts.setup || onboardState.NeedsSetup()) && opts.gatewayConfigPath == "" {
-		result, err := app.RunWizard(workspace, opts.workspaceExplicit)
+		result, err := runWizard(workspace, opts.workspaceExplicit)
 		if err != nil {
 			return fmt.Errorf("running setup wizard: %w", err)
 		}
@@ -209,7 +237,7 @@ func run(opts runOptions) error {
 
 	daemonPort := opts.daemonPort
 	if daemonPort == 0 {
-		daemonPort, err = freePort()
+		daemonPort, err = kramFreePort()
 		if err != nil {
 			return fmt.Errorf("picking a daemon port: %w", err)
 		}
@@ -232,7 +260,8 @@ func run(opts runOptions) error {
 	// credential live on every request, since a short-lived OAuth token
 	// would otherwise go stale long before the gateway process exits.
 	errCh := make(chan error, 2)
-	go func() { errCh <- gateway.Run(ctx, gwCfg, logger, credStore) }()
+	gatewayRun := kramGatewayRun
+	go func() { errCh <- gatewayRun(ctx, gwCfg, logger, credStore) }()
 
 	daemonCfg := daemon.Config{
 		Host: "127.0.0.1", Port: daemonPort,
@@ -240,12 +269,13 @@ func run(opts runOptions) error {
 		GatewayURL: fmt.Sprintf("http://127.0.0.1:%d", gwCfg.Port),
 		Model:      opts.combo, Workspace: absWorkspace, MaxTurns: opts.maxTurns,
 	}
-	go func() { errCh <- daemon.Run(ctx, daemonCfg, logger) }()
+	daemonRun := kramDaemonRun
+	go func() { errCh <- daemonRun(ctx, daemonCfg, logger) }()
 
 	gatewayURL := fmt.Sprintf("http://127.0.0.1:%d", gwCfg.Port)
 	daemonURL := fmt.Sprintf("http://127.0.0.1:%d", daemonPort)
 
-	if err := waitHealthy(ctx, gatewayURL, 5*time.Second); err != nil {
+	if err := kramWaitHealthy(ctx, gatewayURL, 5*time.Second); err != nil {
 		// waitHealthy only ever sees "nobody's listening yet" — the real
 		// reason (e.g. "building provider %q: ...") already landed on
 		// errCh the moment gateway.Run returned, well before this dial
@@ -261,7 +291,7 @@ func run(opts runOptions) error {
 		}
 		return fmt.Errorf("gateway didn't come up: %w (see %s)", err, logFile.Name())
 	}
-	if err := waitHealthy(ctx, daemonURL, 5*time.Second); err != nil {
+	if err := kramWaitHealthy(ctx, daemonURL, 5*time.Second); err != nil {
 		select {
 		case runErr := <-errCh:
 			if runErr != nil {
@@ -293,7 +323,7 @@ func run(opts runOptions) error {
 	// passing wizardStage1Completed here is safe even if -title also created a
 	// session in the same run.
 	m := app.New(daemonC, gatewayC, sid, opts.combo, absWorkspace, wizardStage1Completed, wizardResult)
-	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
+	p := newProgram(m)
 	_, cliErr := p.Run()
 
 	cancel()

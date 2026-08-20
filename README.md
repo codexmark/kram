@@ -31,6 +31,71 @@ For the detailed architectural record, including trade-offs, reversals, and deli
 
 ---
 
+# Install now / Instale agora mesmo
+
+Kram is distributed as a single prebuilt binary. The installers download the
+correct release for the current platform, verify its SHA-256 checksum, install
+it in a user-writable directory, and run `kram -version` before reporting
+success. Go and Administrator/root access are not required.
+
+## Linux and macOS
+
+Run in a regular terminal:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/codexmark/kram-releases/master/install.sh | sh
+kram
+```
+
+The default destination is `$HOME/.local/bin/kram`. If the installer reports
+that this directory is not on `PATH`, add it to your shell configuration and
+open a new terminal:
+
+```sh
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+## Windows
+
+Open a regular, non-Administrator PowerShell window and run:
+
+```powershell
+irm https://raw.githubusercontent.com/codexmark/kram-releases/master/install.ps1 | iex
+kram
+```
+
+The installer places `kram.exe` under
+`%LOCALAPPDATA%\Programs\Kram`, adds that directory to the current user's
+`PATH`, and updates the open PowerShell session. It does not require an elevated
+shell. If an older terminal was already open before installation, close and
+reopen it so it reads the updated user `PATH`.
+
+## Termux on Android arm64
+
+Install the small prerequisites, then use the same verified Unix installer:
+
+```sh
+pkg update
+pkg install curl tar coreutils git
+curl -fsSL https://raw.githubusercontent.com/codexmark/kram-releases/master/install.sh | sh
+kram
+```
+
+Termux is detected explicitly and receives the native
+`kram-android-arm64.tar.gz` binary at `$PREFIX/bin/kram`; no `proot-distro`,
+Ubuntu container, Node, Python, or Go toolchain is required. Keep projects under
+`$HOME` for the supported baseline. Android shared storage has separate
+permissions and filesystem semantics.
+
+The first launch opens Kram's setup wizard. Choose a workspace, configure at
+least one provider or local OpenAI-compatible server, select a routing strategy
+and permission preset, then start a session.
+
+For version pinning, alternate installation directories, supported targets,
+and release internals, see [Installing](#installing) below.
+
+---
+
 # The engineering ideas that shaped Kram
 
 Kram did not arrive at its current shape by collecting features until the checklist looked large enough. A lot of the current architecture came from discovering that an obvious implementation worked in the happy path but failed under a real agent workload.
@@ -1550,7 +1615,13 @@ go vet ./...
 go build ./...
 ```
 
-No automated CI runs these yet — GitHub Actions on this account currently requires a paid spending limit. `scripts/verify.sh` is therefore the reproducible local gate: diff/format checks, vet, a fresh race-enabled suite, host build, Windows and Android cross-builds, and installer tests. See "Continuous integration" in [`DECISIONS.md`](DECISIONS.md).
+No automated CI runs these yet — GitHub Actions on this account currently
+requires a paid spending limit. `scripts/verify.sh` is therefore the
+reproducible local gate: diff/format checks, vet, a fresh race-enabled suite,
+**at least 90% global statement coverage across tracked packages**, host build,
+Windows and Android cross-builds, and installer tests. The release script
+cannot publish when that coverage floor is missed. See "Continuous integration" in
+[`DECISIONS.md`](DECISIONS.md).
 
 Coverage includes areas such as:
 
@@ -1588,6 +1659,11 @@ Hard scenarios represent runtime invariants. Model-dependent soft scenarios rema
 
 # Installing
 
+The quickest platform-specific walkthrough is in
+[Install now / Instale agora mesmo](#install-now--instale-agora-mesmo).
+
+Latest Linux or macOS release:
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/codexmark/kram-releases/master/install.sh | sh
 ```
@@ -1600,7 +1676,24 @@ Windows amd64 (PowerShell, no Administrator shell required):
 irm https://raw.githubusercontent.com/codexmark/kram-releases/master/install.ps1 | iex
 ```
 
-Termux/Android arm64 uses the same shell command and automatically selects `kram-android-arm64.tar.gz`. Install its lightweight prerequisites first with `pkg install curl tar coreutils`; Git is recommended for snapshot features.
+Termux/Android arm64 uses the same shell command and automatically selects
+`kram-android-arm64.tar.gz`. Install its lightweight prerequisites first with
+`pkg install curl tar coreutils git`.
+
+Install a specific Unix version by passing the variable to `sh`, which is the
+process that evaluates the installer:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/codexmark/kram-releases/master/install.sh | KRAM_VERSION=v0.2.7 sh
+```
+
+PowerShell version pinning uses a script block so the requested version is
+visible to the installer:
+
+```powershell
+$env:KRAM_VERSION = "v0.2.7"
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/codexmark/kram-releases/master/install.ps1)))
+```
 
 # Building releases
 

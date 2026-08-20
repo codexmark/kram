@@ -7,8 +7,10 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 
@@ -17,14 +19,28 @@ import (
 )
 
 func main() {
-	configPath := flag.String("config", "config.yaml", "path to gateway config file")
-	flag.Parse()
+	os.Exit(mainExit(context.Background(), os.Args[1:], os.Stdout))
+}
 
-	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
-	if err := run(context.Background(), *configPath, logger); err != nil {
-		logger.Error("fatal", "error", err)
-		os.Exit(1)
+func mainExit(ctx context.Context, args []string, stdout io.Writer) int {
+	if err := runMain(ctx, args, stdout); err != nil {
+		slog.New(slog.NewTextHandler(stdout, nil)).Error("fatal", "error", err)
+		return 1
 	}
+	return 0
+}
+
+func runMain(ctx context.Context, args []string, output io.Writer) error {
+	fs := flag.NewFlagSet("kram-gateway", flag.ContinueOnError)
+	fs.SetOutput(output)
+	configPath := fs.String("config", "config.yaml", "path to gateway config file")
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
+		return err
+	}
+	return run(ctx, *configPath, slog.New(slog.NewTextHandler(output, nil)))
 }
 
 func run(ctx context.Context, configPath string, logger *slog.Logger) error {

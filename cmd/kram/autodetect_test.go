@@ -4,13 +4,104 @@ import (
 	"encoding/json"
 	"log/slog"
 	"os"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/codexmark/kram/internal/config"
+	"github.com/codexmark/kram/internal/credentials"
 	"github.com/codexmark/kram/internal/customprovider"
 	"github.com/codexmark/kram/internal/kramhome"
 	"github.com/codexmark/kram/internal/providercatalog"
 )
+
+func TestLoadStoredCredentialsAndAutodetectionStrategies(t *testing.T) {
+	isolateReconcileTest(t)
+	store, err := credentials.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Set("ANTHROPIC_API_KEY", "stored-key"); err != nil {
+		t.Fatal(err)
+	}
+	loadStoredCredentials()
+	if got := os.Getenv("ANTHROPIC_API_KEY"); got != "stored-key" {
+		t.Fatalf("loaded key = %q", got)
+	}
+	cfg, err := detectGatewayConfig("", nil, slog.New(slog.DiscardHandler))
+	if err != nil || cfg.Combos[0].Strategy != "" {
+		t.Fatalf("paid-provider strategy = %q err=%v", cfg.Combos[0].Strategy, err)
+	}
+	if autoStrategy(true) != "" || autoStrategy(false) != "round-robin" {
+		t.Fatal("automatic strategy did not distinguish paid and free tiers")
+	}
+}
+
+func TestCatalogProviderConfigSupportsOAuthAndMissingCredentials(t *testing.T) {
+	isolateReconcileTest(t)
+	var oauthProvider providercatalog.Provider
+	for _, provider := range providercatalog.Providers {
+		if provider.SupportsOAuth {
+			oauthProvider = provider
+			break
+		}
+	}
+	if oauthProvider.ID == "" {
+		t.Skip("catalog currently has no OAuth provider")
+	}
+	if _, ok := catalogProviderConfig(oauthProvider, nil); ok {
+		t.Fatal("provider without any credential was accepted")
+	}
+	store, err := credentials.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetOAuth(oauthProvider.EnvVar, credentials.OAuthToken{Access: "access", Refresh: "refresh", ExpiresAt: time.Now().Add(time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	got, ok := catalogProviderConfig(oauthProvider, store)
+	if !ok || got.AuthMode != "oauth" {
+		t.Fatalf("OAuth provider = %+v ok=%v", got, ok)
+	}
+}
+
+func TestDetectGatewayConfigErrorsWithoutProviderAndIncludesCustom(t *testing.T) {
+	isolateReconcileTest(t)
+	if _, err := detectGatewayConfig("", nil, slog.New(slog.DiscardHandler)); err == nil || !strings.Contains(err.Error(), "no LLM provider") {
+		t.Fatalf("empty autodetection error = %v", err)
+	}
+	store, err := customprovider.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider, err := store.Add("local", "http://127.0.0.1:9999/v1", "local-model", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := detectGatewayConfig("smart", nil, slog.New(slog.DiscardHandler))
+	if err != nil || len(cfg.Providers) != 1 || cfg.Providers[0].ID != "custom-"+provider.ID || cfg.Combos[0].Strategy != "smart" {
+		t.Fatalf("custom autodetection = %+v err=%v", cfg, err)
+	}
+}
+
+func TestDetectGatewayConfigUsesRoundRobinForFreeCatalogProvider(t *testing.T) {
+	isolateReconcileTest(t)
+	var free providercatalog.Provider
+	for _, provider := range providercatalog.Providers {
+		if provider.FreeTier {
+			free = provider
+			break
+		}
+	}
+	if free.ID == "" {
+		t.Skip("catalog has no free-tier provider")
+	}
+	t.Setenv(free.EnvVar, "test-key")
+	cfg, err := detectGatewayConfig("", nil, nil)
+	if err != nil || cfg.Combos[0].Strategy != "round-robin" {
+		t.Fatalf("free autodetection strategy = %+v err=%v", cfg, err)
+	}
+}
 
 // isolateReconcileTest points customprovider.Store at a fresh temp dir
 // and clears every catalog provider's env var — this machine's real

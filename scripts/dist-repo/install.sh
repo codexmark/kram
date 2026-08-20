@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/sh
 # Kram installer.
 #
 #   curl -fsSL https://raw.githubusercontent.com/codexmark/kram-releases/master/install.sh | sh
@@ -9,7 +9,10 @@
 # KRAM_INSTALL_DIR). No sudo, no shell-rc edits, no dependency beyond
 # curl/tar and a sha256 tool most systems already have. Windows uses the
 # companion install.ps1 script.
-set -euo pipefail
+# The documented install path pipes this file to `sh`, so the implementation
+# must stay POSIX-compatible. In particular, Android's Termux `sh` rejects
+# Bash's `pipefail` option before the installer can detect the platform.
+set -eu
 
 REPO="${KRAM_RELEASES_REPO:-codexmark/kram-releases}"
 REQUESTED_VERSION="${KRAM_VERSION:-}"

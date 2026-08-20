@@ -88,3 +88,25 @@ func TestNewIDHasExpectedPrefixAndIsUnique(t *testing.T) {
 		t.Error("two calls to NewID produced the same value")
 	}
 }
+
+func TestServicePropagatesStoreFailures(t *testing.T) {
+	st := newTestStore(t)
+	s := New(st)
+	created, err := s.Create("closed")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := s.Create("nope"); err == nil {
+		t.Error("Create on closed store succeeded")
+	}
+	if _, err := s.List(); err == nil {
+		t.Error("List on closed store succeeded")
+	}
+	if _, _, err := s.Get(created.ID); err == nil {
+		t.Error("Get on closed store succeeded")
+	}
+}

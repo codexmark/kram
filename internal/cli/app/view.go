@@ -80,14 +80,18 @@ const stallThreshold = 8 * time.Second
 // plainly instead of continuing to shimmer as if nothing were wrong.
 func (m Model) thinkingLine() string {
 	elapsed := time.Since(m.waitStartedAt).Round(time.Second)
+	stalled := !m.waitStartedAt.IsZero() && time.Since(m.lastEventAt) > stallThreshold
+	indicator := renderThinkingK(m.animFrame, stalled)
 
-	if !m.waitStartedAt.IsZero() && time.Since(m.lastEventAt) > stallThreshold {
-		return styleBadgeWarn.Bold(true).Render("kram") + "  " + m.spin.View() + " " +
+	var status string
+	if stalled {
+		status = styleBadgeWarn.Bold(true).Render("kram") + "  " +
 			styleBadgeWarn.Render(fmt.Sprintf("ainda trabalhando… (%s sem resposta)", elapsed))
+	} else {
+		status = shimmerText("kram", m.animFrame) + "  " +
+			styleMeta.Render(fmt.Sprintf("pensando (%s)", elapsed))
 	}
-
-	return shimmerText("kram", m.animFrame) + "  " + m.spin.View() + " " +
-		styleMeta.Render(fmt.Sprintf("pensando (%s)", elapsed))
+	return indicator + "  " + status
 }
 
 func (m Model) View() string {

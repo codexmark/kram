@@ -444,3 +444,72 @@ func TestContextUsageIsReachableForRealSession(t *testing.T) {
 		t.Errorf("status = %d, want 200 for a real session's context usage", resp.StatusCode)
 	}
 }
+
+func TestHandlersRejectMalformedJSON(t *testing.T) {
+	srv := newTestServer(t, nil)
+	for _, path := range []string{"/sessions/x/messages", "/sessions/x/answer", "/sessions/x/approve"} {
+		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader("{"))
+		rr := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rr, req)
+		if rr.Code != http.StatusBadRequest {
+			t.Errorf("%s status = %d, want 400", path, rr.Code)
+		}
+	}
+}
+
+type responseWriterWithoutFlusher struct {
+	header http.Header
+	code   int
+}
+
+func (w *responseWriterWithoutFlusher) Header() http.Header         { return w.header }
+func (w *responseWriterWithoutFlusher) Write(p []byte) (int, error) { return len(p), nil }
+func (w *responseWriterWithoutFlusher) WriteHeader(code int)        { w.code = code }
+
+func TestSendMessageRejectsWriterWithoutStreaming(t *testing.T) {
+	srv := newTestServer(t, nil)
+	created, err := srv.sessions.Create("x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/sessions/"+created.ID+"/messages", strings.NewReader(`{"content":"hi"}`))
+	req.SetPathValue("id", created.ID)
+	w := &responseWriterWithoutFlusher{header: make(http.Header)}
+	srv.handleSendMessage(w, req)
+	if w.code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", w.code)
+	}
+}
+
+func TestStoreFailuresBecomeInternalServerErrors(t *testing.T) {
+	workspace := t.TempDir()
+	st, err := store.Open(filepath.Join(workspace, "closed.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := tools.NewRegistry(workspace, st, nil)
+	agentSvc := agent.New(st, gatewayclient.New("http://127.0.0.1:1"), tr, agent.Config{Workspace: workspace, MaxTurns: 1})
+	srv := New(session.New(st), agentSvc, nil)
+	created, err := srv.sessions.Create("before close")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct{ method, path, body string }{
+		{http.MethodPost, "/sessions", `{"title":"x"}`},
+		{http.MethodGet, "/sessions", ""},
+		{http.MethodGet, "/sessions/" + created.ID, ""},
+		{http.MethodGet, "/sessions/" + created.ID + "/context", ""},
+		{http.MethodPost, "/sessions/" + created.ID + "/messages", `{"content":"hi"}`},
+	} {
+		req := httptest.NewRequest(tc.method, tc.path, strings.NewReader(tc.body))
+		rr := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rr, req)
+		if rr.Code != http.StatusInternalServerError {
+			t.Errorf("%s %s status = %d, want 500: %s", tc.method, tc.path, rr.Code, rr.Body.String())
+		}
+	}
+}

@@ -7,8 +7,10 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"time"
 
@@ -19,19 +21,44 @@ import (
 	"github.com/codexmark/kram/internal/cli/statusclient"
 )
 
-func main() {
-	daemonURL := flag.String("daemon", "http://127.0.0.1:20130", "base URL of a running kram-daemon")
-	gatewayURL := flag.String("gateway", "http://127.0.0.1:20128", "base URL of a running kram-gateway")
-	sessionID := flag.String("session", "", "resume an existing session ID, skipping the picker")
-	title := flag.String("title", "", "create a session with this title, skipping the picker")
-	combo := flag.String("model", "default", "gateway combo used for messages in this session")
-	workspace := flag.String("workspace", "", "project root shown on the picker banner (informational only — the daemon, not this process, enforces it)")
-	flag.Parse()
+type programRunner interface {
+	Run() (tea.Model, error)
+}
 
-	if err := run(*daemonURL, *gatewayURL, *sessionID, *title, *combo, *workspace); err != nil {
-		fmt.Fprintln(os.Stderr, "kram:", err)
-		os.Exit(1)
+var newProgram = func(m app.Model) programRunner {
+	return tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
+}
+
+var runCLI = run
+
+func main() {
+	os.Exit(mainExit(os.Args[1:], os.Stderr))
+}
+
+func mainExit(args []string, stderr io.Writer) int {
+	if err := runMain(args, stderr); err != nil {
+		fmt.Fprintln(stderr, "kram:", err)
+		return 1
 	}
+	return 0
+}
+
+func runMain(args []string, output io.Writer) error {
+	fs := flag.NewFlagSet("kram-cli", flag.ContinueOnError)
+	fs.SetOutput(output)
+	daemonURL := fs.String("daemon", "http://127.0.0.1:20130", "base URL of a running kram-daemon")
+	gatewayURL := fs.String("gateway", "http://127.0.0.1:20128", "base URL of a running kram-gateway")
+	sessionID := fs.String("session", "", "resume an existing session ID, skipping the picker")
+	title := fs.String("title", "", "create a session with this title, skipping the picker")
+	combo := fs.String("model", "default", "gateway combo used for messages in this session")
+	workspace := fs.String("workspace", "", "project root shown on the picker banner (informational only — the daemon, not this process, enforces it)")
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
+		return err
+	}
+	return runCLI(*daemonURL, *gatewayURL, *sessionID, *title, *combo, *workspace)
 }
 
 func run(daemonURL, gatewayURL, sessionID, title, combo, workspace string) error {
@@ -51,7 +78,7 @@ func run(daemonURL, gatewayURL, sessionID, title, combo, workspace string) error
 	}
 
 	m := app.New(daemon, gateway, sessionID, combo, workspace, false, app.WizardResult{})
-	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
+	p := newProgram(m)
 	_, err := p.Run()
 	return err
 }

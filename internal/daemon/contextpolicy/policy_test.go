@@ -37,3 +37,31 @@ func TestToolOutputBudgetUsesOnlyRemainingHistoryAllocation(t *testing.T) {
 		t.Errorf("over-budget result = %d, want 0", got)
 	}
 }
+
+func TestNewClampsInputsAndCapsReserve(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		max, fixed int
+		want       Plan
+	}{
+		{"negative", -1, -2, Plan{}},
+		{"fixed exceeds window", 100, 200, Plan{MaxTokens: 100, FixedTokens: 200, ResponseReserveTokens: 12}},
+		{"reserve capped", 100_000, 1_000, Plan{MaxTokens: 100_000, FixedTokens: 1_000, ResponseReserveTokens: 8_000, HistoryBudgetTokens: 91_000}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := New(tc.max, tc.fixed); got != tc.want {
+				t.Fatalf("New(%d, %d) = %+v, want %+v", tc.max, tc.fixed, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestRemainingHistoryTokens(t *testing.T) {
+	p := Plan{HistoryBudgetTokens: 25}
+	if got := p.RemainingHistoryTokens(10); got != 15 {
+		t.Fatalf("remaining = %d, want 15", got)
+	}
+	if got := p.RemainingHistoryTokens(30); got != 0 {
+		t.Fatalf("over-budget remaining = %d, want 0", got)
+	}
+}
