@@ -41,7 +41,7 @@ irm https://raw.githubusercontent.com/codexmark/kram-releases/master/install.ps1
 To pin a version, make the environment variable visible to the script block:
 
 ```powershell
-$env:KRAM_VERSION = "v0.2.4"
+$env:KRAM_VERSION = "v0.2.5"
 & ([scriptblock]::Create((irm https://raw.githubusercontent.com/codexmark/kram-releases/master/install.ps1)))
 ```
 
