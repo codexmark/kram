@@ -64,6 +64,7 @@ const (
 	phaseWizardToolsPreset
 	phaseWizardSystemCheck
 	phaseWizardSummary
+	phaseSplash
 )
 
 // panel identifies which (if any) of the two on-demand panels is open.
@@ -96,7 +97,7 @@ type Model struct {
 	daemon    *daemonclient.Client
 	gateway   *statusclient.Client
 	combo     string // combo/model name the daemon sends messages to
-	workspace string // project root, shown on the picker banner; "" if unknown
+	workspace string // project root enforced by the daemon; "" if unknown
 
 	sessionID string
 
@@ -150,6 +151,8 @@ type Model struct {
 	mdWidth    int // width the current mdRenderer was built for
 
 	phase          phase
+	splashTarget   phase // screen revealed after the boot animation completes
+	splashFrame    int
 	sessionList    []daemonclient.Session
 	pickerCursor   int
 	pickerErr      error
@@ -311,19 +314,26 @@ func New(daemon *daemonclient.Client, gateway *statusclient.Client, sessionID, c
 		credStore: credStore, toolSettings: toolSettings,
 		customStore: customStore, customProviders: customProviders,
 	}
+	target := phasePicker
 	switch {
 	case sessionID != "":
-		m.phase = phaseChat
+		target = phaseChat
 	case openOnToolsPreset:
-		m.phase = phaseWizardToolsPreset
+		target = phaseWizardToolsPreset
 		m.wizardStep = 6
 		m.toolsLoading = true
 		m.wizardChosenStrategy = wizard.Strategy
 		m.wizardChosenPermPreset = wizard.PermPreset
 		m.wizardProjectsRoot = wizard.ProjectsRoot
 	default:
-		m.phase = phasePicker
+		target = phasePicker
 		m.pickerBusy = true
+	}
+	if wizard.BootSplashShown {
+		m.phase = target
+	} else {
+		m.phase = phaseSplash
+		m.splashTarget = target
 	}
 	return m
 }
@@ -334,18 +344,27 @@ func New(daemon *daemonclient.Client, gateway *statusclient.Client, sessionID, c
 // context-usage fetch so the footer icon has real data as soon as the
 // screen draws.
 func (m Model) Init() tea.Cmd {
-	switch {
-	case m.phase == phasePicker:
+	if m.phase == phaseSplash {
+		return splashTickCmd()
+	}
+	return m.phaseInitCmd(m.phase)
+}
+
+func (m Model) phaseInitCmd(p phase) tea.Cmd {
+	switch p {
+	case phasePicker:
 		return tea.Batch(listSessionsCmd(m.daemon), m.spin.Tick)
-	case m.phase == phaseWizardToolsPreset:
+	case phaseWizardToolsPreset:
 		return fetchToolsCmd(m.daemon)
-	case m.wizardMode:
+	case phaseWizardEnvironment:
 		// Stage 1 of the first-run wizard runs in its own standalone
 		// program before the daemon/gateway exist — nothing here can
 		// query them yet (see wizard.go, RunWizard).
 		return textinput.Blink
+	case phaseChat:
+		return m.enterChatCmds()
 	}
-	return m.enterChatCmds()
+	return nil
 }
 
 func (m Model) enterChatCmds() tea.Cmd {
@@ -385,6 +404,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.MouseMsg:
 		return m.handleMouse(msg)
+
+	case splashTickMsg:
+		if m.phase != phaseSplash {
+			return m, nil
+		}
+		if !m.ready {
+			return m, splashTickCmd()
+		}
+		m.splashFrame++
+		if m.splashFrame >= splashTotalFrames {
+			return m.finishSplash()
+		}
+		return m, splashTickCmd()
 
 	case sessionsListMsg:
 		m.pickerBusy = false
@@ -550,6 +582,14 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, tea.Quit
 	}
+	if m.phase == phaseSplash {
+		switch msg.String() {
+		case "enter", " ", "esc":
+			return m.finishSplash()
+		default:
+			return m, nil
+		}
+	}
 	if m.phase == phasePicker {
 		return m.handlePickerKey(msg)
 	}
@@ -700,6 +740,9 @@ func (m Model) handlePickerKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // row, so hit-testing is just a column check against the same
 // right-aligned block renderFooter draws.
 func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	if m.phase == phaseSplash {
+		return m, nil
+	}
 	// Enabling mouse mode at all (needed for the footer-icon click below)
 	// takes the wheel away from the terminal's own scrollback, so we have
 	// to implement it ourselves or the transcript becomes unscrollable by

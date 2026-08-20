@@ -277,11 +277,12 @@ func (m Model) handleWizardPermissionsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // WizardResult is what Stage 1 hands back to cmd/kram's main() once its
 // standalone program exits.
 type WizardResult struct {
-	Cancelled    bool
-	Workspace    string
-	ProjectsRoot string
-	Strategy     string // "" (Auto), "smart", "round-robin"
-	PermPreset   string // "recommended", "strict", "autonomous"
+	Cancelled       bool
+	BootSplashShown bool // prevents Stage 2 from replaying boot in the same invocation
+	Workspace       string
+	ProjectsRoot    string
+	Strategy        string // "" (Auto), "smart", "round-robin"
+	PermPreset      string // "recommended", "strict", "autonomous"
 }
 
 // RunWizard runs Stage 1 (steps 1-5) as its own standalone Bubble Tea
@@ -298,13 +299,14 @@ func RunWizard(explicitWorkspace string, workspaceExplicit bool) (WizardResult, 
 	}
 	fm, ok := final.(Model)
 	if !ok || fm.wizardCancelled || !fm.wizardDone {
-		return WizardResult{Cancelled: true}, nil
+		return WizardResult{Cancelled: true, BootSplashShown: true}, nil
 	}
 	return WizardResult{
-		Workspace:    fm.wizardChosenWorkspace,
-		ProjectsRoot: fm.wizardProjectsRoot,
-		Strategy:     fm.wizardChosenStrategy,
-		PermPreset:   fm.wizardChosenPermPreset,
+		BootSplashShown: true,
+		Workspace:       fm.wizardChosenWorkspace,
+		ProjectsRoot:    fm.wizardProjectsRoot,
+		Strategy:        fm.wizardChosenStrategy,
+		PermPreset:      fm.wizardChosenPermPreset,
 	}, nil
 }
 
@@ -349,7 +351,8 @@ func newWizardModel(explicitWorkspace string, workspaceExplicit bool) Model {
 		wizardHomeDir:           home,
 		wizardProjectsRootInput: rootInput,
 		wizardWorkspaceInput:    wsInput,
-		phase:                   phaseWizardEnvironment,
+		phase:                   phaseSplash,
+		splashTarget:            phaseWizardEnvironment,
 		credStore:               credStore,
 		accountsKeyInput:        newAccountsKeyInput(),
 		customStore:             customStore,

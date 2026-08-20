@@ -12,7 +12,6 @@ import (
 // durable sessions the daemon already owns.
 func (m Model) renderPicker() string {
 	var b strings.Builder
-	b.WriteString(renderBanner(m.width, m.combo, m.workspace, len(m.sessionList)) + "\n\n")
 	b.WriteString(styleBody.Render("sessões") + "\n\n")
 
 	if m.titling {

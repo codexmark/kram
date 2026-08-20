@@ -94,6 +94,9 @@ func (m Model) View() string {
 	if !m.ready {
 		return "iniciando…"
 	}
+	if m.phase == phaseSplash {
+		return m.renderBootSplash()
+	}
 	if m.phase == phasePicker {
 		return m.renderPicker()
 	}
