@@ -2,6 +2,39 @@
 
 **A local-first coding agent runtime, multi-provider LLM gateway, and terminal workspace — built from scratch in Go.**
 
+> [!NOTE]
+> **Status: Public Beta.** Kram is ready for real-world testing while its
+> cross-platform behavior and provider compatibility continue to stabilize.
+> Read the [current beta scope](PUBLIC_BETA.md), see how to
+> [contribute](CONTRIBUTING.md), or [report a problem](https://github.com/codexmark/kram/issues/new/choose).
+
+## Install now / Instale agora mesmo
+
+**Linux / macOS**
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/codexmark/kram-releases/master/install.sh | sh
+```
+
+**Windows** — regular, non-Administrator PowerShell
+
+```powershell
+irm https://raw.githubusercontent.com/codexmark/kram-releases/master/install.ps1 | iex
+```
+
+**Android / Termux arm64**
+
+```sh
+pkg install curl tar coreutils git
+curl -fsSL https://raw.githubusercontent.com/codexmark/kram-releases/master/install.sh | sh
+```
+
+The installers select the correct prebuilt binary and verify its SHA-256
+checksum. See the [complete installation guide](#install-now--instale-agora-mesmo-1)
+for PATH details, first-run setup, supported targets, and version pinning.
+
+---
+
 Kram is a terminal-native coding agent designed to do real work inside a project: inspect code, edit files, run commands and tests, use language servers, delegate independent tasks, remember decisions across sessions, connect to MCP servers, recover workspace state, and route model calls across multiple LLM providers without tying the agent loop to any one vendor.
 
 The normal experience is intentionally simple:
