@@ -1,0 +1,120 @@
+name: Platform compatibility
+description: Report installation or runtime compatibility problems on a specific environment
+title: "[COMPAT] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this template when Kram installs, starts, or behaves differently because of the operating system, architecture, terminal, shell, or host environment. Do not post API keys, tokens, credentials, or private repository contents.
+
+  - type: input
+    id: version
+    attributes:
+      label: Kram version
+      description: Run `kram -version` and paste the result.
+      placeholder: v0.2.7
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: OS / distribution
+      placeholder: Windows 11 24H2, Fedora 43, macOS 15, Android 16 + Termux
+    validations:
+      required: true
+
+  - type: input
+    id: architecture
+    attributes:
+      label: Architecture
+      placeholder: amd64, arm64
+    validations:
+      required: true
+
+  - type: input
+    id: terminal
+    attributes:
+      label: Terminal
+      placeholder: Windows Terminal, Kitty, iTerm2, Termux
+    validations:
+      required: true
+
+  - type: input
+    id: shell
+    attributes:
+      label: Shell
+      placeholder: PowerShell 7, bash, zsh, sh
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install
+    attributes:
+      label: Installation
+      options:
+        - Succeeded
+        - Failed
+        - Not tested
+    validations:
+      required: true
+
+  - type: dropdown
+    id: startup
+    attributes:
+      label: Kram startup
+      options:
+        - Succeeded
+        - Failed
+        - Not tested
+    validations:
+      required: true
+
+  - type: dropdown
+    id: provider
+    attributes:
+      label: Provider request
+      options:
+        - Succeeded
+        - Failed
+        - Not tested
+        - Not applicable
+    validations:
+      required: true
+
+  - type: dropdown
+    id: tools
+    attributes:
+      label: Tool execution
+      options:
+        - Succeeded
+        - Failed
+        - Not tested
+        - Not applicable
+    validations:
+      required: true
+
+  - type: textarea
+    id: failure
+    attributes:
+      label: What failed?
+      description: Include the exact point where the environment stopped behaving as expected.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Install with ...
+        2. Run ...
+        3. Observe ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: output
+    attributes:
+      label: Relevant output
+      description: Sanitize logs before posting. Remove secrets, private paths when necessary, tokens, and private source code.
