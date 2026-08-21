@@ -1,3 +1,5 @@
+<img width="1280" height="640" alt="kram-social-preview" src="https://github.com/user-attachments/assets/bf0bd4aa-4a17-4f73-a145-4b36b1fc146e" />
+
 # Kram
 
 **A local-first coding agent runtime, multi-provider LLM gateway, and terminal workspace — built from scratch in Go.**
