@@ -1,0 +1,129 @@
+name: Bug report
+description: Report a reproducible problem in Kram
+title: "[BUG] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a problem. Please do not include API keys, access tokens, credentials, private repository contents, or other secrets.
+
+  - type: input
+    id: version
+    attributes:
+      label: Kram version
+      description: Run `kram -version` and paste the result.
+      placeholder: v0.2.7
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - Linux
+        - macOS
+        - Windows
+        - Android / Termux
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: architecture
+    attributes:
+      label: Architecture
+      placeholder: amd64, arm64
+    validations:
+      required: true
+
+  - type: input
+    id: terminal_shell
+    attributes:
+      label: Terminal and shell
+      description: For example Windows Terminal + PowerShell, Alacritty + zsh, Termux + sh.
+      placeholder: Windows Terminal + PowerShell 7
+
+  - type: input
+    id: provider_model
+    attributes:
+      label: Provider and model
+      description: Only include this when it is relevant. Never include credentials.
+      placeholder: OpenAI / model-name
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Agent behavior
+        - Gateway / provider
+        - Routing
+        - Tools / permissions
+        - TUI
+        - Onboarding
+        - Sessions / memory
+        - Snapshots / artifacts
+        - MCP / LSP
+        - Installer / release
+        - Platform compatibility
+        - Not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: happened
+    attributes:
+      label: What happened?
+      description: Describe the observed behavior as precisely as possible.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect?
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: Prefer the smallest sequence that reproduces the problem reliably.
+      placeholder: |
+        1. Start Kram with ...
+        2. Open ...
+        3. Run ...
+        4. Observe ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: output
+    attributes:
+      label: Relevant output or screenshots
+      description: Sanitize logs before posting. Remove credentials, private source code, tokens, and personal data.
+
+  - type: dropdown
+    id: modified_files
+    attributes:
+      label: Did Kram modify files before the failure?
+      options:
+        - "No"
+        - "Yes"
+        - "Not sure"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: reproducible
+    attributes:
+      label: Does it reproduce?
+      options:
+        - Every time
+        - Sometimes
+        - Happened once
+        - Not tested
+    validations:
+      required: true
