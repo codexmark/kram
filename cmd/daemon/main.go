@@ -38,7 +38,7 @@ func runMain(ctx context.Context, args []string, output io.Writer) error {
 	gatewayURL := fs.String("gateway", "http://127.0.0.1:20128", "base URL of a running kram-gateway")
 	model := fs.String("model", "default", "gateway combo/model used for new messages")
 	workspace := fs.String("workspace", ".", "project root the agent's tools (read/write/grep/bash) operate within")
-	maxTurns := fs.Int("max-turns", 50, "iteration budget per agent run, tool round-trips included")
+	maxTurns := fs.Int("max-turns", 50, "model calls per automatic continuation segment (4 segments maximum)")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil

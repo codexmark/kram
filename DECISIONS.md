@@ -3021,3 +3021,159 @@ read like a curve. A color crest alternates between its two cells. It replaces
 the generic inline dot spinner only for the agent's "thinking" placeholder;
 tool activity and loading states retain conventional status marks because there
 the symbol communicates operation state rather than brand identity.
+
+## The August 2026 local-model dogfood round: silence, long runs and process observability
+
+This round used Kram itself against a real LM Studio server on the user's LAN,
+then asked it to build a Rails application in a real sibling workspace. It
+exposed several failures that looked related in the TUI but belonged to
+different layers. Recording the separation matters: treating all of them as
+"the local model is weak" would have hidden multiple Kram defects.
+
+### OpenAI-compatible does not mean identical chat-template constraints
+
+Qwen 3.5 behind LM Studio rejected Kram's request with `System message must be
+at the beginning`. The Prompt Compiler intentionally produces several system
+messages (base instructions, generated tools overview, project instructions,
+memory and runtime reminders). OpenAI accepts that shape; this local chat
+template required exactly one leading system message.
+
+**Decision:** preserve the Prompt Compiler's structured messages internally and
+merge every system message into one leading message only at the
+`OpenAICompatible` adapter boundary. Anthropic and Gemini already normalize
+their system material at their own boundaries for the same architectural
+reason. Flattening the compiler itself would make one provider's limitation
+erase useful provider-independent structure.
+
+The same live run found LM Studio returning an `{"error": ...}` object inside
+an HTTP-200 SSE stream. The adapter previously skipped it as a chunk with no
+choices, eventually producing an empty/meaningless completion. It now converts
+that payload into `StreamEvent.Err`, so routing and fallback see a real failure.
+
+### Literal tool-call markup is a provider defect, but raw XML is still Kram's responsibility
+
+The local model sometimes printed `<tool_call><function=...>` as assistant text
+instead of returning structured `tool_calls`. At the old final-turn boundary
+tools were absent, so the parser had no allowlist and the protocol markup leaked
+directly into the transcript.
+
+**Decision:** recover only a whole-response, syntactically complete, allowlisted
+tool call. Ordinary prose containing a tag is never executed. Before the final
+budget boundary the recovered call is normalized and the loop continues; at
+the boundary it is replaced by an explicit stop explaining which tool the model
+was still trying to call. This is intentionally narrow: a permissive parser
+would turn untrusted prose into actions.
+
+### Fifty model calls is a segment, not task completion
+
+The Rails run reached the old `MaxTurns=50` while still working. A hard stop at
+that number confused an emergency runaway guard with evidence that the user's
+task was finished.
+
+**Decision:** `MaxTurns` now sizes one automatic segment. The default run has
+four 50-call segments and keeps the existing tool-free soft landing only for
+the final 200-call emergency ceiling. This is not an unbounded loop: Kram
+compares consecutive tool name + arguments + result. On the third identical
+observation it injects a strategy-change guard into the tool result; on the
+fourth it persists a clear blocker and stops. Repeated `process_output` results
+marked `[still running]` are exempt because polling a legitimately running job
+is observable waiting, not stagnation.
+
+The first implementation reported each continuation as a persistent English
+`notice`. A live screenshot showed the subtle UI failure: the notices rendered
+*below* the animated K, visually displacing the activity surface and making the
+animation look dead. The fact was correct; the channel was wrong.
+
+**Correction:** segment boundaries are a distinct structured `segment` event.
+The CLI folds `segmento 2/4` into the live activity line and never appends it to
+conversation history. Ephemeral operational state must not masquerade as a
+durable transcript notice.
+
+### Activity is runtime telemetry, never model-authored narration
+
+`pensando` and especially `ainda trabalhando (sem resposta)` made a healthy
+buffered call feel stalled. Asking the model to emit "I am doing X" updates
+would spend tokens, pollute history, disturb prefix caching and still be
+unreliable.
+
+**Decision:** the activity line is a local state machine driven only by real
+events Kram already has: `PREPARANDO ROTA`, `MODELO ATIVO`, `EXECUTANDO · tool`,
+`ANALISANDO RESULTADO` and `ESCREVENDO`. A moving rail and elapsed timer animate
+locally. Buffered-call heartbeats increment a visible pulse without claiming
+which provider-internal step is happening. Only when even those events stop for
+the stall threshold does the label become the precise symptom `CONEXÃO SEM
+EVENTOS`, including time since the last event. No prompt or model token is used.
+
+### A background process needs a user observation path that bypasses the model
+
+`process_output` gave the model access to captured stdout/stderr, but the user
+could see it only when the model chose to spend another call polling that tool.
+That coupled basic observability to model quality, consumed tokens, and made a
+quiet model look like a quiet process. The old `bg25` also disappeared after a
+daemon restart, which was correct lifecycle behavior but not obvious in the UI.
+
+**Decision:** the daemon exposes a read-only structured process list and
+cursor-based output snapshots to its existing local control client. The TUI's
+`Ctrl+B` observer polls only while open. Wide terminals tile conversation and
+process output; narrow terminals use a full-width process tab. A structured
+`ProcessID` travels with a successful `run_background` tool result, making its
+`bgN` transcript row clickable without scraping presentation text.
+
+The output contract handles the non-happy paths explicitly:
+
+- the daemon retains a bounded 500 KB tail and reports when the beginning was
+  discarded;
+- each poll transfers at most 64 KB and advances an absolute byte cursor;
+- a cursor behind retained data, ahead of a replaced stream, or separated by
+  more than one chunk produces `reset=true`, telling the UI to replace rather
+  than corrupt its local tail;
+- response generations discard late HTTP results after close/process switch;
+- manual scroll disables follow and counts new bytes until `End` returns to the
+  tail;
+- stdout is ANSI/control sanitized before rendering, preventing a child process
+  from injecting terminal control sequences into Kram's alternate screen;
+- an alive process with no output is shown as alive with no output. Kram cannot
+  truthfully infer internal work a program does not expose;
+- finished processes remain inspectable until daemon shutdown; shutdown still
+  kills every running tracked process tree, and `bgN` IDs are deliberately not
+  durable across daemon lifetimes;
+- the observer is read-only. Killing stays behind the existing permission-gated
+  `process_kill` tool rather than adding a second destructive control path.
+
+The daemon's HTTP surface already exposes session contents and control to its
+configured listener, so process output does not introduce a new trust boundary;
+operators who bind the daemon beyond localhost must treat that existing control
+surface as sensitive either way.
+
+### Mouse mode owns wheel and selection behavior
+
+Bubble Tea's cell-motion mouse mode is required for clickable panels, but once
+enabled it captures wheel and drag events the terminal would otherwise use for
+scrollback/selection. The observed "scroll does not work" and "I cannot simply
+select to copy" were therefore TUI ownership bugs, not terminal bugs.
+
+**Decision:** wheel events scroll the focused viewport; transcript refreshes
+follow the bottom only if the user was already at the bottom, so animation and
+streaming never snap a deliberate inspection back down. Drag selection uses an
+ANSI-free snapshot of the visible viewport, copies through OSC 52 on release,
+and shows a short footer confirmation. The same behavior applies to the process
+output viewport. This is preferable to documenting a terminal-specific Shift
+bypass because automatic selection was the requested cross-terminal behavior.
+
+### Workspace confinement accepts absolute paths, but never sibling escape
+
+The Rails target existed as a sibling of the workspace Kram had actually been
+launched in. The model repeatedly called the same missing relative directory,
+which helped expose the stagnation problem above. An absolute path to the
+*current* workspace was also rejected even though it did not escape confinement.
+
+**Decision:** file tools accept relative paths and absolute paths that resolve
+inside the configured workspace. Absolute sibling/outside paths remain denied.
+The correct way to work on a sibling project is still to launch Kram with that
+project as its workspace; relaxing containment would turn a convenience fix
+into a sandbox escape.
+
+One operational issue was intentionally not encoded into Kram: Rails and
+Bundler installed into Ruby's user-gem bin directory, which the host shell did
+not have on `PATH`. Local symlinks fixed that machine. Kram should report such a
+command-resolution problem, not mutate a user's shell profile automatically.

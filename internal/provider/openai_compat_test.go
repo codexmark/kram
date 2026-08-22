@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -11,6 +12,64 @@ import (
 
 	"github.com/codexmark/kram/internal/openai"
 )
+
+func TestOpenAICompatMergesSystemMessagesIntoOneLeadingMessage(t *testing.T) {
+	var received openai.ChatCompletionRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&received); err != nil {
+			t.Errorf("decoding request: %v", err)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer srv.Close()
+
+	p := NewOpenAICompatible("test", srv.URL, "", "", capabilities{})
+	events, err := p.ChatCompletion(context.Background(), openai.ChatCompletionRequest{Messages: []openai.ChatMessage{
+		{Role: "system", Content: "base"},
+		{Role: "system", Content: "tools"},
+		{Role: "user", Content: "first"},
+		{Role: "assistant", Content: "answer"},
+		{Role: "system", Content: "runtime reminder"},
+		{Role: "user", Content: "second"},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = collectEvents(t, events)
+
+	if len(received.Messages) != 4 {
+		t.Fatalf("messages = %+v, want one merged system plus three conversation messages", received.Messages)
+	}
+	if received.Messages[0].Role != "system" || received.Messages[0].Content != "base\n\ntools\n\nruntime reminder" {
+		t.Fatalf("merged system message = %+v", received.Messages[0])
+	}
+	roles := []string{received.Messages[1].Role, received.Messages[2].Role, received.Messages[3].Role}
+	if fmt.Sprint(roles) != "[user assistant user]" {
+		t.Fatalf("non-system order changed: %v", roles)
+	}
+}
+
+func TestOpenAICompatSurfacesSSEErrorEnvelope(t *testing.T) {
+	srv := sseServer(t, []string{
+		`{"error":{"message":"System message must be at the beginning"}}`,
+	})
+	defer srv.Close()
+
+	p := NewOpenAICompatible("lmstudio", srv.URL, "", "", capabilities{})
+	events, err := p.ChatCompletion(context.Background(), openai.ChatCompletionRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := collectEvents(t, events)
+	if len(got) != 1 || got[0].Err == nil {
+		t.Fatalf("expected exactly one stream error event, got %+v", got)
+	}
+	if want := "lmstudio: upstream stream error: System message must be at the beginning"; got[0].Err.Error() != want {
+		t.Fatalf("stream error = %q, want %q", got[0].Err, want)
+	}
+}
 
 // sseServer returns an httptest.Server that streams the given raw SSE
 // "data:" lines verbatim, terminated by "[DONE]" — enough to drive

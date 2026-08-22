@@ -19,6 +19,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/codexmark/kram/internal/cli/daemonclient"
 	"github.com/codexmark/kram/internal/cli/statusclient"
@@ -76,6 +77,7 @@ const (
 	panelStrategy
 	panelContext
 	panelRoute
+	panelProcesses
 )
 
 type chatMessage struct {
@@ -92,6 +94,19 @@ type chatMessage struct {
 	streaming bool
 }
 
+// workState is driven exclusively by daemon events already produced for the
+// current run. It gives the animation honest, token-free vocabulary without
+// asking the model to narrate intentions it may not actually follow.
+type workState int
+
+const (
+	workPreparing workState = iota
+	workModelActive
+	workToolActive
+	workAnalyzingResult
+	workWriting
+)
+
 // Model is the CLI's full Bubble Tea state.
 type Model struct {
 	daemon    *daemonclient.Client
@@ -103,7 +118,11 @@ type Model struct {
 
 	input    textarea.Model // multi-line, word-wraps long messages instead of scrolling off-screen — see inputHeight
 	viewport viewport.Model
-	spin     spinner.Model
+	// processViewport scrolls independently from the transcript when the
+	// Ctrl+B observer is open. The daemon remains the source of truth; this
+	// viewport only owns the currently retained presentation tail.
+	processViewport viewport.Model
+	spin            spinner.Model
 
 	messages []chatMessage
 	waiting  bool
@@ -135,7 +154,30 @@ type Model struct {
 	contextErr  error
 	haveContext bool
 
+	processes           []daemonclient.BackgroundProcess
+	processSelected     string
+	processErr          error
+	processLoading      bool
+	processGeneration   int
+	processLogs         map[string]string
+	processCursors      map[string]int64
+	processHaveCursor   map[string]bool
+	processLogTruncated map[string]bool
+	processFollow       bool
+	processNewBytes     int
+	processLinkRows     map[int]string // absolute transcript row -> background process ID
+	selectionInProcess  bool
+
 	animFrame int
+	// Mouse selection belongs to the app because enabling terminal mouse
+	// tracking (needed for scrolling and clickable panels) disables native
+	// drag selection. We snapshot the visible, ANSI-free viewport on press,
+	// copy the selected cells through OSC 52 on release, and leave a short
+	// confirmation in the footer.
+	selection          textSelection
+	clipboardSequence  string
+	copyNotice         string
+	copyNoticeRevision int
 	// waitStartedAt/lastEventAt drive the rich status line (elapsed time)
 	// and stalled-connection detection while a turn is in flight — real
 	// signal, not just an animated glyph implying progress that may not
@@ -143,6 +185,12 @@ type Model struct {
 	// thinkingLine for why this matters.
 	waitStartedAt time.Time
 	lastEventAt   time.Time
+	workState     workState
+	activeTool    string
+	toolStartedAt time.Time
+	heartbeats    int
+	segment       int
+	segments      int
 
 	width, height int
 	ready         bool
@@ -310,9 +358,12 @@ func New(daemon *daemonclient.Client, gateway *statusclient.Client, sessionID, c
 	m := Model{
 		daemon: daemon, gateway: gateway, combo: combo, workspace: workspace, sessionID: sessionID,
 		input: ti, newSessionText: titleInput, accountsKeyInput: keyInput, questionInput: answerInput,
-		viewport: viewport.New(80, 20), spin: sp,
+		viewport: viewport.New(80, 20), processViewport: viewport.New(36, 20), spin: sp,
 		credStore: credStore, toolSettings: toolSettings,
 		customStore: customStore, customProviders: customProviders,
+		processLogs: make(map[string]string), processCursors: make(map[string]int64),
+		processHaveCursor: make(map[string]bool), processLogTruncated: make(map[string]bool), processFollow: true,
+		processLinkRows: make(map[int]string),
 	}
 	target := phasePicker
 	switch {
@@ -392,11 +443,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.syncViewportSize()
-		if m.mdRenderer == nil || m.mdWidth != m.width {
-			m.mdRenderer = newMarkdownRenderer(m.width)
-			m.mdWidth = m.width
-			m.refreshTranscript()
-		}
+		m.syncTranscriptRenderer()
 		return m, nil
 
 	case tea.KeyMsg:
@@ -476,6 +523,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.haveContext = true
 		}
 		return m, nil
+
+	case processSnapshotMsg:
+		return m.applyProcessSnapshot(msg)
+
+	case processPollTickMsg:
+		if m.active != panelProcesses || msg.generation != m.processGeneration {
+			return m, nil
+		}
+		return m, fetchProcessSnapshotCmd(m.daemon, m.processSelected, m.processCursor(), m.processGeneration)
 
 	case pingResultsMsg:
 		m.accountsPinging = false
@@ -560,6 +616,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.refreshTranscript() // keeps the transcript's thinking line in step with the footer
 		return m, animTickCmd()
 
+	case clipboardSequenceClearMsg:
+		m.clipboardSequence = ""
+		return m, nil
+
+	case copyNoticeClearMsg:
+		if msg.revision == m.copyNoticeRevision {
+			m.copyNotice = ""
+		}
+		return m, nil
+
 	case spinner.TickMsg:
 		if !m.waiting && !m.pickerBusy {
 			return m, nil
@@ -637,14 +703,66 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "ctrl+r":
 		return m.togglePanel(panelRoute)
 
+	case "ctrl+b":
+		return m.togglePanel(panelProcesses)
+
 	case "esc":
+		if m.active == panelProcesses {
+			m.closeProcessPanel()
+			return m, nil
+		}
 		if m.active != panelNone {
 			m.active = panelNone
 			m.syncViewportSize()
+			m.syncTranscriptRenderer()
 		}
 		return m, nil
 
+	case "tab":
+		if m.active == panelProcesses {
+			return m.selectAdjacentProcess(1)
+		}
+
+	case "shift+tab":
+		if m.active == panelProcesses {
+			return m.selectAdjacentProcess(-1)
+		}
+
+	case "pgup":
+		if m.active == panelProcesses {
+			m.processFollow = false
+			m.processViewport.HalfViewUp()
+			return m, nil
+		}
+
+	case "pgdown":
+		if m.active == panelProcesses {
+			m.processViewport.HalfViewDown()
+			m.resumeProcessFollowIfAtBottom()
+			return m, nil
+		}
+
+	case "home":
+		if m.active == panelProcesses {
+			m.processFollow = false
+			m.processViewport.GotoTop()
+			return m, nil
+		}
+
+	case "end":
+		if m.active == panelProcesses {
+			m.processFollow = true
+			m.processNewBytes = 0
+			m.processViewport.GotoBottom()
+			return m, nil
+		}
+
 	case "up":
+		if m.active == panelProcesses {
+			m.processFollow = false
+			m.processViewport.LineUp(1)
+			return m, nil
+		}
 		if m.active == panelStrategy {
 			if m.strategyFocus > 0 {
 				m.strategyFocus--
@@ -655,6 +773,11 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case "down":
+		if m.active == panelProcesses {
+			m.processViewport.LineDown(1)
+			m.resumeProcessFollowIfAtBottom()
+			return m, nil
+		}
 		if m.active == panelStrategy {
 			combo := m.currentCombo()
 			if combo != nil && m.strategyFocus < len(combo.Providers)-1 {
@@ -666,6 +789,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case "enter":
+		if m.active == panelProcesses {
+			return m, nil
+		}
 		if m.active != panelNone {
 			m.active = panelNone
 			m.syncViewportSize()
@@ -734,29 +860,101 @@ func (m Model) handlePickerKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// handleMouse implements the "discreet clickable icon" affordance: the
-// context-usage badge on the footer's bottom-right is a real click target,
-// not just a keyboard shortcut. The footer is always the terminal's last
-// row, so hit-testing is just a column check against the same
-// right-aligned block renderFooter draws.
+// handleMouse owns wheel scrolling, drag-to-copy inside the transcript, and
+// the footer's clickable context badge. Terminal-native selection is not
+// available while a TUI has mouse tracking enabled, so drag selection is
+// deliberately implemented here instead of requiring the terminal-specific
+// Shift bypass.
 func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	if m.phase == phaseSplash {
 		return m, nil
 	}
-	// Enabling mouse mode at all (needed for the footer-icon click below)
-	// takes the wheel away from the terminal's own scrollback, so we have
-	// to implement it ourselves or the transcript becomes unscrollable by
-	// mouse entirely. Text selection is unaffected by any of this — every
-	// mainstream terminal (GNOME Terminal, kitty, Alacritty, foot, xterm)
-	// lets you hold Shift while dragging to bypass an app's mouse capture
-	// and select natively, same as it would for any other TUI.
+	viewportRow := msg.Y - routeBarHeight
+	insideBody := viewportRow >= 0 && viewportRow < m.viewport.Height
+	inProcessPane := m.active == panelProcesses && insideBody && (!m.processUsesTile() || msg.X > m.viewport.Width)
+	processX := msg.X
+	if m.processUsesTile() {
+		processX -= m.viewport.Width + 1
+	}
+	processOutputRow := viewportRow - m.processOutputStartRow()
+
 	if msg.Button == tea.MouseButtonWheelUp {
+		if inProcessPane {
+			m.processFollow = false
+			m.processViewport.LineUp(3)
+			return m, nil
+		}
 		m.viewport.LineUp(3)
 		return m, nil
 	}
 	if msg.Button == tea.MouseButtonWheelDown {
+		if inProcessPane {
+			m.processViewport.LineDown(3)
+			m.resumeProcessFollowIfAtBottom()
+			return m, nil
+		}
 		m.viewport.LineDown(3)
 		return m, nil
+	}
+
+	switch msg.Action {
+	case tea.MouseActionPress:
+		if msg.Button == tea.MouseButtonLeft && inProcessPane {
+			indices := m.visibleProcessIndices()
+			listIndex := viewportRow - 1
+			if listIndex >= 0 && listIndex < len(indices) {
+				return m.selectProcess(m.processes[indices[listIndex]].ID)
+			}
+			if processOutputRow >= 0 && processOutputRow < m.processViewport.Height {
+				m.copyNoticeRevision++
+				m.copyNotice = ""
+				m.selectionInProcess = true
+				m.selection = beginTextSelection(m.processViewport.View(), processX, processOutputRow)
+			}
+			return m, nil
+		}
+		insideTranscript := insideBody && m.active != panelProcesses || (insideBody && m.processUsesTile() && msg.X < m.viewport.Width)
+		if msg.Button == tea.MouseButtonLeft && insideTranscript {
+			m.copyNoticeRevision++ // invalidate a previous copy's pending clear timer
+			m.copyNotice = ""
+			m.selectionInProcess = false
+			m.selection = beginTextSelection(m.viewport.View(), msg.X, viewportRow)
+			return m, nil
+		}
+	case tea.MouseActionMotion:
+		if m.selection.active {
+			if m.selectionInProcess {
+				m.selection.move(processX, clampInt(processOutputRow, 0, m.processViewport.Height-1))
+			} else {
+				m.selection.move(msg.X, clampInt(viewportRow, 0, m.viewport.Height-1))
+			}
+			m.copyNotice = fmt.Sprintf("selecionando %d caracteres…", len([]rune(m.selection.text())))
+			return m, nil
+		}
+	case tea.MouseActionRelease:
+		if m.selection.active {
+			if m.selectionInProcess {
+				m.selection.move(processX, clampInt(processOutputRow, 0, m.processViewport.Height-1))
+			} else {
+				m.selection.move(msg.X, clampInt(viewportRow, 0, m.viewport.Height-1))
+			}
+			selected := m.selection.text()
+			m.selection.active = false
+			if selected == "" {
+				m.copyNotice = ""
+				if !m.selectionInProcess {
+					row := m.viewport.YOffset + clampInt(viewportRow, 0, m.viewport.Height-1)
+					if id := m.processLinkRows[row]; id != "" {
+						return m.openProcessPanel(id)
+					}
+				}
+				return m, nil
+			}
+			m.clipboardSequence = ansi.SetSystemClipboard(selected)
+			m.copyNoticeRevision++
+			m.copyNotice = fmt.Sprintf("✓ copiado · %d caracteres", len([]rune(selected)))
+			return m, tea.Batch(clearClipboardSequenceCmd(), clearCopyNoticeCmd(m.copyNoticeRevision))
+		}
 	}
 
 	if msg.Action != tea.MouseActionPress || msg.Button != tea.MouseButtonLeft {
@@ -775,12 +973,24 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 
 func (m Model) togglePanel(p panel) (tea.Model, tea.Cmd) {
 	if m.active == p {
-		m.active = panelNone
-		m.syncViewportSize()
+		if p == panelProcesses {
+			m.closeProcessPanel()
+		} else {
+			m.active = panelNone
+			m.syncViewportSize()
+			m.syncTranscriptRenderer()
+		}
 		return m, nil
+	}
+	if p == panelProcesses {
+		return m.openProcessPanel(m.processSelected)
+	}
+	if m.active == panelProcesses {
+		m.processGeneration++
 	}
 	m.active = p
 	m.syncViewportSize()
+	m.syncTranscriptRenderer()
 	switch p {
 	case panelStrategy:
 		m.strategyFocus = 0
@@ -805,10 +1015,16 @@ func (m Model) submit() (tea.Model, tea.Cmd) {
 	m.animFrame = 0
 	m.waitStartedAt = time.Now()
 	m.lastEventAt = time.Now()
+	m.workState = workPreparing
+	m.activeTool = ""
+	m.heartbeats = 0
+	m.segment = 1
+	m.segments = 0
 	m.err = nil
 	m.routeRunning = false
 	m.routeCall = nil
 	m.refreshTranscript()
+	m.viewport.GotoBottom()
 	return m, tea.Batch(startSendMessageCmd(m.daemon, m.sessionID, text), animTickCmd(), m.spin.Tick)
 }
 
@@ -846,12 +1062,16 @@ func (m Model) handleStreamEvent(msg streamEventMsg) (tea.Model, tea.Cmd) {
 
 	switch msg.event.Type {
 	case "delta":
+		m.workState = workWriting
 		if lm := last(); lm != nil {
 			lm.Content += msg.event.Content
 		}
 		m.refreshTranscript()
 
 	case "tool_start":
+		m.workState = workToolActive
+		m.activeTool = msg.event.Name
+		m.toolStartedAt = time.Now()
 		if lm := last(); lm != nil {
 			lm.ToolActivity = append(lm.ToolActivity, daemonclient.ToolActivity{
 				Name: msg.event.Name, Args: msg.event.Args, Running: true,
@@ -860,11 +1080,14 @@ func (m Model) handleStreamEvent(msg streamEventMsg) (tea.Model, tea.Cmd) {
 		m.refreshTranscript()
 
 	case "tool_result":
+		m.workState = workAnalyzingResult
+		m.activeTool = ""
 		if lm := last(); lm != nil {
 			for i := len(lm.ToolActivity) - 1; i >= 0; i-- {
 				if lm.ToolActivity[i].Name == msg.event.Name && lm.ToolActivity[i].Running {
 					lm.ToolActivity[i].Result = msg.event.Result
 					lm.ToolActivity[i].OK = msg.event.OK
+					lm.ToolActivity[i].ProcessID = msg.event.ProcessID
 					lm.ToolActivity[i].Running = false
 					break
 				}
@@ -899,9 +1122,23 @@ func (m Model) handleStreamEvent(msg streamEventMsg) (tea.Model, tea.Cmd) {
 		// happens inside one HTTP round-trip), so the route bar animates
 		// the known candidate count until route_done lands.
 		m.routeRunning = true
+		m.workState = workModelActive
+
+	case "heartbeat":
+		// A payload-free heartbeat is still a real fact: the buffered model
+		// call and daemon stream are alive. It advances the pulse counter but
+		// deliberately invents no finer-grained provider/model activity.
+		m.heartbeats++
+
+	case "segment":
+		if msg.event.Segment > 0 && msg.event.Segments >= msg.event.Segment {
+			m.segment = msg.event.Segment
+			m.segments = msg.event.Segments
+		}
 
 	case "route_done":
 		m.routeRunning = false
+		m.activeTool = ""
 		m.routeCall = msg.event.RouteCall
 
 	case "done":
@@ -969,16 +1206,29 @@ func (m Model) currentCombo() *statusclient.Combo {
 
 func (m *Model) syncViewportSize() {
 	reserved := routeBarHeight + footerHeight + inputHeight
-	if m.active != panelNone {
+	if m.active != panelNone && m.active != panelProcesses {
 		reserved += m.panelHeight()
 	}
 	h := m.height - reserved
 	if h < 3 {
 		h = 3
 	}
-	m.viewport.Width = m.width
+	m.viewport.Width = m.chatViewportWidth()
 	m.viewport.Height = h
+	m.syncProcessViewport()
 	m.input.SetWidth(m.width - 2)
+}
+
+func (m *Model) syncTranscriptRenderer() {
+	width := m.viewport.Width
+	if width < 1 {
+		width = 1
+	}
+	if m.mdRenderer == nil || m.mdWidth != width {
+		m.mdRenderer = newMarkdownRenderer(width)
+		m.mdWidth = width
+		m.refreshTranscript()
+	}
 }
 
 func (m *Model) panelHeight() int {

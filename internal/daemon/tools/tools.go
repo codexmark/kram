@@ -57,6 +57,24 @@ func (r *Registry) StopBackgroundProcesses() {
 	}
 }
 
+// BackgroundProcesses exposes read-only process metadata to the daemon's
+// local control surface. Mutation remains confined to process_kill and daemon
+// shutdown, preserving the permission boundary around destructive actions.
+func (r *Registry) BackgroundProcesses() []BackgroundProcessInfo {
+	if r.processes == nil {
+		return nil
+	}
+	return r.processes.infos()
+}
+
+// BackgroundProcessOutput returns an incremental output snapshot for id.
+func (r *Registry) BackgroundProcessOutput(id string, cursor *int64) (BackgroundProcessOutput, bool) {
+	if r.processes == nil {
+		return BackgroundProcessOutput{}, false
+	}
+	return r.processes.output(id, cursor)
+}
+
 // StopLSPServers shuts down every language server this registry's LSP
 // tools started, if any — called on daemon shutdown for the same reason
 // as StopBackgroundProcesses: a language server is a subprocess Kram
@@ -373,8 +391,11 @@ func resolvePath(workspace, userPath string) (string, error) {
 	if userPath == "" {
 		userPath = "."
 	}
-	joined := filepath.Join(workspace, userPath)
-	cleaned := filepath.Clean(joined)
+	candidate := userPath
+	if !filepath.IsAbs(candidate) {
+		candidate = filepath.Join(workspace, candidate)
+	}
+	cleaned := filepath.Clean(candidate)
 
 	root := filepath.Clean(workspace)
 	if cleaned != root && !strings.HasPrefix(cleaned, root+string(filepath.Separator)) {

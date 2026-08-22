@@ -81,7 +81,7 @@ func runMain(args []string, stdout, stderr io.Writer) error {
 	combo := fs.String("model", "default", "gateway combo used for messages in this session")
 	sessionID := fs.String("session", "", "resume an existing session ID instead of starting a new one")
 	title := fs.String("title", "", "title for a newly created session")
-	maxTurns := fs.Int("max-turns", 50, "iteration budget per agent run, tool round-trips included")
+	maxTurns := fs.Int("max-turns", 50, "model calls per automatic continuation segment (4 segments maximum)")
 	gatewayPort := fs.Int("gateway-port", 0, "gateway port (0 = pick a free port)")
 	daemonPort := fs.Int("daemon-port", 0, "daemon port (0 = pick a free port)")
 	showVersion := fs.Bool("version", false, "print the version and exit")

@@ -45,13 +45,13 @@ func TestThinkingKStalledStateAndModuloEdges(t *testing.T) {
 
 func TestThinkingLineDistinguishesProgressFromStall(t *testing.T) {
 	now := time.Now()
-	working := Model{waitStartedAt: now.Add(-2 * time.Second), lastEventAt: now, animFrame: 2}
-	if got := working.thinkingLine(); !strings.Contains(got, thinkingKPlain()) || !strings.Contains(got, "pensando") {
+	working := Model{waitStartedAt: now.Add(-2 * time.Second), lastEventAt: now, animFrame: 2, workState: workModelActive}
+	if got := working.thinkingLine(); !strings.Contains(got, thinkingKPlain()) || !strings.Contains(got, "MODELO ATIVO") {
 		t.Fatalf("working line = %q", got)
 	}
 
 	stalled := Model{waitStartedAt: now.Add(-10 * time.Second), lastEventAt: now.Add(-stallThreshold - time.Second)}
-	if got := stalled.thinkingLine(); !strings.Contains(got, thinkingKPlain()) || !strings.Contains(got, "sem resposta") {
+	if got := stalled.thinkingLine(); !strings.Contains(got, thinkingKPlain()) || !strings.Contains(got, "CONEXÃO SEM EVENTOS") {
 		t.Fatalf("stalled line = %q", got)
 	}
 }

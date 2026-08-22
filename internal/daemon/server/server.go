@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/codexmark/kram/internal/daemon/agent"
@@ -44,6 +45,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /sessions/{id}/approve", s.handleAnswerApproval)
 	mux.HandleFunc("GET /tools", s.handleListTools)
 	mux.HandleFunc("PUT /tools/settings", s.handleUpdateToolSettings)
+	mux.HandleFunc("GET /processes", s.handleListProcesses)
+	mux.HandleFunc("GET /processes/{id}/output", s.handleProcessOutput)
 	return s.recoverMiddleware(s.logMiddleware(mux))
 }
 
@@ -191,7 +194,10 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 		case agent.EventToolStart:
 			writeEvent(map[string]any{"type": "tool_start", "name": evt.ToolName, "args": evt.ToolArgs})
 		case agent.EventToolResult:
-			writeEvent(map[string]any{"type": "tool_result", "name": evt.ToolName, "result": evt.ToolResult, "ok": evt.ToolOK})
+			writeEvent(map[string]any{
+				"type": "tool_result", "name": evt.ToolName, "result": evt.ToolResult,
+				"ok": evt.ToolOK, "process_id": evt.ProcessID,
+			})
 		case agent.EventNotice:
 			writeEvent(map[string]any{"type": "notice", "text": evt.Notice})
 		case agent.EventQuestion:
@@ -211,6 +217,8 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 			// type: it still resets any "time since last event" clock the
 			// same way every other frame on this stream already does.
 			writeEvent(map[string]any{"type": "heartbeat"})
+		case agent.EventSegment:
+			writeEvent(map[string]any{"type": "segment", "segment": evt.Segment, "segments": evt.Segments})
 		}
 	}
 
@@ -311,6 +319,28 @@ func (s *Server) handleUpdateToolSettings(w http.ResponseWriter, r *http.Request
 	}
 	s.agent.ReplaceDisabledTools(req.Disabled)
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (s *Server) handleListProcesses(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, s.agent.BackgroundProcesses())
+}
+
+func (s *Server) handleProcessOutput(w http.ResponseWriter, r *http.Request) {
+	var cursor *int64
+	if raw := r.URL.Query().Get("cursor"); raw != "" {
+		value, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil || value < 0 {
+			writeError(w, http.StatusBadRequest, "cursor must be a non-negative integer")
+			return
+		}
+		cursor = &value
+	}
+	output, ok := s.agent.BackgroundProcessOutput(r.PathValue("id"), cursor)
+	if !ok {
+		writeError(w, http.StatusNotFound, "background process not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, output)
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

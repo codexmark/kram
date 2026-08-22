@@ -31,7 +31,7 @@ func coverageService(t *testing.T) *Service {
 
 func TestConfigDefaultsAndServiceRegistryPassthrough(t *testing.T) {
 	c := (Config{}).withDefaults()
-	if c.MaxTurns != 50 || c.MaxCompactionsPerRun != 3 || c.MaxContextTokens == 0 || c.MaxGatewayRounds == 0 {
+	if c.MaxTurns != 50 || c.MaxSegmentsPerRun != 4 || c.MaxCompactionsPerRun != 3 || c.MaxContextTokens == 0 || c.MaxGatewayRounds == 0 {
 		t.Fatalf("defaults = %+v", c)
 	}
 	s := coverageService(t)

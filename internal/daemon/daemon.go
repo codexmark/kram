@@ -32,7 +32,7 @@ type Config struct {
 	GatewayURL string
 	Model      string // gateway combo used for new messages
 	Workspace  string // project root the agent's tools operate within
-	MaxTurns   int    // iteration budget per agent run
+	MaxTurns   int    // model calls per automatic continuation segment
 }
 
 // Run opens the store, builds the agent loop, and serves the daemon's

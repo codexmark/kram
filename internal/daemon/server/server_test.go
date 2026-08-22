@@ -3,12 +3,14 @@ package server
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/codexmark/kram/internal/daemon/agent"
 	"github.com/codexmark/kram/internal/daemon/gatewayclient"
@@ -23,6 +25,11 @@ import (
 // — the same construction daemon.Run does, just with a fake upstream.
 // Mirrors internal/daemon/agent/promptassembly_test.go's newTestService.
 func newTestServer(t *testing.T, script []openai.ChatCompletionResponse) *Server {
+	srv, _ := newTestServerWithRegistry(t, script)
+	return srv
+}
+
+func newTestServerWithRegistry(t *testing.T, script []openai.ChatCompletionResponse) (*Server, *tools.Registry) {
 	t.Helper()
 	workspace := t.TempDir()
 	st, err := store.Open(filepath.Join(workspace, "test.db"))
@@ -46,7 +53,7 @@ func newTestServer(t *testing.T, script []openai.ChatCompletionResponse) *Server
 	agentSvc := agent.New(st, gw, tr, agent.Config{Workspace: workspace, MaxTurns: 10})
 	sessSvc := session.New(st)
 
-	return New(sessSvc, agentSvc, nil)
+	return New(sessSvc, agentSvc, nil), tr
 }
 
 func TestHandleHealthReturnsOK(t *testing.T) {
@@ -442,6 +449,65 @@ func TestContextUsageIsReachableForRealSession(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("status = %d, want 200 for a real session's context usage", resp.StatusCode)
+	}
+}
+
+func TestProcessObserverEndpointsListIncrementalOutputAndRejectBadCursors(t *testing.T) {
+	srv, registry := newTestServerWithRegistry(t, nil)
+	if _, err := registry.Execute(context.Background(), "run_background", json.RawMessage(`{"command":"printf panel-ready"}`)); err != nil {
+		t.Fatal(err)
+	}
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	listResp, err := http.Get(ts.URL + "/processes")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listResp.Body.Close()
+	var processes []tools.BackgroundProcessInfo
+	if err := json.NewDecoder(listResp.Body).Decode(&processes); err != nil || len(processes) != 1 || processes[0].ID != "bg1" {
+		t.Fatalf("process list = %+v, err=%v", processes, err)
+	}
+
+	var output tools.BackgroundProcessOutput
+	waitUntil := time.Now().Add(2 * time.Second)
+	for time.Now().Before(waitUntil) {
+		resp, getErr := http.Get(ts.URL + "/processes/bg1/output")
+		if getErr != nil {
+			t.Fatal(getErr)
+		}
+		decodeErr := json.NewDecoder(resp.Body).Decode(&output)
+		resp.Body.Close()
+		if decodeErr != nil {
+			t.Fatal(decodeErr)
+		}
+		if strings.Contains(output.Output, "panel-ready") {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !strings.Contains(output.Output, "panel-ready") || !output.Reset {
+		t.Fatalf("initial output = %+v", output)
+	}
+
+	for _, path := range []string{"/processes/bg1/output?cursor=-1", "/processes/bg1/output?cursor=nope"} {
+		resp, err := http.Get(ts.URL + path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Errorf("%s status = %d, want 400", path, resp.StatusCode)
+		}
+	}
+	missing, err := http.Get(ts.URL + "/processes/bg404/output")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer missing.Body.Close()
+	if missing.StatusCode != http.StatusNotFound {
+		t.Errorf("missing process status = %d, want 404", missing.StatusCode)
 	}
 }
 

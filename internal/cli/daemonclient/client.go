@@ -11,6 +11,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -80,11 +82,12 @@ func (c *Client) GetSession(ctx context.Context, id string) (Session, []Message,
 // wire) — true from the moment a tool_start event arrives until its
 // matching tool_result lands.
 type ToolActivity struct {
-	Name    string `json:"name"`
-	Args    string `json:"args"`
-	Result  string `json:"result"`
-	OK      bool   `json:"ok"`
-	Running bool   `json:"-"`
+	Name      string `json:"name"`
+	Args      string `json:"args"`
+	Result    string `json:"result"`
+	OK        bool   `json:"ok"`
+	ProcessID string `json:"process_id,omitempty"`
+	Running   bool   `json:"-"`
 }
 
 // RouteCall mirrors agent.RouteCall — one model call's full routing
@@ -112,7 +115,8 @@ type RouteTrace struct {
 // other fields are meaningful: "delta" (Content), "tool_start" (Name,
 // Args), "tool_result" (Name, Result, OK), "notice" (Text), "question"
 // (QuestionID, Question, Options), "approval" (ApprovalID, Tool, Subject,
-// Options), "route_start" (none), "route_done" (RouteCall), "done"
+// Options), "route_start" (none), "route_done" (RouteCall), "heartbeat",
+// "segment" (Segment/Segments), "done"
 // (Message, Attempts, RouteTrace, Usage, ToolActivity, Compactions,
 // ImageNotice), or "error" (Error).
 type StreamEvent struct {
@@ -122,6 +126,9 @@ type StreamEvent struct {
 	Args         string               `json:"args,omitempty"`
 	Result       string               `json:"result,omitempty"`
 	OK           bool                 `json:"ok,omitempty"`
+	ProcessID    string               `json:"process_id,omitempty"`
+	Segment      int                  `json:"segment,omitempty"`
+	Segments     int                  `json:"segments,omitempty"`
 	Text         string               `json:"text,omitempty"`
 	QuestionID   string               `json:"question_id,omitempty"`
 	Question     string               `json:"question,omitempty"`
@@ -292,6 +299,48 @@ type ContextUsage struct {
 func (c *Client) GetContext(ctx context.Context, sessionID string) (ContextUsage, error) {
 	var out ContextUsage
 	err := c.doJSON(ctx, http.MethodGet, "/sessions/"+sessionID+"/context", nil, &out)
+	return out, err
+}
+
+// BackgroundProcess mirrors the daemon's read-only process metadata.
+type BackgroundProcess struct {
+	ID            string     `json:"id"`
+	Command       string     `json:"command"`
+	PID           int        `json:"pid"`
+	Running       bool       `json:"running"`
+	ExitCode      int        `json:"exit_code"`
+	ExitError     string     `json:"exit_error,omitempty"`
+	StartedAt     time.Time  `json:"started_at"`
+	EndedAt       *time.Time `json:"ended_at,omitempty"`
+	OutputBytes   int64      `json:"output_bytes"`
+	RetainedBytes int        `json:"retained_bytes"`
+	Truncated     bool       `json:"truncated"`
+}
+
+type BackgroundProcessOutput struct {
+	ID        string `json:"id"`
+	Output    string `json:"output"`
+	Cursor    int64  `json:"cursor"`
+	Reset     bool   `json:"reset"`
+	Running   bool   `json:"running"`
+	ExitCode  int    `json:"exit_code"`
+	ExitError string `json:"exit_error,omitempty"`
+	Truncated bool   `json:"truncated"`
+}
+
+func (c *Client) ListBackgroundProcesses(ctx context.Context) ([]BackgroundProcess, error) {
+	var out []BackgroundProcess
+	err := c.doJSON(ctx, http.MethodGet, "/processes", nil, &out)
+	return out, err
+}
+
+func (c *Client) GetBackgroundProcessOutput(ctx context.Context, id string, cursor *int64) (BackgroundProcessOutput, error) {
+	path := "/processes/" + url.PathEscape(id) + "/output"
+	if cursor != nil {
+		path += "?cursor=" + strconv.FormatInt(*cursor, 10)
+	}
+	var out BackgroundProcessOutput
+	err := c.doJSON(ctx, http.MethodGet, path, nil, &out)
 	return out, err
 }
 

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/codexmark/kram/internal/openai"
@@ -58,6 +59,9 @@ func (p *OpenAICompatible) ID() string   { return p.id }
 func (p *OpenAICompatible) Kind() string { return "openai-compat" }
 
 type openaiCompatChunk struct {
+	Error *struct {
+		Message string `json:"message"`
+	} `json:"error,omitempty"`
 	Choices []struct {
 		Delta struct {
 			Content string `json:"content"`
@@ -89,6 +93,49 @@ type openaiCompatChunk struct {
 	Usage *openai.Usage `json:"usage"`
 }
 
+// normalizeOpenAICompatMessages renders every system instruction as one
+// leading message. OpenAI itself accepts multiple system messages, but a
+// number of otherwise-compatible local chat templates (including Qwen 3.5
+// in LM Studio) reject a second system message with "System message must be
+// at the beginning". Kram deliberately compiles its base prompt, tool
+// overview, project instructions, memory, and runtime reminders as separate
+// system messages, so normalize at this adapter boundary instead of erasing
+// those distinctions from the provider-independent prompt compiler.
+func normalizeOpenAICompatMessages(messages []openai.ChatMessage) []openai.ChatMessage {
+	firstSystem := -1
+	systemCount := 0
+	for i, msg := range messages {
+		if msg.Role == "system" {
+			if firstSystem < 0 {
+				firstSystem = i
+			}
+			systemCount++
+		}
+	}
+	if systemCount == 0 || (systemCount == 1 && firstSystem == 0) {
+		return messages
+	}
+
+	merged := messages[firstSystem]
+	parts := make([]string, 0, systemCount)
+	nonSystem := make([]openai.ChatMessage, 0, len(messages)-systemCount)
+	for _, msg := range messages {
+		if msg.Role == "system" {
+			if msg.Content != "" {
+				parts = append(parts, msg.Content)
+			}
+			continue
+		}
+		nonSystem = append(nonSystem, msg)
+	}
+	merged.Content = strings.Join(parts, "\n\n")
+
+	out := make([]openai.ChatMessage, 0, len(nonSystem)+1)
+	out = append(out, merged)
+	out = append(out, nonSystem...)
+	return out
+}
+
 func (p *OpenAICompatible) ChatCompletion(ctx context.Context, req openai.ChatCompletionRequest) (<-chan StreamEvent, error) {
 	model := req.Model
 	if p.model != "" {
@@ -97,6 +144,7 @@ func (p *OpenAICompatible) ChatCompletion(ctx context.Context, req openai.ChatCo
 	body := req
 	body.Model = model
 	body.Stream = true
+	body.Messages = normalizeOpenAICompatMessages(body.Messages)
 
 	payload, err := json.Marshal(body)
 	if err != nil {
@@ -136,6 +184,7 @@ func (p *OpenAICompatible) ChatCompletion(ctx context.Context, req openai.ChatCo
 		defer resp.Body.Close()
 
 		var usage *openai.Usage
+		var upstreamErr error
 		toolCalls := newToolCallAccumulator()
 		err := scanSSEData(resp.Body, func(data string) bool {
 			if data == "[DONE]" {
@@ -144,6 +193,14 @@ func (p *OpenAICompatible) ChatCompletion(ctx context.Context, req openai.ChatCo
 			var chunk openaiCompatChunk
 			if err := json.Unmarshal([]byte(data), &chunk); err != nil {
 				return true // skip malformed chunk, keep reading
+			}
+			if chunk.Error != nil {
+				message := strings.TrimSpace(chunk.Error.Message)
+				if message == "" {
+					message = "unknown upstream stream error"
+				}
+				upstreamErr = fmt.Errorf("%s: upstream stream error: %s", p.id, message)
+				return false
 			}
 			if chunk.Usage != nil {
 				usage = chunk.Usage
@@ -186,6 +243,10 @@ func (p *OpenAICompatible) ChatCompletion(ctx context.Context, req openai.ChatCo
 		})
 		if err != nil {
 			events <- StreamEvent{Err: fmt.Errorf("%s: stream read: %w", p.id, err)}
+			return
+		}
+		if upstreamErr != nil {
+			events <- StreamEvent{Err: upstreamErr}
 			return
 		}
 		events <- StreamEvent{Done: true, Usage: usage, ToolCalls: toolCalls.finish()}

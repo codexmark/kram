@@ -2,8 +2,8 @@
 // makes the daemon useful rather than a plain chat relay. Each turn it
 // sends the session's history (and tool definitions) to the gateway; if
 // the model asks to call tools, they run and their results feed back in,
-// looping until the model answers in plain text or the iteration budget
-// runs out.
+// looping until the model answers in plain text, reaches a real stagnation
+// guard, or exhausts the segmented emergency budget.
 //
 // Design choices are grounded in patterns that recur across production
 // agent loops (opencode/Crush, Hermes Agent — see the research notes in
@@ -48,11 +48,15 @@ var ErrContextOverflow = errors.New("context kept overflowing after repeated com
 type Config struct {
 	// Model selects which gateway combo this session's calls go to.
 	Model string
-	// MaxTurns bounds how many model calls one Run makes (tool round-trips
-	// included) before forcing a stop. Default 50 — deliberately far below
-	// Hermes's 500 default, since Kram has no delegation/subagent budget
-	// yet to absorb runaway loops the way Hermes's does.
+	// MaxTurns is the number of model calls in one automatic continuation
+	// segment (tool round-trips included). Reaching it no longer ends a real
+	// task by itself; MaxSegmentsPerRun controls the emergency total.
 	MaxTurns int
+	// MaxSegmentsPerRun lets a productive long task continue automatically
+	// across MaxTurns-sized segments. Default 4 (50 * 4 = 200 calls). Segment
+	// boundaries are ephemeral structured UI checkpoints, while the final
+	// boundary still gets the existing tool-free soft landing.
+	MaxSegmentsPerRun int
 	// MaxCompactionsPerRun caps consecutive compaction attempts within a
 	// single Run before giving up with ErrContextOverflow.
 	MaxCompactionsPerRun int
@@ -88,6 +92,9 @@ func (c Config) withDefaults() Config {
 	if c.MaxTurns <= 0 {
 		c.MaxTurns = 50
 	}
+	if c.MaxSegmentsPerRun <= 0 {
+		c.MaxSegmentsPerRun = 4
+	}
 	if c.MaxCompactionsPerRun <= 0 {
 		c.MaxCompactionsPerRun = 3
 	}
@@ -103,10 +110,38 @@ func (c Config) withDefaults() Config {
 // ToolActivity records one tool call the loop made, for callers (the CLI)
 // that want to show what the agent actually did, not just its final answer.
 type ToolActivity struct {
-	Name   string `json:"name"`
-	Args   string `json:"args"`
-	Result string `json:"result"`
-	OK     bool   `json:"ok"`
+	Name      string `json:"name"`
+	Args      string `json:"args"`
+	Result    string `json:"result"`
+	OK        bool   `json:"ok"`
+	ProcessID string `json:"process_id,omitempty"`
+}
+
+type toolStagnation struct {
+	name   string
+	args   string
+	result string
+	count  int
+}
+
+func (s *toolStagnation) observe(activity ToolActivity) int {
+	// Repeated process_output polling is legitimate while a background job
+	// is still running; every other byte-identical result means no observable
+	// progress, regardless of whether that tool encodes failure in error or in
+	// its textual result (several built-ins deliberately do the latter).
+	if activity.Name == "process_output" && strings.Contains(activity.Result, "[still running]") {
+		*s = toolStagnation{}
+		return 0
+	}
+	if activity.Name == s.name && activity.Args == s.args && activity.Result == s.result {
+		s.count++
+		return s.count
+	}
+	s.name = activity.Name
+	s.args = activity.Args
+	s.result = activity.Result
+	s.count = 1
+	return s.count
 }
 
 // RunResult is everything a caller gets back from one user turn — which
@@ -207,6 +242,17 @@ func (s *Service) Skills() []tools.Skill { return s.tools.Skills() }
 // ReplaceDisabledTools applies a persisted tools/skills profile to this live
 // daemon so the first post-setup session cannot observe startup-time settings.
 func (s *Service) ReplaceDisabledTools(names []string) { s.tools.ReplaceDisabled(names) }
+
+// BackgroundProcesses and BackgroundProcessOutput are read-only pass-throughs
+// for the local TUI. Keeping the server dependent on Service, rather than on a
+// second Registry reference, preserves the daemon's construction boundary.
+func (s *Service) BackgroundProcesses() []tools.BackgroundProcessInfo {
+	return s.tools.BackgroundProcesses()
+}
+
+func (s *Service) BackgroundProcessOutput(id string, cursor *int64) (tools.BackgroundProcessOutput, bool) {
+	return s.tools.BackgroundProcessOutput(id, cursor)
+}
 
 // AnswerQuestion delivers ans to the ask_question call waiting on id, if
 // any is still pending. Returns false if id is unknown — already
@@ -426,6 +472,7 @@ func (s *Service) runLoop(ctx context.Context, sessionID, model string, depth in
 	result := RunResult{ImageNotice: imageNotice}
 	compactions := 0
 	graceUsed := false
+	var stagnation toolStagnation
 	// emptyRetryUsed guards against a real, observed failure mode of weak
 	// free-tier models: after a tool result that reads like a failure (an
 	// "[exit error: ...]" from a command whose non-zero exit is actually
@@ -438,18 +485,30 @@ func (s *Service) runLoop(ctx context.Context, sessionID, model string, depth in
 	// blank content.
 	emptyRetryUsed := false
 
-	for turn := 0; turn < s.cfg.MaxTurns; turn++ {
+	totalTurns := s.cfg.MaxTurns * s.cfg.MaxSegmentsPerRun
+	emit(onEvent, Event{Kind: EventSegment, Segment: 1, Segments: s.cfg.MaxSegmentsPerRun})
+	for turn := 0; turn < totalTurns; turn++ {
+		if turn > 0 && turn%s.cfg.MaxTurns == 0 {
+			segment := turn/s.cfg.MaxTurns + 1
+			emit(onEvent, Event{Kind: EventSegment, Segment: segment, Segments: s.cfg.MaxSegmentsPerRun})
+		}
 		all, err := s.store.ListMessages(sessionID)
 		if err != nil {
 			return RunResult{}, fmt.Errorf("loading history: %w", err)
 		}
 		effective := compaction.EffectiveHistory(all)
 
-		nearBudget := turn == s.cfg.MaxTurns-1
+		nearBudget := turn == totalTurns-1
 		projectContext, haveProjectContext := loadProjectContext(s.cfg.Workspace)
 		preambleParts := compilePreamble(s.cfg.Workspace, projectContext, haveProjectContext, memoryMsg, haveMemory, s.tools)
 		postscriptParts := compileTurnPostscript(emptyRetryUsed, nearBudget)
-		toolDefs := s.tools.Definitions()
+		// Keep the visible definitions separately from the subset offered on
+		// this turn. The final soft-landing turn deliberately offers no tools,
+		// but a local model can still print a textual <tool_call> from habit.
+		// We need the visible allowlist to recognize and sanitize that markup
+		// without executing it past the turn budget.
+		visibleToolDefs := s.tools.Definitions()
+		toolDefs := visibleToolDefs
 		if nearBudget {
 			toolDefs = nil
 		}
@@ -507,6 +566,31 @@ func (s *Service) runLoop(ctx context.Context, sessionID, model string, depth in
 		routeCall := result.RouteTrace.addCall(model, callResult.Strategy, callResult.Attempts, callResult.Ranking)
 		emit(onEvent, Event{Kind: EventRouteDone, RouteCall: &routeCall})
 
+		// Some OpenAI-compatible/local models occasionally print the tool-call
+		// protocol as literal text instead of returning structured tool_calls.
+		// A whole-response, allowlisted parser recovers that provider defect so
+		// the turn does not end silently on raw <tool_call> markup. Free-form
+		// prose containing a tag is deliberately never executed.
+		if len(callResult.ToolCalls) == 0 {
+			if recovered, ok := recoverTextToolCalls(callResult.Content, visibleToolDefs); ok {
+				if nearBudget {
+					names := make([]string, len(recovered))
+					for i, call := range recovered {
+						names[i] = call.Function.Name
+					}
+					callResult.Content = fmt.Sprintf(
+						"(stopped: reached the turn limit while the model was still trying to call %s)",
+						strings.Join(names, ", "),
+					)
+					emit(onEvent, Event{Kind: EventNotice, Notice: "provider attempted textual tool markup at the turn limit; Kram stopped it instead of exposing raw markup"})
+				} else {
+					callResult.ToolCalls = recovered
+					callResult.Content = ""
+					emit(onEvent, Event{Kind: EventNotice, Notice: "provider returned textual tool markup; Kram normalized it and continued"})
+				}
+			}
+		}
+
 		if len(callResult.ToolCalls) == 0 {
 			if strings.TrimSpace(callResult.Content) == "" && !emptyRetryUsed {
 				emptyRetryUsed = true
@@ -556,6 +640,16 @@ func (s *Service) runLoop(ctx context.Context, sessionID, model string, depth in
 		for _, tc := range callResult.ToolCalls {
 			emit(onEvent, Event{Kind: EventToolStart, ToolName: tc.Function.Name, ToolArgs: tc.Function.Arguments})
 			activity, toolMsg := s.runTool(ctx, tc)
+			repeatedFailure := stagnation.observe(activity)
+			if repeatedFailure >= 3 {
+				guard := fmt.Sprintf(
+					"[Kram stagnation guard: %s returned an identical result with identical arguments %d times consecutively. Do not repeat it unchanged; choose a different strategy or explain the blocker.]",
+					activity.Name, repeatedFailure,
+				)
+				toolMsg.Content += "\n\n" + guard
+				activity.Result += "\n\n" + guard
+				emit(onEvent, Event{Kind: EventNotice, Notice: fmt.Sprintf("stagnation detected in %s (%d identical failures)", activity.Name, repeatedFailure)})
+			}
 
 			original := len(toolMsg.Content)
 			if truncated, hit := enforceTurnOutputBudget(toolMsg.Content, turnOutputChars, turnOutputBudget); hit {
@@ -564,17 +658,34 @@ func (s *Service) runLoop(ctx context.Context, sessionID, model string, depth in
 			}
 			turnOutputChars += original
 
-			emit(onEvent, Event{Kind: EventToolResult, ToolName: tc.Function.Name, ToolResult: activity.Result, ToolOK: activity.OK})
+			emit(onEvent, Event{
+				Kind: EventToolResult, ToolName: tc.Function.Name, ToolResult: activity.Result,
+				ToolOK: activity.OK, ProcessID: activity.ProcessID,
+			})
 			result.ToolActivity = append(result.ToolActivity, activity)
 			if _, err := s.store.AppendMessage(sessionID, toolMsg); err != nil {
 				return RunResult{}, fmt.Errorf("persisting tool result: %w", err)
+			}
+			if repeatedFailure >= 4 {
+				content := fmt.Sprintf(
+					"(blocked: the model repeated the %s call with identical arguments and result %d times, including after Kram required a strategy change)",
+					activity.Name, repeatedFailure,
+				)
+				assistantMsg, err := s.store.AppendMessage(sessionID, store.Message{
+					Role: "assistant", Content: content, Provider: callResult.Provider,
+				})
+				if err != nil {
+					return RunResult{}, fmt.Errorf("persisting stagnation stop: %w", err)
+				}
+				result.Message = assistantMsg
+				return result, nil
 			}
 		}
 		// Loop continues: the tool results just persisted become part of
 		// the history the next iteration sends back to the model.
 	}
 
-	return RunResult{}, fmt.Errorf("agent loop exhausted %d turns without a final answer", s.cfg.MaxTurns)
+	return RunResult{}, fmt.Errorf("agent loop exhausted %d segments (%d turns) without a final answer", s.cfg.MaxSegmentsPerRun, totalTurns)
 }
 
 // heartbeatInterval is how often bufferedCall emits EventHeartbeat while
@@ -670,7 +781,10 @@ func (s *Service) runTool(ctx context.Context, tc openai.ToolCall) (ToolActivity
 		display = display[:maxToolResultChars] + "…"
 	}
 
-	activity := ToolActivity{Name: tc.Function.Name, Args: tc.Function.Arguments, Result: display, OK: ok}
+	activity := ToolActivity{
+		Name: tc.Function.Name, Args: tc.Function.Arguments, Result: display, OK: ok,
+		ProcessID: tools.StartedBackgroundProcessID(resultText),
+	}
 	toolMsg := store.Message{Role: "tool", Content: resultText, ToolCallID: tc.ID, Name: tc.Function.Name}
 	return activity, toolMsg
 }

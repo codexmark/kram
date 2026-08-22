@@ -25,6 +25,11 @@ import (
 // real one.
 func newTestService(t *testing.T, workspace string, gatewayURL string, cfg Config) *Service {
 	t.Helper()
+	// Unit tests historically use small MaxTurns values as an exact hard
+	// boundary. Keep them single-segment unless a segmentation test opts in.
+	if cfg.MaxSegmentsPerRun == 0 {
+		cfg.MaxSegmentsPerRun = 1
+	}
 	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
 		t.Fatal(err)

@@ -772,7 +772,8 @@ model call
 Important properties:
 
 - tool calls execute only after their model response is complete;
-- default run budget is 50 model calls;
+- the default run budget is four automatic segments of 50 model calls (200-call emergency ceiling);
+- identical tool calls/results trigger a strategy-change nudge and then a visible stagnation stop instead of looping to that ceiling;
 - final-budget behavior uses a soft landing rather than a hard mid-task cutoff;
 - empty final responses receive one recovery retry and then a visible diagnostic;
 - token usage is aggregated across the whole user run;
@@ -1302,6 +1303,8 @@ It does not persist conversations itself and does not call providers directly.
 - tool calls appear while running and settle to result state;
 - notices, questions, and approval prompts appear inside the active turn;
 - mouse-wheel transcript scrolling is supported.
+- dragging text copies it through OSC 52 and leaves a short visual confirmation;
+- live activity labels (`MODELO ATIVO`, `EXECUTANDO`, `ESCREVENDO`) come from daemon events and consume no model tokens.
 
 ## Route bar
 
@@ -1339,6 +1342,20 @@ The TUI never recomputes the routing score.
 ## `Ctrl+T` — context panel
 
 Shows context usage and remaining budget sourced from the daemon's own accounting path.
+
+## `Ctrl+B` — background-process observer
+
+Shows every process started by `run_background` and its captured stdout/stderr without asking the model to call `process_output`.
+
+- wide terminals open a side tile while keeping the conversation visible;
+- narrow terminals use the same area as a full-width process tab;
+- click a structured `bgN` tool-activity link or press `Ctrl+B`;
+- `Tab`/`Shift+Tab` switches processes, arrows/Page Up/Page Down scroll, `End` resumes live follow, and `Esc` closes;
+- scrolling away from the tail pauses auto-follow and reports newly arrived bytes;
+- polling happens only while the observer is open and transfers output incrementally;
+- the panel is read-only; process termination remains permission-gated through `process_kill`.
+
+Only captured stdout/stderr can be shown. A process that is alive but produces no output is reported honestly as such; Kram does not invent internal progress. Background-process state remains daemon-lifetime, so restarting the daemon stops tracked process trees and invalidates their `bgN` IDs.
 
 ## Session picker and settings
 

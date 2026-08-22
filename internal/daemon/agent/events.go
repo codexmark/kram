@@ -58,6 +58,10 @@ const (
 	// it (which, for anything that treats "any event" as a liveness
 	// signal, is already exactly the desired behavior).
 	EventHeartbeat EventKind = "heartbeat"
+	// EventSegment marks an automatic continuation budget boundary. Unlike a
+	// notice it is ephemeral operational state: the TUI folds it into the live
+	// activity line instead of appending transcript noise below the animation.
+	EventSegment EventKind = "segment"
 )
 
 // Event is one thing that happened during Run, emitted live via the
@@ -71,6 +75,7 @@ type Event struct {
 	ToolArgs   string   // EventToolStart
 	ToolResult string   // EventToolResult
 	ToolOK     bool     // EventToolResult
+	ProcessID  string   // EventToolResult when run_background started a process
 	Notice     string   // EventNotice
 	QuestionID string   // EventQuestion
 	Question   string   // EventQuestion
@@ -81,6 +86,8 @@ type Event struct {
 	ApprovalSubject string // EventApproval
 
 	RouteCall *RouteCall // EventRouteDone
+	Segment   int        // EventSegment, one-based
+	Segments  int        // EventSegment, configured maximum
 }
 
 // EventFunc receives live events during Run. A nil EventFunc is valid —

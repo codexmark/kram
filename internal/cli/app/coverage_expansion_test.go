@@ -615,11 +615,13 @@ func TestStreamEventsAndTranscriptBranches(t *testing.T) {
 	events := []daemonclient.StreamEvent{
 		{Type: "delta", Content: "partial"},
 		{Type: "tool_start", Name: "bash", Args: "ls"},
-		{Type: "tool_result", Name: "bash", Result: "ok", OK: true},
+		{Type: "tool_result", Name: "bash", Result: "ok", OK: true, ProcessID: "bg1"},
 		{Type: "notice", Text: "notice"},
 		{Type: "question", QuestionID: "q", Question: "why", Options: []string{"a"}},
 		{Type: "approval", ApprovalID: "a", Tool: "bash", Subject: "ls", Options: []string{"once"}},
 		{Type: "route_start"},
+		{Type: "heartbeat"},
+		{Type: "segment", Segment: 2, Segments: 4},
 		{Type: "route_done", RouteCall: &daemonclient.RouteCall{Index: 1}},
 	}
 	for _, evt := range events {
@@ -632,7 +634,8 @@ func TestStreamEventsAndTranscriptBranches(t *testing.T) {
 	if len(m.messages) != 1 || m.messages[0].Content != "partial" || len(m.messages[0].ToolActivity) != 1 ||
 		m.messages[0].ToolActivity[0].Result != "ok" || len(m.messages[0].Notices) != 1 ||
 		m.question == nil || m.question.id != "q" || m.approval == nil || m.approval.id != "a" ||
-		m.routeCall == nil || m.routeCall.Index != 1 || m.routeRunning {
+		m.routeCall == nil || m.routeCall.Index != 1 || m.routeRunning || m.heartbeats != 1 || m.segment != 2 || m.segments != 4 ||
+		m.messages[0].ToolActivity[0].ProcessID != "bg1" {
 		t.Fatalf("stream event aggregate state = messages %+v question %+v approval %+v route %+v running=%v", m.messages, m.question, m.approval, m.routeCall, m.routeRunning)
 	}
 	next, cmd := m.handleStreamEvent(streamEventMsg{err: errors.New("read")})
@@ -643,11 +646,12 @@ func TestStreamEventsAndTranscriptBranches(t *testing.T) {
 
 	m.waitStartedAt = time.Now().Add(-10 * time.Second)
 	m.lastEventAt = time.Now().Add(-10 * time.Second)
-	if got := m.thinkingLine(); !strings.Contains(got, "sem resposta") {
+	if got := m.thinkingLine(); !strings.Contains(got, "CONEXÃO SEM EVENTOS") {
 		t.Fatalf("stalled thinking line = %q", got)
 	}
 	m.lastEventAt = time.Now()
-	if got := m.thinkingLine(); !strings.Contains(got, "pensando") || strings.Contains(got, "sem resposta") {
+	m.workState = workModelActive
+	if got := m.thinkingLine(); !strings.Contains(got, "MODELO ATIVO") || strings.Contains(got, "CONEXÃO SEM EVENTOS") {
 		t.Fatalf("active thinking line = %q", got)
 	}
 }

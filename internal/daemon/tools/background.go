@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/codexmark/kram/internal/shell"
 )
@@ -21,6 +22,44 @@ import (
 // bounded: an unbounded buffer on a long-lived dev server's stdout is a
 // slow memory leak.
 const backgroundMaxOutputBytes = 500_000
+
+// backgroundOutputChunkBytes bounds one UI/API read. The process buffer is
+// deliberately larger so a user can open the panel late and still inspect a
+// useful tail, but repeatedly shipping all 500KB over localhost would turn a
+// cheap status view into needless allocation and JSON work.
+const backgroundOutputChunkBytes = 64 * 1024
+
+// BackgroundProcessInfo is the read-only, structured view of one process
+// owned by this daemon. It intentionally contains no os.Process or command
+// handle: callers can observe lifecycle and output without acquiring a second
+// way to mutate process state outside the permission-gated tools.
+type BackgroundProcessInfo struct {
+	ID            string     `json:"id"`
+	Command       string     `json:"command"`
+	PID           int        `json:"pid"`
+	Running       bool       `json:"running"`
+	ExitCode      int        `json:"exit_code"`
+	ExitError     string     `json:"exit_error,omitempty"`
+	StartedAt     time.Time  `json:"started_at"`
+	EndedAt       *time.Time `json:"ended_at,omitempty"`
+	OutputBytes   int64      `json:"output_bytes"`
+	RetainedBytes int        `json:"retained_bytes"`
+	Truncated     bool       `json:"truncated"`
+}
+
+// BackgroundProcessOutput is one cursor-based read of captured stdout and
+// stderr. Cursor is an absolute byte position in this process's output stream.
+// Reset tells a client to replace, rather than append to, its local copy.
+type BackgroundProcessOutput struct {
+	ID        string `json:"id"`
+	Output    string `json:"output"`
+	Cursor    int64  `json:"cursor"`
+	Reset     bool   `json:"reset"`
+	Running   bool   `json:"running"`
+	ExitCode  int    `json:"exit_code"`
+	ExitError string `json:"exit_error,omitempty"`
+	Truncated bool   `json:"truncated"`
+}
 
 // backgroundProcess is one long-running command, tracked from start
 // until the caller kills it or it exits on its own. Unlike bash (which
@@ -39,11 +78,13 @@ type backgroundProcess struct {
 	exitErr  string
 	started  time.Time
 	ended    time.Time
+	totalOut int64
 }
 
 func (p *backgroundProcess) write(b []byte) (int, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	p.totalOut += int64(len(b))
 	p.output.Write(b)
 	if p.output.Len() > backgroundMaxOutputBytes {
 		// Keep the tail — the most recent output is almost always what
@@ -55,6 +96,60 @@ func (p *backgroundProcess) write(b []byte) (int, error) {
 		p.output.Write(trimmed)
 	}
 	return len(b), nil
+}
+
+func (p *backgroundProcess) info() BackgroundProcessInfo {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	pid := 0
+	if p.cmd != nil && p.cmd.Process != nil {
+		pid = p.cmd.Process.Pid
+	}
+	var endedAt *time.Time
+	if !p.ended.IsZero() {
+		ended := p.ended
+		endedAt = &ended
+	}
+	retained := p.output.Len()
+	return BackgroundProcessInfo{
+		ID: p.id, Command: p.command, PID: pid, Running: p.running,
+		ExitCode: p.exitCode, ExitError: p.exitErr, StartedAt: p.started,
+		EndedAt: endedAt, OutputBytes: p.totalOut, RetainedBytes: retained,
+		Truncated: p.totalOut > int64(retained),
+	}
+}
+
+func (p *backgroundProcess) outputSince(cursor *int64) BackgroundProcessOutput {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	data := p.output.Bytes()
+	end := p.totalOut
+	retainedStart := end - int64(len(data))
+	start := retainedStart
+	reset := true // a missing cursor is an initial snapshot, never an append
+	if cursor != nil && *cursor >= retainedStart && *cursor <= end {
+		start = *cursor
+		reset = false
+	}
+	if end-start > backgroundOutputChunkBytes {
+		start = end - backgroundOutputChunkBytes
+		reset = true
+	}
+	index := int(start - retainedStart)
+	// A byte cursor can land inside a multi-byte rune after truncation. Move
+	// forward to the next complete rune so the UI never displays a replacement
+	// glyph merely because a bounded read split one character.
+	for index < len(data) && !utf8.RuneStart(data[index]) {
+		index++
+		start++
+	}
+
+	return BackgroundProcessOutput{
+		ID: p.id, Output: string(data[index:]), Cursor: end, Reset: reset,
+		Running: p.running, ExitCode: p.exitCode, ExitError: p.exitErr,
+		Truncated: retainedStart > 0 || start > retainedStart,
+	}
 }
 
 func (p *backgroundProcess) snapshot() (output string, running bool, exitCode int, exitErr string) {
@@ -138,6 +233,23 @@ func (m *processManager) list() []*backgroundProcess {
 	return out
 }
 
+func (m *processManager) infos() []BackgroundProcessInfo {
+	procs := m.list()
+	out := make([]BackgroundProcessInfo, 0, len(procs))
+	for _, p := range procs {
+		out = append(out, p.info())
+	}
+	return out
+}
+
+func (m *processManager) output(id string, cursor *int64) (BackgroundProcessOutput, bool) {
+	p, ok := m.get(id)
+	if !ok {
+		return BackgroundProcessOutput{}, false
+	}
+	return p.outputSince(cursor), true
+}
+
 // killAll is called on daemon shutdown so a background dev server doesn't
 // outlive the daemon that started it as an orphaned, untracked process.
 // Goes through shell.KillTree rather than Process.Kill() so a tracked
@@ -200,6 +312,20 @@ func (t *runBackground) Execute(ctx context.Context, raw json.RawMessage) (strin
 		return fmt.Sprintf("error: failed to start: %v", err), nil
 	}
 	return fmt.Sprintf("started %s (pid %d): %s", p.id, p.cmd.Process.Pid, args.Command), nil
+}
+
+// StartedBackgroundProcessID extracts the ID from run_background's own stable
+// success result. Keeping this parser next to the producer lets the agent add
+// click metadata without teaching the TUI to scrape human-facing text.
+func StartedBackgroundProcessID(result string) string {
+	fields := strings.Fields(result)
+	if len(fields) < 2 || fields[0] != "started" || !strings.HasPrefix(fields[1], "bg") {
+		return ""
+	}
+	if _, err := strconv.Atoi(strings.TrimPrefix(fields[1], "bg")); err != nil {
+		return ""
+	}
+	return fields[1]
 }
 
 type processList struct{ procs *processManager }

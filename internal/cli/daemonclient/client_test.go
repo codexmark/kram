@@ -354,3 +354,31 @@ func TestSendMessageStreamIncludesImagesWhenPresent(t *testing.T) {
 	}
 	defer stream.Close()
 }
+
+func TestBackgroundProcessClientListAndCursorOutput(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/processes":
+			_ = json.NewEncoder(w).Encode([]BackgroundProcess{{ID: "bg 1", Command: "rails server", Running: true}})
+		case "/processes/bg 1/output":
+			if r.URL.Query().Get("cursor") != "12" {
+				t.Errorf("cursor = %q, want 12", r.URL.Query().Get("cursor"))
+			}
+			_ = json.NewEncoder(w).Encode(BackgroundProcessOutput{ID: "bg 1", Output: "ready", Cursor: 17})
+		default:
+			t.Fatalf("unexpected request %s", r.URL.String())
+		}
+	}))
+	defer srv.Close()
+
+	client := New(srv.URL)
+	processes, err := client.ListBackgroundProcesses(context.Background())
+	if err != nil || len(processes) != 1 || processes[0].Command != "rails server" {
+		t.Fatalf("processes = %+v, err=%v", processes, err)
+	}
+	cursor := int64(12)
+	output, err := client.GetBackgroundProcessOutput(context.Background(), "bg 1", &cursor)
+	if err != nil || output.Output != "ready" || output.Cursor != 17 {
+		t.Fatalf("output = %+v, err=%v", output, err)
+	}
+}

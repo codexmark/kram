@@ -10,13 +10,22 @@ import (
 	"github.com/codexmark/kram/internal/cli/daemonclient"
 )
 
-// refreshTranscript rebuilds the viewport content from m.messages and
-// scrolls to the bottom — called any time messages change.
+// refreshTranscript rebuilds the viewport content from m.messages. It keeps
+// following new output only while the viewport is already at the bottom; a
+// user who deliberately scrolled up must not be snapped back down by the
+// thinking animation or a streaming delta.
 func (m *Model) refreshTranscript() {
+	followBottom := m.viewport.AtBottom()
+	previousOffset := m.viewport.YOffset
 	var b strings.Builder
+	m.processLinkRows = make(map[int]string)
 	if len(m.messages) == 0 && m.wizardWelcomeSession {
 		m.viewport.SetContent(m.renderWizardWelcomeBanner())
-		m.viewport.GotoBottom()
+		if followBottom {
+			m.viewport.GotoBottom()
+		} else {
+			m.viewport.SetYOffset(previousOffset)
+		}
 		return
 	}
 	for i, msg := range m.messages {
@@ -32,7 +41,20 @@ func (m *Model) refreshTranscript() {
 			b.WriteString(m.renderPromptBlock(msg.Content))
 		default:
 			for _, act := range msg.ToolActivity {
+				row := strings.Count(b.String(), "\n")
+				if act.ProcessID != "" {
+					m.processLinkRows[row] = act.ProcessID
+				}
 				b.WriteString(m.renderToolActivity(act) + "\n")
+			}
+			// While a turn is live, durable notices belong above the activity
+			// surface. Rendering them below it makes the K stop being the visual
+			// tail of the run (the segment-notice bug caught this live). Once the
+			// turn is complete, the conventional answer-then-notices order is fine.
+			if msg.streaming {
+				for _, n := range msg.Notices {
+					b.WriteString(styleHint.Render("· "+n) + "\n")
+				}
 			}
 			switch {
 			case msg.streaming && msg.Content == "":
@@ -45,12 +67,14 @@ func (m *Model) refreshTranscript() {
 				// fence, a stray "**") would flicker through broken
 				// formatting every frame — the full render happens once,
 				// below, when the message is complete.
-				b.WriteString(styleKramTag.Render("kram") + "  " + styleBody.Render(msg.Content))
+				b.WriteString(styleKramTag.Render("kram") + "  " + styleBody.Render(msg.Content) + "\n" + m.thinkingLine())
 			case msg.Content != "":
 				b.WriteString(styleKramTag.Render("kram") + "  " + renderMarkdown(m.mdRenderer, msg.Content))
 			}
-			for _, n := range msg.Notices {
-				b.WriteString("\n" + styleHint.Render("· "+n))
+			if !msg.streaming {
+				for _, n := range msg.Notices {
+					b.WriteString("\n" + styleHint.Render("· "+n))
+				}
 			}
 		}
 	}
@@ -58,7 +82,11 @@ func (m *Model) refreshTranscript() {
 		b.WriteString("\n\n" + styleErrBadge.Render("erro: "+m.err.Error()))
 	}
 	m.viewport.SetContent(b.String())
-	m.viewport.GotoBottom()
+	if followBottom {
+		m.viewport.GotoBottom()
+	} else {
+		m.viewport.SetYOffset(previousOffset)
+	}
 }
 
 // stallThreshold is how long without any event (delta, tool_start,
@@ -71,27 +99,71 @@ func (m *Model) refreshTranscript() {
 // notices, and a plain spinner can't tell the two apart.
 const stallThreshold = 8 * time.Second
 
-// thinkingLine is the animated placeholder shown in the transcript while
-// the agent loop is running: a genuine color-gradient shimmer across the
-// "kram" tag (see shimmer.go — go-colorful interpolation, not a discrete
-// palette step) plus a live elapsed-time counter, driven by animFrame so
-// it's in lockstep with the footer's own animation. Past stallThreshold
-// with no new event, it switches to a distinct warm color and says so
-// plainly instead of continuing to shimmer as if nothing were wrong.
+// thinkingLine is the animated activity surface shown while the agent loop is
+// running. Its labels come from real route/delta/tool/heartbeat events; none is
+// model-generated narration, so making the UI lively costs zero tokens and
+// never claims knowledge Kram does not have. Past stallThreshold it names the
+// transport symptom rather than the ambiguous "sem resposta".
 func (m Model) thinkingLine() string {
 	elapsed := time.Since(m.waitStartedAt).Round(time.Second)
 	stalled := !m.waitStartedAt.IsZero() && time.Since(m.lastEventAt) > stallThreshold
 	indicator := renderThinkingK(m.animFrame, stalled)
-
-	var status string
-	if stalled {
-		status = styleBadgeWarn.Bold(true).Render("kram") + "  " +
-			styleBadgeWarn.Render(fmt.Sprintf("ainda trabalhando… (%s sem resposta)", elapsed))
-	} else {
-		status = shimmerText("kram", m.animFrame) + "  " +
-			styleMeta.Render(fmt.Sprintf("pensando (%s)", elapsed))
+	label := m.activityLabel()
+	rail := m.renderActivityRail(stalled)
+	meta := elapsed.String()
+	if m.workState == workToolActive && !m.toolStartedAt.IsZero() {
+		meta += " · tool " + time.Since(m.toolStartedAt).Round(time.Second).String()
 	}
-	return indicator + "  " + status
+	if m.heartbeats > 0 && !stalled {
+		meta += fmt.Sprintf(" · pulso %d", m.heartbeats)
+	}
+	if m.segments > 1 {
+		meta += fmt.Sprintf(" · segmento %d/%d", m.segment, m.segments)
+	}
+	if stalled {
+		sinceEvent := time.Since(m.lastEventAt).Round(time.Second)
+		label = "CONEXÃO SEM EVENTOS"
+		meta = fmt.Sprintf("há %s · total %s", sinceEvent, elapsed)
+		return indicator + "  " + styleBadgeWarn.Bold(true).Render(label) + "  " + rail + "  " + styleBadgeWarn.Render(meta)
+	}
+	return indicator + "  " + shimmerText(label, m.animFrame) + "  " + rail + "  " + styleMeta.Render(meta)
+}
+
+func (m Model) activityLabel() string {
+	switch m.workState {
+	case workModelActive:
+		return "MODELO ATIVO"
+	case workToolActive:
+		if m.activeTool != "" {
+			return "EXECUTANDO · " + m.activeTool
+		}
+		return "EXECUTANDO TOOL"
+	case workAnalyzingResult:
+		return "ANALISANDO RESULTADO"
+	case workWriting:
+		return "ESCREVENDO"
+	default:
+		return "PREPARANDO ROTA"
+	}
+}
+
+func (m Model) renderActivityRail(stalled bool) string {
+	const nodes = 7
+	active := positiveModulo(m.animFrame/2, nodes)
+	var b strings.Builder
+	for i := 0; i < nodes; i++ {
+		glyph := "━"
+		style := styleFaintTrack
+		if i == active {
+			glyph = "●"
+			style = styleBadgeAccent.Bold(true)
+			if stalled {
+				style = styleBadgeWarn.Bold(true)
+			}
+		}
+		b.WriteString(style.Render(glyph))
+	}
+	return "◜" + b.String() + "◝"
 }
 
 func (m Model) View() string {
@@ -135,7 +207,16 @@ func (m Model) View() string {
 	var b strings.Builder
 	b.WriteString(m.renderRouteBar())
 	b.WriteString("\n")
-	b.WriteString(m.viewport.View())
+	body := m.viewport.View()
+	if m.active == panelProcesses {
+		pane := m.renderProcessPane(m.viewport.Height, m.processPaneWidth())
+		if m.processUsesTile() {
+			body = lipgloss.JoinHorizontal(lipgloss.Top, body, styleHint.Render("│"), pane)
+		} else {
+			body = pane
+		}
+	}
+	b.WriteString(body)
 	b.WriteString("\n")
 	switch {
 	case m.question != nil:
@@ -157,7 +238,7 @@ func (m Model) View() string {
 	}
 	b.WriteString(m.renderFooter())
 
-	return b.String()
+	return m.clipboardSequence + b.String()
 }
 
 // renderFooter draws the pulse bar: a breathing dot for the active
@@ -169,7 +250,9 @@ func (m Model) View() string {
 // the route bar."
 func (m Model) renderFooter() string {
 	tokens := ""
-	if last := m.lastAssistantTokens(); last != "" {
+	if m.copyNotice != "" {
+		tokens = styleBadgeOK.Render(m.copyNotice)
+	} else if last := m.lastAssistantTokens(); last != "" {
 		tokens = styleMeta.Render(last)
 	}
 	return padBetween(m.width, tokens, m.footerRightBlock())
@@ -180,7 +263,7 @@ func (m Model) renderFooter() string {
 // because handleMouse needs the exact same string to compute where the
 // click target starts.
 func (m Model) footerRightBlock() string {
-	return joinNonEmpty("  ", m.contextIcon(),
+	return joinNonEmpty("  ", m.contextIcon(), styleHint.Render("^b processos"),
 		styleHint.Render("^r rota"), styleHint.Render("^t contexto"), styleHint.Render("^p estratégia"))
 }
 
@@ -218,7 +301,13 @@ func (m Model) renderToolActivity(act daemonclient.ToolActivity) string {
 			mark = styleBadgeBad.Render("✗")
 		}
 	}
-	return styleHint.Render("  ↳ ") + styleMeta.Render(act.Name+"("+args+")") + " " + mark
+	label := act.Name + "(" + args + ")"
+	if act.ProcessID != "" {
+		label = styleBadgeAccent.Render(act.ProcessID) + " " + styleMeta.Render(label)
+	} else {
+		label = styleMeta.Render(label)
+	}
+	return styleHint.Render("  ↳ ") + label + " " + mark
 }
 
 func joinNonEmpty(sep string, parts ...string) string {
