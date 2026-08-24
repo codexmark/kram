@@ -3342,3 +3342,73 @@ it guards against is exactly the "helpfully" append `/v1` mistake above,
 which would otherwise pass every existing generic catalog invariant test
 (`TestEveryProviderHasARequiredEnvVar`, etc.) while being completely
 broken in practice.
+
+---
+
+## Ownership audit: hand-written systemPrompt() sections vs tool Description()
+
+The Tool Semantics Registry (see above) fixed one instance of a fact
+having two owners — the hand-written "# Tools" section restating what
+each tool did, drifting from the registry itself. `systemPrompt()`'s
+other hand-written sections ("# Skills", "# Memory", "# Delegation",
+"# Asking") predate that discipline and were never checked against the
+same question: does this sentence restate a fact a specific tool's own
+`Description()` already states, or is it a genuine cross-call habit no
+single tool's description could carry?
+
+Checked every sentence in those four sections against the corresponding
+tool's `Description()` (`skill_list`, `memory_write`, `delegate_task`,
+`ask_question` — `internal/daemon/tools/{skills,memory,delegate,ask}.go`).
+Found real, confirmed duplication in all four — not just thematic
+overlap, but the same fact stated twice, in some cases word-for-word:
+
+- **Memory**: "Write compiled one-sentence notes, not conversation
+  excerpts" was a verbatim-duplicated sentence — `memory_write`'s
+  `Description()` already says exactly that. The scope definitions
+  ("global" vs "project", with the same examples) were duplicated too.
+- **Skills**: "Skills are curated playbooks for specific kinds of work"
+  duplicated `skill_list`'s own "Skills are optional, curated playbooks
+  for specific kinds of tasks." "Then call skill with the name to load
+  the full instructions" duplicated both `skill_list`'s parenthetical and
+  `skill_load`'s entire `Description()`.
+- **Delegation**: "starts with zero knowledge of this conversation" was
+  verbatim-duplicated from `delegate_task`'s `Description()`; the
+  fan-out framing and the "don't delegate what depends on context you
+  can't write down" rule were both restated versions of what the tool
+  description already says.
+- **Asking**: the entire "when to use it" sentence restated
+  `ask_question`'s own "use this when a request is genuinely ambiguous
+  or a decision is the user's to make, not for things you could
+  reasonably infer yourself" almost point for point.
+
+Each section was trimmed to keep only what wasn't already owned
+elsewhere:
+
+- **Memory** keeps the proactive-trigger instruction ("save it as it
+  happens, without being asked to remember" — the exact kind of nudge
+  this file's own opening comment says a reactive tool-calling model
+  needs) and the "don't save task-scoped details" heuristic, neither of
+  which `memory_write`'s `Description()` states.
+- **Skills** keeps the proactive-trigger instruction ("call skill_list
+  BEFORE starting any task that sounds like it has a methodology... do
+  not wait to be asked") and the cost-justification framing — both
+  genuinely irreplaceable, since `skill_list`'s own description can't
+  tell a reactive model to reach for it unprompted.
+- **Delegation** keeps only the negative heuristic ("don't delegate what
+  is faster to do yourself. One file read is not a delegation") — the
+  one piece of guidance not already in `delegate_task`'s `Description()`.
+  Unlike memory/skills, delegation doesn't need a proactive-trigger
+  sentence: choosing to delegate is an ordinary reactive tool-selection
+  decision, not a background-housekeeping action a model would otherwise
+  never think to take.
+- **Asking** keeps the coding-specific instantiation ("look first; ask
+  only about what looking cannot answer") — narrower and more actionable
+  for a coding agent specifically than `ask_question`'s generic "not for
+  things you could reasonably infer yourself," which a general-purpose
+  tool description can't know it's embedded in a coding context to say.
+
+No mechanism changed — this is a pure content trim, same as the
+Tools-section fix was pure generation-mechanism change. No test asserted
+on the removed prose's exact wording, so no test updates were needed;
+`gofmt`/`vet`/`go test ./internal/daemon/agent/... ./internal/cli/app/...
+-race` all pass unchanged.
