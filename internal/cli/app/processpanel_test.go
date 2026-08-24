@@ -58,7 +58,8 @@ func TestProcessPanelFetchesStructuredOutputAndPollsOnlyWhileOpen(t *testing.T) 
 	}
 
 	generation := m.processGeneration
-	m.closeProcessPanel()
+	closed, _ := m.closeProcessPanel()
+	m = closed.(Model)
 	next, cmd = m.Update(processPollTickMsg{generation: generation})
 	m = next.(Model)
 	if cmd != nil || m.active != panelNone {

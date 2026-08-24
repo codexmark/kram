@@ -3638,3 +3638,62 @@ deliberately does not render while `msg.streaming` is true: the set of
 touched files for a still-running turn is incomplete, and a row that
 grows chip-by-chip mid-turn would read as flicker rather than a settled
 summary.
+
+---
+
+## Footer badge for running background processes
+
+The `Ctrl+B` process observer (`processpanel.go`) is good once open, but
+entirely opt-in — nothing in the default view told a user that
+`run_background` processes existed unless they remembered to open it. A
+session with two live jobs looked identical to one with none.
+
+The footer's right-hand block (`footerRightBlock`) gains a small "● N bg"
+badge, present only when at least one background process exists for the
+session — green while any are still running, idle-gray once every one the
+badge knows about has ended. It's the first element of the block
+(`bgProcessBadge()`, prepended ahead of `contextIcon()`), specifically so
+its click zone can be carved out precisely: `handleMouse` computes the
+badge's own `[iconStart, iconStart+width)` range and routes a click there
+straight to `togglePanel(panelProcesses)`, leaving the rest of the block's
+existing click-anywhere-opens-context behavior untouched for everything
+after it.
+
+**Polling is the real design question here**, not the rendering. The full
+panel already polls every 750ms (`processPollInterval`), but only while
+open (`fetchProcessSnapshotCmd`/`processPollTickCmd`, gated on
+`m.active == panelProcesses`) — reusing that cadence unconditionally would
+reintroduce constant background traffic for every session, most of which
+have zero background processes ever running. So the badge gets its own,
+much cheaper, independent poll loop:
+
+- `bgBadgePollInterval = 6 * time.Second` — "does anything exist," not
+  the full panel's log-following.
+- `fetchProcessListCmd`/`bgProcessListMsg` — list only, no per-process
+  output fetch (the badge never shows logs).
+- `applyBgProcessList` — same response-driven poll shape
+  `applyProcessSnapshot` already uses (fetch → apply → schedule next tick
+  from the response handler, not a free-running ticker), so there's never
+  more than one in-flight badge request.
+
+The two loops are mutually exclusive by construction, not by convention:
+`applyBgProcessList` and the `bgBadgePollTickMsg` handler both check
+`m.active == panelProcesses` and silently drop rather than reschedule when
+it's true, and `openProcessPanel` bumps `bgBadgeGeneration` on open so any
+badge request already in flight is ignored on arrival. `closeProcessPanel`
+is the one place that has to *resume* the loop — it bumps
+`bgBadgeGeneration` again (a fresh cycle id) and returns
+`fetchProcessListCmd(...)` as its command, changing its signature from a
+bare mutator to a `(tea.Model, tea.Cmd)` pair like `openProcessPanel`
+already was, updating both call sites (`esc`, `togglePanel`). It also
+seeds `m.bgProcesses = m.processes` immediately from the panel's own
+last-known list — best-effort continuity so the badge doesn't flash empty
+for the ~750ms-to-6s gap before the resumed poll's first response lands,
+when the panel itself already had fresher data a moment ago.
+
+`TestBgBadgePollDoesNotFireWhilePanelIsOpen`,
+`TestApplyBgProcessListDroppedWhilePanelOpen`,
+`TestOpeningProcessPanelStopsBadgePoll`, and
+`TestClosingProcessPanelResumesBadgePollWithContinuity` each pin one edge
+of this mutual-exclusion contract directly, rather than trusting the
+6-second interval to make a double-poll bug show up in a fast test run.

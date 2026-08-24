@@ -270,7 +270,12 @@ func (m Model) renderFooter() string {
 // because handleMouse needs the exact same string to compute where the
 // click target starts.
 func (m Model) footerRightBlock() string {
-	return joinNonEmpty("  ", m.contextIcon(), styleHint.Render("^b processos"),
+	// bgProcessBadge is deliberately first: handleMouse gives it its own
+	// click zone at the left edge of this block (opens the process panel
+	// directly), distinct from the rest of the block's existing
+	// click-anywhere-opens-context behavior — see the badge width math
+	// there.
+	return joinNonEmpty("  ", m.bgProcessBadge(), m.contextIcon(), styleHint.Render("^b processos"),
 		styleHint.Render("^r rota"), styleHint.Render("^t contexto"), styleHint.Render("^s estratégia"), styleHint.Render("^p detalhes"))
 }
 

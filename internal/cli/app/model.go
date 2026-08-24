@@ -174,6 +174,13 @@ type Model struct {
 	processLinkRows     map[int]string // absolute transcript row -> background process ID
 	selectionInProcess  bool
 
+	// bgProcesses/bgBadgeGeneration back the footer's low-profile process
+	// badge — a much cheaper, infrequent poll that runs only while the
+	// full Ctrl+B panel is closed (see processpanel.go's bgBadgePollTickCmd
+	// doc comment for why they can't share one poll loop).
+	bgProcesses       []daemonclient.BackgroundProcess
+	bgBadgeGeneration int
+
 	animFrame int
 	// Mouse selection belongs to the app because enabling terminal mouse
 	// tracking (needed for scrolling and clickable panels) disables native
@@ -431,6 +438,7 @@ func (m Model) enterChatCmds() tea.Cmd {
 	return tea.Batch(
 		textinput.Blink, loadHistoryCmd(m.daemon, m.sessionID),
 		fetchContextCmd(m.daemon, m.sessionID), fetchStatusCmd(m.gateway),
+		fetchProcessListCmd(m.daemon, m.bgBadgeGeneration),
 	)
 }
 
@@ -567,6 +575,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		return m, fetchProcessSnapshotCmd(m.daemon, m.processSelected, m.processCursor(), m.processGeneration)
+
+	case bgProcessListMsg:
+		return m.applyBgProcessList(msg)
+
+	case bgBadgePollTickMsg:
+		if msg.generation != m.bgBadgeGeneration || m.active == panelProcesses {
+			return m, nil
+		}
+		return m, fetchProcessListCmd(m.daemon, m.bgBadgeGeneration)
 
 	case pingResultsMsg:
 		m.accountsPinging = false
@@ -746,8 +763,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case "esc":
 		if m.active == panelProcesses {
-			m.closeProcessPanel()
-			return m, nil
+			return m.closeProcessPanel()
 		}
 		if m.active != panelNone {
 			m.active = panelNone
@@ -1029,6 +1045,11 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	iconStart := m.width - lipgloss.Width(m.footerRightBlock())
+	if badge := m.bgProcessBadge(); badge != "" {
+		if badgeEnd := iconStart + lipgloss.Width(badge); msg.X >= iconStart && msg.X < badgeEnd {
+			return m.togglePanel(panelProcesses)
+		}
+	}
 	if msg.X >= iconStart {
 		return m.togglePanel(panelContext)
 	}
@@ -1038,12 +1059,11 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 func (m Model) togglePanel(p panel) (tea.Model, tea.Cmd) {
 	if m.active == p {
 		if p == panelProcesses {
-			m.closeProcessPanel()
-		} else {
-			m.active = panelNone
-			m.syncViewportSize()
-			m.syncTranscriptRenderer()
+			return m.closeProcessPanel()
 		}
+		m.active = panelNone
+		m.syncViewportSize()
+		m.syncTranscriptRenderer()
 		return m, nil
 	}
 	if p == panelProcesses {
