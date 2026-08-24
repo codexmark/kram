@@ -43,7 +43,7 @@ func TestSessionAndMessageRoundTrip(t *testing.T) {
 		t.Fatalf("missing err = %v", err)
 	}
 
-	want := Message{Role: "assistant", Content: "hello", Provider: "p", ToolCallID: "parent", Name: "tool", Images: []string{"data:image/png;base64,AA"}, ToolCalls: []openai.ToolCall{{ID: "tc1", Type: "function", Function: openai.ToolCallFunction{Name: "read", Arguments: `{}`}}}}
+	want := Message{Role: "assistant", Content: "hello", Provider: "p", ToolCallID: "parent", Name: "tool", Images: []string{"data:image/png;base64,AA"}, ProviderItems: []openai.ProviderItem{{Type: "reasoning", ID: "rs1", EncryptedContent: "opaque"}}, ToolCalls: []openai.ToolCall{{ID: "tc1", Type: "function", Function: openai.ToolCallFunction{Name: "read", Arguments: `{}`}}}}
 	appended, err := s.AppendMessage(first.ID, want)
 	if err != nil {
 		t.Fatal(err)
@@ -56,11 +56,32 @@ func TestSessionAndMessageRoundTrip(t *testing.T) {
 		t.Fatalf("ListMessages = %+v, %v", messages, err)
 	}
 	got := messages[0]
-	if got.Content != want.Content || len(got.Images) != 1 || len(got.ToolCalls) != 1 || got.ToolCalls[0].Function.Name != "read" {
+	if got.Content != want.Content || len(got.Images) != 1 || len(got.ToolCalls) != 1 || got.ToolCalls[0].Function.Name != "read" || len(got.ProviderItems) != 1 || got.ProviderItems[0].EncryptedContent != "opaque" {
 		t.Fatalf("round trip = %+v", got)
 	}
 	if empty, err := s.ListMessages("missing"); err != nil || len(empty) != 0 {
 		t.Fatalf("missing messages = %+v, %v", empty, err)
+	}
+}
+
+func TestOpenMigratesLegacyMessagesTable(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, content TEXT, provider TEXT DEFAULT '', tool_calls TEXT DEFAULT '', tool_call_id TEXT DEFAULT '', name TEXT DEFAULT '', images TEXT DEFAULT '', created_at INTEGER)`); err != nil {
+		t.Fatal(err)
+	}
+	_ = db.Close()
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	var count int
+	if err := s.db.QueryRow(`SELECT count(*) FROM pragma_table_info('messages') WHERE name='provider_items'`).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("provider_items migration count=%d err=%v", count, err)
 	}
 }
 

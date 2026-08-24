@@ -17,12 +17,13 @@ import (
 // picture the non-streaming Result carries: which provider served it, the
 // fallback trail, usage, and any tool calls the model is requesting.
 type StreamDelta struct {
-	Content   string
-	Done      bool
-	ToolCalls []openai.ToolCall
-	Provider  string
-	Usage     openai.Usage
-	Attempts  []openai.AttemptInfo
+	Content       string
+	Done          bool
+	ToolCalls     []openai.ToolCall
+	ProviderItems []openai.ProviderItem
+	Provider      string
+	Usage         openai.Usage
+	Attempts      []openai.AttemptInfo
 	// Ranking and Strategy mirror Result's — see its doc comment.
 	Ranking  []openai.RankedProviderInfo
 	Strategy string
@@ -50,6 +51,9 @@ func (c *Client) ChatCompletionStream(ctx context.Context, model string, message
 	httpReq.Header.Set("Accept", "text/event-stream")
 	if runID := runIDFromContext(ctx); runID != "" {
 		httpReq.Header.Set(openai.RunIDHeader, runID)
+	}
+	if key := promptCacheKeyFromContext(ctx); key != "" {
+		httpReq.Header.Set(openai.PromptCacheKeyHeader, key)
 	}
 
 	resp, err := c.http.Do(httpReq)
@@ -106,7 +110,7 @@ func (c *Client) ChatCompletionStream(ctx context.Context, model string, message
 
 			if choice.FinishReason != nil {
 				delta := StreamDelta{
-					Done: true, ToolCalls: choice.Delta.ToolCalls, Provider: chunk.Provider,
+					Done: true, ToolCalls: choice.Delta.ToolCalls, ProviderItems: choice.Delta.ProviderItems, Provider: chunk.Provider,
 					Attempts: chunk.Attempts, Ranking: chunk.Ranking, Strategy: chunk.Strategy,
 				}
 				if chunk.Usage != nil {

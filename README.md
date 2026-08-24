@@ -776,7 +776,13 @@ Important properties:
 - identical tool calls/results trigger a strategy-change nudge and then a visible stagnation stop instead of looping to that ceiling;
 - final-budget behavior uses a soft landing rather than a hard mid-task cutoff;
 - empty final responses receive one recovery retry and then a visible diagnostic;
-- token usage is aggregated across the whole user run;
+- token usage is aggregated across the whole user run, including completed
+  candidates rejected before fallback and retry rounds;
+- cache reads/writes and reasoning tokens are preserved when a provider reports
+  them; the footer may also show an API-list-price equivalent (not a ChatGPT
+  subscription charge);
+- ChatGPT Codex sessions use stable prompt-cache affinity, deferred tool schemas,
+  hosted tool search, and encrypted reasoning replay with `store:false`;
 - route trace covers every model call in the run;
 - tool calls/results are persisted into durable history.
 

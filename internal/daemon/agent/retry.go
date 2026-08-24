@@ -58,6 +58,7 @@ func backoffWithJitter(round int, minRetryAfter time.Duration) time.Duration {
 // code.
 func (s *Service) callModelWithRetry(ctx context.Context, model string, messages []openai.ChatMessage, toolDefs []openai.Tool, onEvent EventFunc) (gatewayclient.Result, error) {
 	var lastErr error
+	var failedUsage openai.Usage
 	for round := 0; round < s.cfg.MaxGatewayRounds; round++ {
 		if round > 0 {
 			var ge *gatewayclient.GatewayError
@@ -78,11 +79,15 @@ func (s *Service) callModelWithRetry(ctx context.Context, model string, messages
 
 		result, err := s.callModel(ctx, model, messages, toolDefs, onEvent)
 		if err == nil {
+			result.Usage = openai.AddUsage(failedUsage, result.Usage)
 			return result, nil
 		}
 		lastErr = err
 
 		var ge *gatewayclient.GatewayError
+		if errors.As(err, &ge) {
+			failedUsage = openai.AddUsage(failedUsage, ge.Usage)
+		}
 		if !errors.As(err, &ge) || !ge.Retryable {
 			// Not a GatewayError at all (e.g. the gateway itself is
 			// unreachable — a different failure mode retrying won't fix

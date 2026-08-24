@@ -33,6 +33,7 @@ CREATE TABLE IF NOT EXISTS messages (
 	tool_call_id TEXT NOT NULL DEFAULT '',
 	name         TEXT NOT NULL DEFAULT '',
 	images       TEXT NOT NULL DEFAULT '',
+	provider_items TEXT NOT NULL DEFAULT '',
 	created_at   INTEGER NOT NULL
 );
 
@@ -88,16 +89,17 @@ type Session struct {
 // answers). Name doubles as the marker for a compaction summary message
 // (Name == CompactionMarker) — see internal/daemon/compaction.
 type Message struct {
-	ID         int64             `json:"id"`
-	SessionID  string            `json:"session_id"`
-	Role       string            `json:"role"`
-	Content    string            `json:"content"`
-	Provider   string            `json:"provider,omitempty"`
-	ToolCalls  []openai.ToolCall `json:"tool_calls,omitempty"`
-	ToolCallID string            `json:"tool_call_id,omitempty"`
-	Name       string            `json:"name,omitempty"`
-	Images     []string          `json:"images,omitempty"`
-	CreatedAt  int64             `json:"created_at"`
+	ID            int64                 `json:"id"`
+	SessionID     string                `json:"session_id"`
+	Role          string                `json:"role"`
+	Content       string                `json:"content"`
+	Provider      string                `json:"provider,omitempty"`
+	ToolCalls     []openai.ToolCall     `json:"tool_calls,omitempty"`
+	ToolCallID    string                `json:"tool_call_id,omitempty"`
+	Name          string                `json:"name,omitempty"`
+	Images        []string              `json:"images,omitempty"`
+	ProviderItems []openai.ProviderItem `json:"provider_items,omitempty"`
+	CreatedAt     int64                 `json:"created_at"`
 }
 
 // Store wraps the SQLite connection and the daemon's persistence methods.
@@ -120,6 +122,10 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("applying schema: %w", err)
 	}
+	if err := ensureProviderItemsColumn(db); err != nil {
+		db.Close()
+		return nil, err
+	}
 	if _, err := db.Exec(memorySchema); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("applying memory schema: %w", err)
@@ -134,6 +140,36 @@ func Open(path string) (*Store, error) {
 	}
 
 	return &Store{db: db}, nil
+}
+
+func ensureProviderItemsColumn(db *sql.DB) error {
+	rows, err := db.Query(`PRAGMA table_info(messages)`)
+	if err != nil {
+		return fmt.Errorf("inspecting messages schema: %w", err)
+	}
+	defer rows.Close()
+	found := false
+	for rows.Next() {
+		var cid, notnull, pk int
+		var name, typ string
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &typ, &notnull, &defaultValue, &pk); err != nil {
+			return err
+		}
+		if name == "provider_items" {
+			found = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if found {
+		return nil
+	}
+	if _, err := db.Exec(`ALTER TABLE messages ADD COLUMN provider_items TEXT NOT NULL DEFAULT ''`); err != nil {
+		return fmt.Errorf("adding provider_items column: %w", err)
+	}
+	return nil
 }
 
 // Close releases the underlying database connection.
@@ -188,7 +224,7 @@ func (s *Store) GetSession(id string) (Session, error) {
 // the full tool-call/tool-result trail and any compaction summaries.
 func (s *Store) ListMessages(sessionID string) ([]Message, error) {
 	rows, err := s.db.Query(
-		`SELECT id, session_id, role, content, provider, tool_calls, tool_call_id, name, images, created_at
+		`SELECT id, session_id, role, content, provider, tool_calls, tool_call_id, name, images, provider_items, created_at
 		 FROM messages WHERE session_id = ? ORDER BY id ASC`,
 		sessionID,
 	)
@@ -214,11 +250,11 @@ type rowScanner interface {
 
 func scanMessage(row rowScanner) (Message, error) {
 	var m Message
-	var toolCallsJSON, imagesJSON string
-	if err := row.Scan(&m.ID, &m.SessionID, &m.Role, &m.Content, &m.Provider, &toolCallsJSON, &m.ToolCallID, &m.Name, &imagesJSON, &m.CreatedAt); err != nil {
+	var toolCallsJSON, imagesJSON, providerItemsJSON string
+	if err := row.Scan(&m.ID, &m.SessionID, &m.Role, &m.Content, &m.Provider, &toolCallsJSON, &m.ToolCallID, &m.Name, &imagesJSON, &providerItemsJSON, &m.CreatedAt); err != nil {
 		return Message{}, fmt.Errorf("scanning message row: %w", err)
 	}
-	if err := decodeMessageJSON(&m, toolCallsJSON, imagesJSON); err != nil {
+	if err := decodeMessageJSON(&m, toolCallsJSON, imagesJSON, providerItemsJSON); err != nil {
 		return Message{}, err
 	}
 	return m, nil
@@ -229,7 +265,7 @@ func scanMessage(row rowScanner) (Message, error) {
 // SearchMessages, which scans one extra (session title) column that
 // doesn't fit scanMessage's fixed 9-column shape, can reuse the same
 // decoding instead of duplicating it.
-func decodeMessageJSON(m *Message, toolCallsJSON, imagesJSON string) error {
+func decodeMessageJSON(m *Message, toolCallsJSON, imagesJSON string, providerItemsJSON ...string) error {
 	if toolCallsJSON != "" {
 		if err := json.Unmarshal([]byte(toolCallsJSON), &m.ToolCalls); err != nil {
 			return fmt.Errorf("decoding stored tool_calls: %w", err)
@@ -238,6 +274,11 @@ func decodeMessageJSON(m *Message, toolCallsJSON, imagesJSON string) error {
 	if imagesJSON != "" {
 		if err := json.Unmarshal([]byte(imagesJSON), &m.Images); err != nil {
 			return fmt.Errorf("decoding stored images: %w", err)
+		}
+	}
+	if len(providerItemsJSON) > 0 && providerItemsJSON[0] != "" {
+		if err := json.Unmarshal([]byte(providerItemsJSON[0]), &m.ProviderItems); err != nil {
+			return fmt.Errorf("decoding stored provider_items: %w", err)
 		}
 	}
 	return nil
@@ -249,7 +290,7 @@ func decodeMessageJSON(m *Message, toolCallsJSON, imagesJSON string) error {
 func (s *Store) AppendMessage(sessionID string, msg Message) (Message, error) {
 	now := time.Now().Unix()
 
-	var toolCallsJSON, imagesJSON string
+	var toolCallsJSON, imagesJSON, providerItemsJSON string
 	if len(msg.ToolCalls) > 0 {
 		b, err := json.Marshal(msg.ToolCalls)
 		if err != nil {
@@ -264,11 +305,18 @@ func (s *Store) AppendMessage(sessionID string, msg Message) (Message, error) {
 		}
 		imagesJSON = string(b)
 	}
+	if len(msg.ProviderItems) > 0 {
+		b, err := json.Marshal(msg.ProviderItems)
+		if err != nil {
+			return Message{}, fmt.Errorf("encoding provider_items: %w", err)
+		}
+		providerItemsJSON = string(b)
+	}
 
 	res, err := s.db.Exec(
-		`INSERT INTO messages (session_id, role, content, provider, tool_calls, tool_call_id, name, images, created_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		sessionID, msg.Role, msg.Content, msg.Provider, toolCallsJSON, msg.ToolCallID, msg.Name, imagesJSON, now,
+		`INSERT INTO messages (session_id, role, content, provider, tool_calls, tool_call_id, name, images, provider_items, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		sessionID, msg.Role, msg.Content, msg.Provider, toolCallsJSON, msg.ToolCallID, msg.Name, imagesJSON, providerItemsJSON, now,
 	)
 	if err != nil {
 		return Message{}, fmt.Errorf("appending message: %w", err)

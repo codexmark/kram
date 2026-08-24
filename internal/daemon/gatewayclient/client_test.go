@@ -34,6 +34,22 @@ func TestChatCompletionSendsRunIDHeaderWhenSet(t *testing.T) {
 	}
 }
 
+func TestChatCompletionSendsStablePromptCacheKey(t *testing.T) {
+	var got string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Get(openai.PromptCacheKeyHeader)
+		_ = json.NewEncoder(w).Encode(openai.ChatCompletionResponse{Choices: []openai.ChatCompletionChoice{{Message: openai.ChatMessage{Role: "assistant"}}}})
+	}))
+	defer srv.Close()
+	ctx := WithPromptCacheKey(context.Background(), "kram-session")
+	if _, err := New(srv.URL).ChatCompletion(ctx, "default", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got != "kram-session" {
+		t.Fatalf("cache key = %q", got)
+	}
+}
+
 func TestChatCompletionOmitsRunIDHeaderWhenUnset(t *testing.T) {
 	var sawHeader bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

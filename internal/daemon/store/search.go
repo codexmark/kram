@@ -156,7 +156,7 @@ func (s *Store) SearchMessages(query string, limit int, scope string) ([]SearchR
 	}
 
 	q := `
-		SELECT m.id, m.session_id, m.role, m.content, m.provider, m.tool_calls, m.tool_call_id, m.name, m.images, m.created_at,
+		SELECT m.id, m.session_id, m.role, m.content, m.provider, m.tool_calls, m.tool_call_id, m.name, m.images, m.provider_items, m.created_at,
 		       s.title, bm25(messages_fts) AS score
 		FROM messages_fts f
 		JOIN messages m ON m.id = f.rowid
@@ -185,12 +185,12 @@ func (s *Store) SearchMessages(query string, limit int, scope string) ([]SearchR
 	var out []SearchResult
 	for rows.Next() {
 		var m Message
-		var toolCallsJSON, imagesJSON, title string
+		var toolCallsJSON, imagesJSON, providerItemsJSON, title string
 		var score float64
-		if err := rows.Scan(&m.ID, &m.SessionID, &m.Role, &m.Content, &m.Provider, &toolCallsJSON, &m.ToolCallID, &m.Name, &imagesJSON, &m.CreatedAt, &title, &score); err != nil {
+		if err := rows.Scan(&m.ID, &m.SessionID, &m.Role, &m.Content, &m.Provider, &toolCallsJSON, &m.ToolCallID, &m.Name, &imagesJSON, &providerItemsJSON, &m.CreatedAt, &title, &score); err != nil {
 			return nil, fmt.Errorf("scanning search result: %w", err)
 		}
-		if err := decodeMessageJSON(&m, toolCallsJSON, imagesJSON); err != nil {
+		if err := decodeMessageJSON(&m, toolCallsJSON, imagesJSON, providerItemsJSON); err != nil {
 			return nil, err
 		}
 		out = append(out, SearchResult{Message: m, SessionTitle: title, IsSubagent: isSubagentTitle(title), Score: score})
@@ -253,7 +253,7 @@ func closeScores(a, b float64) bool {
 // pulls in another session's messages, even though message ids are a
 // single global sequence shared across every session.
 func (s *Store) contextWindow(sessionID string, messageID int64, before, after int) ([]Message, error) {
-	const cols = `id, session_id, role, content, provider, tool_calls, tool_call_id, name, images, created_at`
+	const cols = `id, session_id, role, content, provider, tool_calls, tool_call_id, name, images, provider_items, created_at`
 
 	beforeRows, err := s.db.Query(
 		`SELECT `+cols+` FROM messages WHERE session_id = ? AND id < ? ORDER BY id DESC LIMIT ?`,

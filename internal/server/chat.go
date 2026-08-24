@@ -50,6 +50,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "messages must not be empty")
 		return
 	}
+	req.PromptCacheKey = r.Header.Get(openai.PromptCacheKeyHeader)
 
 	comboID, err := s.router.Resolve(req.Model)
 	if err != nil {
@@ -69,6 +70,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	var lastErr error
 	var trail []openai.AttemptInfo // real per-request fallback trail, streamed back to clients that ask for it
+	var totalUsage openai.Usage
 
 	for i, rc := range ranked {
 		p := rc.Provider.Provider
@@ -115,7 +117,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		content, toolCalls, usage, sawTerminal, err := drainToBuffer(events)
+		content, toolCalls, providerItems, usage, sawTerminal, err := drainToBuffer(events)
 		elapsed := time.Since(attemptStart).Milliseconds()
 		if err != nil {
 			lastErr = err
@@ -123,6 +125,10 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			s.telemetry.RecordLatency(p.ID(), elapsed)
 			trail = append(trail, errorAttempt(p.ID(), elapsed, attemptNum, score, err))
 			continue
+		}
+		if usage != nil {
+			totalUsage = openai.AddUsage(totalUsage, *usage)
+			s.telemetry.RecordUsage(p.ID(), usage.PromptTokens, usage.CompletionTokens)
 		}
 
 		outcome := gate.Evaluate(content, toolCalls, sawTerminal)
@@ -142,26 +148,25 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 				Provider: p.ID(), OK: false, LatencyMS: elapsed,
 				Outcome: openai.OutcomeRejected, Reason: outcome.Reason, Attempt: attemptNum, Score: &score,
 				Class: openai.ClassContentRejected,
+				Usage: usage,
 			})
 			continue
 		}
 
 		s.breakers.ReportSuccess(p.ID())
 		s.telemetry.RecordLatency(p.ID(), elapsed)
-		if usage != nil {
-			s.telemetry.RecordUsage(p.ID(), usage.PromptTokens, usage.CompletionTokens)
-		}
 		trail = append(trail, openai.AttemptInfo{
 			Provider: p.ID(), OK: true, LatencyMS: elapsed,
 			Outcome: openai.OutcomeSuccess, Attempt: attemptNum, Score: &score,
+			Usage: usage,
 		})
 		s.router.RecordOutcome(comboID, routeCtx, p.ID(), true)
-		writeBufferedResponse(w, req.Model, p.ID(), content, toolCalls, usage, trail, ranking, strategyName)
+		writeBufferedResponse(w, req.Model, p.ID(), content, toolCalls, providerItems, &totalUsage, trail, ranking, strategyName)
 		return
 	}
 
 	s.router.RecordOutcome(comboID, routeCtx, "", false)
-	writeGatewayError(w, comboID, trail, lastErr)
+	writeGatewayError(w, comboID, trail, totalUsage, lastErr)
 }
 
 // writeGatewayError is the terminal response when every ranked candidate
@@ -177,12 +182,13 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 // whole is still worth retrying if even one candidate might succeed
 // given a moment, and which candidate happened to be tried last is an
 // accident of ranking, not evidence the whole round is hopeless.
-func writeGatewayError(w http.ResponseWriter, comboID string, trail []openai.AttemptInfo, lastErr error) {
+func writeGatewayError(w http.ResponseWriter, comboID string, trail []openai.AttemptInfo, usage openai.Usage, lastErr error) {
 	body := openai.ErrorBody{
 		Message:  fmt.Sprintf("all providers in combo %q failed, last error: %v", comboID, lastErr),
 		Type:     "kram_gateway_error",
 		Combo:    comboID,
 		Attempts: trail,
+		Usage:    usage,
 	}
 	if len(trail) > 0 {
 		body.Cause = trail[len(trail)-1].Class
@@ -256,11 +262,11 @@ func (s *Server) markRejection(id, reason string) {
 // provider ever sent a Done event before its channel closed — a stream
 // that's cut off mid-flight without one is what
 // config.ResponseGateConfig.RequireTerminal catches.
-func drainToBuffer(events <-chan provider.StreamEvent) (content string, toolCalls []openai.ToolCall, usage *openai.Usage, sawTerminal bool, err error) {
+func drainToBuffer(events <-chan provider.StreamEvent) (content string, toolCalls []openai.ToolCall, providerItems []openai.ProviderItem, usage *openai.Usage, sawTerminal bool, err error) {
 	var b strings.Builder
 	for evt := range events {
 		if evt.Err != nil {
-			return "", nil, nil, false, evt.Err
+			return "", nil, nil, nil, false, evt.Err
 		}
 		b.WriteString(evt.Delta)
 		if evt.Usage != nil {
@@ -268,14 +274,15 @@ func drainToBuffer(events <-chan provider.StreamEvent) (content string, toolCall
 		}
 		if evt.Done {
 			toolCalls = evt.ToolCalls
+			providerItems = evt.ProviderItems
 			sawTerminal = true
 			break
 		}
 	}
-	return b.String(), toolCalls, usage, sawTerminal, nil
+	return b.String(), toolCalls, providerItems, usage, sawTerminal, nil
 }
 
-func writeBufferedResponse(w http.ResponseWriter, model, providerID, content string, toolCalls []openai.ToolCall, usage *openai.Usage, trail []openai.AttemptInfo, ranking []openai.RankedProviderInfo, strategyName string) {
+func writeBufferedResponse(w http.ResponseWriter, model, providerID, content string, toolCalls []openai.ToolCall, providerItems []openai.ProviderItem, usage *openai.Usage, trail []openai.AttemptInfo, ranking []openai.RankedProviderInfo, strategyName string) {
 	finish := "stop"
 	if len(toolCalls) > 0 {
 		finish = "tool_calls"
@@ -286,7 +293,7 @@ func writeBufferedResponse(w http.ResponseWriter, model, providerID, content str
 		Created: time.Now().Unix(),
 		Model:   model,
 		Choices: []openai.ChatCompletionChoice{
-			{Index: 0, Message: openai.ChatMessage{Role: "assistant", Content: content, ToolCalls: toolCalls}, FinishReason: finish},
+			{Index: 0, Message: openai.ChatMessage{Role: "assistant", Content: content, ToolCalls: toolCalls, ProviderItems: providerItems}, FinishReason: finish},
 		},
 		Provider: providerID,
 		Attempts: trail,
@@ -366,12 +373,12 @@ func (s *Server) streamResponse(w http.ResponseWriter, comboID string, routeCtx 
 		return trail
 	}
 
-	writeFinal := func(finish string, toolCalls []openai.ToolCall, usage *openai.Usage, trail []openai.AttemptInfo) {
+	writeFinal := func(finish string, toolCalls []openai.ToolCall, providerItems []openai.ProviderItem, usage *openai.Usage, trail []openai.AttemptInfo) {
 		chunk := openai.ChatCompletionChunk{
 			ID: id, Object: "chat.completion.chunk", Created: created, Model: model,
 			Choices: []openai.ChatCompletionChunkChoice{{
 				Index:        0,
-				Delta:        openai.ChatCompletionChunkDelta{ToolCalls: toolCalls},
+				Delta:        openai.ChatCompletionChunkDelta{ToolCalls: toolCalls, ProviderItems: providerItems},
 				FinishReason: &finish,
 			}},
 			Provider: pending.Provider,
@@ -390,7 +397,7 @@ func (s *Server) streamResponse(w http.ResponseWriter, comboID string, routeCtx 
 		if evt.Err != nil {
 			sawTerminal = true
 			s.markFailure(pending.Provider, evt.Err)
-			writeFinal("error", nil, nil, finalize(openai.OutcomeError, false, evt.Err.Error(), classifyTransportError(evt.Err)))
+			writeFinal("error", nil, nil, nil, finalize(openai.OutcomeError, false, evt.Err.Error(), classifyTransportError(evt.Err)))
 			return false
 		}
 		if evt.Delta != "" {
@@ -406,7 +413,7 @@ func (s *Server) streamResponse(w http.ResponseWriter, comboID string, routeCtx 
 			if len(evt.ToolCalls) > 0 {
 				finish = "tool_calls"
 			}
-			writeFinal(finish, evt.ToolCalls, evt.Usage, finalize(openai.OutcomeSuccess, true, "", ""))
+			writeFinal(finish, evt.ToolCalls, evt.ProviderItems, evt.Usage, finalize(openai.OutcomeSuccess, true, "", ""))
 			return false
 		}
 		return true
@@ -435,7 +442,7 @@ func (s *Server) streamResponse(w http.ResponseWriter, comboID string, routeCtx 
 		// silently turning a truncated answer into an apparent success.
 		err := fmt.Errorf("%s: stream closed without a terminal completion", pending.Provider)
 		s.markFailure(pending.Provider, err)
-		writeFinal("error", nil, nil, finalize(openai.OutcomeError, false, err.Error(), classifyTransportError(err)))
+		writeFinal("error", nil, nil, nil, finalize(openai.OutcomeError, false, err.Error(), classifyTransportError(err)))
 	}
 
 	fmt.Fprint(w, "data: [DONE]\n\n")

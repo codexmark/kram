@@ -457,6 +457,7 @@ func (s *Service) runLoop(ctx context.Context, sessionID, model string, depth in
 	// gateway's Sticky routing can tell this run apart from a later,
 	// unrelated turn in the same session (see gatewayclient.WithRunID).
 	ctx = gatewayclient.WithRunID(ctx, session.NewID())
+	ctx = gatewayclient.WithPromptCacheKey(ctx, "kram-"+sessionID)
 
 	// Memory is snapshotted once per run rather than re-read every turn,
 	// borrowing Hermes Agent's "frozen at session start" idea for the
@@ -601,7 +602,7 @@ func (s *Service) runLoop(ctx context.Context, sessionID, model string, depth in
 				content = "(no response — the model returned nothing twice in a row; try rephrasing, or check whether the provider is degraded)"
 			}
 			assistantMsg, err := s.store.AppendMessage(sessionID, store.Message{
-				Role: "assistant", Content: content, Provider: callResult.Provider,
+				Role: "assistant", Content: content, Provider: callResult.Provider, ProviderItems: callResult.ProviderItems,
 			})
 			if err != nil {
 				return RunResult{}, fmt.Errorf("persisting assistant message: %w", err)
@@ -625,7 +626,7 @@ func (s *Service) runLoop(ctx context.Context, sessionID, model string, depth in
 		}
 
 		if _, err := s.store.AppendMessage(sessionID, store.Message{
-			Role: "assistant", Content: callResult.Content, ToolCalls: callResult.ToolCalls, Provider: callResult.Provider,
+			Role: "assistant", Content: callResult.Content, ToolCalls: callResult.ToolCalls, Provider: callResult.Provider, ProviderItems: callResult.ProviderItems,
 		}); err != nil {
 			return RunResult{}, fmt.Errorf("persisting assistant tool-call message: %w", err)
 		}
@@ -761,7 +762,7 @@ func (s *Service) streamCall(ctx context.Context, model string, messages []opena
 		if d.Done {
 			result = gatewayclient.Result{
 				Content: content.String(), ToolCalls: d.ToolCalls,
-				Provider: d.Provider, Attempts: d.Attempts, Usage: d.Usage,
+				Provider: d.Provider, Attempts: d.Attempts, Usage: d.Usage, ProviderItems: d.ProviderItems,
 				Ranking: d.Ranking, Strategy: d.Strategy,
 			}
 		}
@@ -838,15 +839,12 @@ func toModelMessages(msgs []store.Message) []openai.ChatMessage {
 		out = append(out, openai.ChatMessage{
 			Role: m.Role, Content: m.Content, Images: m.Images,
 			ToolCalls: m.ToolCalls, ToolCallID: m.ToolCallID, Name: m.Name,
+			ProviderItems: m.ProviderItems,
 		})
 	}
 	return out
 }
 
 func sumUsage(a, b openai.Usage) openai.Usage {
-	return openai.Usage{
-		PromptTokens:     a.PromptTokens + b.PromptTokens,
-		CompletionTokens: a.CompletionTokens + b.CompletionTokens,
-		TotalTokens:      a.TotalTokens + b.TotalTokens,
-	}
+	return openai.AddUsage(a, b)
 }

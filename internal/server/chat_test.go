@@ -352,6 +352,35 @@ func TestResponseGateRejectionStillPoisonsBreaker(t *testing.T) {
 	}
 }
 
+func TestBufferedFallbackUsageIncludesRejectedCandidate(t *testing.T) {
+	cfg := &config.Config{
+		Providers:    []config.ProviderConfig{{ID: "p1", Kind: "fake"}, {ID: "p2", Kind: "fake"}},
+		Combos:       []config.ComboConfig{{ID: "default", Strategy: "priority", Providers: []string{"p1", "p2"}, Response: config.ResponseGateConfig{RequireTerminal: true}}},
+		DefaultCombo: "default",
+	}
+	p1Usage := &openai.Usage{PromptTokens: 100, CompletionTokens: 10, TotalTokens: 110}
+	p2Usage := &openai.Usage{PromptTokens: 50, CompletionTokens: 5, TotalTokens: 55}
+	providers := map[string]provider.Provider{
+		"p1": scriptedProvider{id: "p1", events: []provider.StreamEvent{{Delta: "rejected", Usage: p1Usage}}},
+		"p2": scriptedProvider{id: "p2", events: []provider.StreamEvent{{Delta: "accepted", Done: true, Usage: p2Usage}}},
+	}
+	breakers := breaker.NewRegistry()
+	tel := telemetry.New()
+	rt, err := router.New(cfg, providers, breakers, tel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := New(cfg, providers, rt, breakers, tel, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	rec := postBufferedChat(t, s)
+	var response openai.ChatCompletionResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Provider != "p2" || response.Usage.TotalTokens != 165 || len(response.Attempts) != 2 || response.Attempts[0].Usage == nil {
+		t.Fatalf("response = %+v", response)
+	}
+}
+
 // TestAllProvidersFailedReturnsStructuredGatewayError is the regression
 // test for the old flat-string-only error: a caller must be able to
 // decode Combo/Retryable/Cause/Attempts, not just parse an English

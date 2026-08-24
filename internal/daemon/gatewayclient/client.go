@@ -27,6 +27,7 @@ type GatewayError struct {
 	Cause      openai.FailureClass
 	Attempts   []openai.AttemptInfo
 	Message    string
+	Usage      openai.Usage
 }
 
 func (e *GatewayError) Error() string { return e.Message }
@@ -44,7 +45,10 @@ func New(baseURL string) *Client {
 
 type ctxKey int
 
-const runIDCtxKey ctxKey = 0
+const (
+	runIDCtxKey ctxKey = iota
+	promptCacheKeyCtxKey
+)
 
 // WithRunID attaches an opaque per-agent-run identifier to ctx. Every
 // gateway call made with the returned context sends it as
@@ -62,6 +66,15 @@ func runIDFromContext(ctx context.Context) string {
 	return id
 }
 
+func WithPromptCacheKey(ctx context.Context, key string) context.Context {
+	return context.WithValue(ctx, promptCacheKeyCtxKey, key)
+}
+
+func promptCacheKeyFromContext(ctx context.Context) string {
+	key, _ := ctx.Value(promptCacheKeyCtxKey).(string)
+	return key
+}
+
 // Result is what a chat completion call actually produced: the reply
 // (text and/or tool calls), which provider served it, the real fallback
 // trail attempted to get there, and token usage for that request.
@@ -75,9 +88,10 @@ type Result struct {
 	// gateway extensions passed straight through from
 	// openai.ChatCompletionResponse, used to build a RouteCall (see
 	// internal/daemon/agent/route.go).
-	Ranking  []openai.RankedProviderInfo
-	Strategy string
-	Usage    openai.Usage
+	Ranking       []openai.RankedProviderInfo
+	Strategy      string
+	Usage         openai.Usage
+	ProviderItems []openai.ProviderItem
 }
 
 // ChatCompletion sends a non-streaming chat completion request — with the
@@ -99,6 +113,9 @@ func (c *Client) ChatCompletion(ctx context.Context, model string, messages []op
 	if runID := runIDFromContext(ctx); runID != "" {
 		httpReq.Header.Set(openai.RunIDHeader, runID)
 	}
+	if key := promptCacheKeyFromContext(ctx); key != "" {
+		httpReq.Header.Set(openai.PromptCacheKeyHeader, key)
+	}
 
 	resp, err := c.http.Do(httpReq)
 	if err != nil {
@@ -119,6 +136,7 @@ func (c *Client) ChatCompletion(ctx context.Context, model string, messages []op
 					Combo: errResp.Error.Combo, Retryable: errResp.Error.Retryable,
 					RetryAfter: time.Duration(errResp.Error.RetryAfterMS) * time.Millisecond,
 					Cause:      errResp.Error.Cause, Attempts: errResp.Error.Attempts,
+					Usage:   errResp.Error.Usage,
 					Message: fmt.Sprintf("gateway error: %s", errResp.Error.Message),
 				}
 			}
@@ -135,12 +153,13 @@ func (c *Client) ChatCompletion(ctx context.Context, model string, messages []op
 		return Result{}, fmt.Errorf("gateway response had no choices")
 	}
 	return Result{
-		Content:   completion.Choices[0].Message.Content,
-		ToolCalls: completion.Choices[0].Message.ToolCalls,
-		Provider:  completion.Provider,
-		Attempts:  completion.Attempts,
-		Ranking:   completion.Ranking,
-		Strategy:  completion.Strategy,
-		Usage:     completion.Usage,
+		Content:       completion.Choices[0].Message.Content,
+		ToolCalls:     completion.Choices[0].Message.ToolCalls,
+		Provider:      completion.Provider,
+		Attempts:      completion.Attempts,
+		Ranking:       completion.Ranking,
+		Strategy:      completion.Strategy,
+		Usage:         completion.Usage,
+		ProviderItems: completion.Choices[0].Message.ProviderItems,
 	}, nil
 }

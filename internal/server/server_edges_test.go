@@ -80,19 +80,19 @@ func TestDrainToBufferBranches(t *testing.T) {
 	ch <- provider.StreamEvent{Delta: "b", Done: true, ToolCalls: calls}
 	ch <- provider.StreamEvent{Delta: "ignored"}
 	close(ch)
-	content, gotCalls, gotUsage, terminal, err := drainToBuffer(ch)
+	content, gotCalls, _, gotUsage, terminal, err := drainToBuffer(ch)
 	if err != nil || content != "ab" || len(gotCalls) != 1 || gotUsage != usage || !terminal {
 		t.Fatalf("drain=(%q,%#v,%#v,%v,%v)", content, gotCalls, gotUsage, terminal, err)
 	}
 	fail := make(chan provider.StreamEvent, 1)
 	fail <- provider.StreamEvent{Err: errors.New("upstream")}
 	close(fail)
-	if _, _, _, _, err := drainToBuffer(fail); err == nil {
+	if _, _, _, _, _, err := drainToBuffer(fail); err == nil {
 		t.Fatal("expected stream error")
 	}
 	abnormal := make(chan provider.StreamEvent)
 	close(abnormal)
-	if content, _, _, terminal, err := drainToBuffer(abnormal); err != nil || content != "" || terminal {
+	if content, _, _, _, terminal, err := drainToBuffer(abnormal); err != nil || content != "" || terminal {
 		t.Fatalf("abnormal close=(%q,%v,%v)", content, terminal, err)
 	}
 }
@@ -106,7 +106,7 @@ func TestWriteBufferedResponseStopAndToolCalls(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			r := httptest.NewRecorder()
 			usage := &openai.Usage{TotalTokens: 4}
-			writeBufferedResponse(r, "m", "p", "answer", tc.calls, usage, []openai.AttemptInfo{{Provider: "p"}}, nil, "priority")
+			writeBufferedResponse(r, "m", "p", "answer", tc.calls, nil, usage, []openai.AttemptInfo{{Provider: "p"}}, nil, "priority")
 			var got openai.ChatCompletionResponse
 			if err := json.Unmarshal(r.Body.Bytes(), &got); err != nil {
 				t.Fatal(err)
@@ -117,7 +117,7 @@ func TestWriteBufferedResponseStopAndToolCalls(t *testing.T) {
 		})
 	}
 	r := httptest.NewRecorder()
-	writeBufferedResponse(r, "m", "p", "", nil, nil, nil, nil, "")
+	writeBufferedResponse(r, "m", "p", "", nil, nil, nil, nil, nil, "")
 	var got openai.ChatCompletionResponse
 	if err := json.Unmarshal(r.Body.Bytes(), &got); err != nil {
 		t.Fatal(err)

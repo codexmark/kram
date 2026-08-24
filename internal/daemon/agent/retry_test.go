@@ -47,13 +47,14 @@ func gatewayErrorHandler(t *testing.T, failCount int32, class openai.FailureClas
 			w.WriteHeader(http.StatusBadGateway)
 			_ = json.NewEncoder(w).Encode(openai.ErrorResponse{Error: openai.ErrorBody{
 				Message: "all providers in combo \"default\" failed", Type: "kram_gateway_error",
-				Combo: "default", Retryable: retryable, Cause: class,
+				Combo: "default", Retryable: retryable, Cause: class, Usage: openai.Usage{PromptTokens: 10, TotalTokens: 10},
 			}})
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(openai.ChatCompletionResponse{
 			Choices: []openai.ChatCompletionChoice{{Message: openai.ChatMessage{Role: "assistant", Content: "ok"}}},
+			Usage:   openai.Usage{PromptTokens: 5, CompletionTokens: 1, TotalTokens: 6},
 		})
 	}))
 	return srv, &seen
@@ -81,6 +82,9 @@ func TestCallModelWithRetrySucceedsAfterRetryableFailures(t *testing.T) {
 	}
 	if result.Content != "ok" {
 		t.Errorf("Content = %q, want %q", result.Content, "ok")
+	}
+	if result.Usage.PromptTokens != 25 || result.Usage.TotalTokens != 26 {
+		t.Errorf("execution-wide usage = %+v, want both failed rounds plus winner", result.Usage)
 	}
 	if got := atomic.LoadInt32(seen); got != 3 {
 		t.Errorf("gateway saw %d requests, want 3 (2 failures + 1 success)", got)
