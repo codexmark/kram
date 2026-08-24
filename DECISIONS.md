@@ -3815,3 +3815,85 @@ special-cased, even mid-run — the daemon doesn't distinguish), but there
 is still no live progress indicator in the parent transcript while
 `delegate_task` is running. That remains a real gap for a future issue if
 it turns out to matter in practice.
+
+---
+
+## Model/Agent Profile phase: `systemPrompt()` split into nine named sections
+
+The Prompt Compiler v1 write-up already named this as its own deferred
+next step: `base` (the hand-written identity/workflow/skills/memory/
+delegation/asking/coding/output/safety template) was still one opaque
+string, everything *around* it already a named, ordered `PromptPart`.
+Section ownership (which text belongs to which concern) was only visible
+by reading prose closely — the same class of problem the tools-overview
+extraction had already fixed for tool guidance specifically.
+
+`internal/daemon/agent/systemprompt.go`'s single `fmt.Fprintf` template
+is now nine sections, each its own function or const —
+`identitySection(workspace)` (the only one with real inputs; no `#`
+header, since it's the opening frame every other section builds on),
+`workflowSection`, `skillsSection`, `memoryPolicySection`,
+`delegationSection`, `askingSection`, `codingPolicySection`,
+`outputSection`, `safetySection` — each with a doc comment stating
+exactly what it owns and, where it wasn't obvious, what distinguishes it
+from its nearest neighbor (`workflowSection`'s tool-calling loop vs.
+`codingPolicySection`'s house style for the code that loop produces;
+`workflowSection`'s "report honestly" vs. `outputSection`'s answer
+*form*). `systemPrompt(workspace)` itself stays — now just
+`strings.Join` of the nine sections with `"\n"` — both as
+`SystemPromptOverride`'s empty-means-this fallback and as the reference
+string this file's own golden test compares against.
+
+`promptcompiler.go` gains `compileBaseSections(workspace) []PromptPart`,
+turning the nine sections into `PromptPart`s in the same order
+`systemPrompt` joins them, IDed by section name (`"identity"`,
+`"workflow"`, ...) — the issue's actual deliverable: ordering as an
+explicit, inspectable list property instead of implicit in one template
+string. `compilePreamble` calls it in the no-override case; when
+`SystemPromptOverride` is set, behavior is unchanged from before this
+issue — one `"base"` part, wholesale replacement, tools overview and
+background-job guidance still generated normally alongside it (matching
+the override's own DECISIONS entry above).
+
+Deliberately **not** done, matching the issue's own scope: runtime plugin
+registration. This is still a fixed, ordered list of named parts defined
+in Go — just nine of them now instead of one — not a mechanism for
+external code to register sections at runtime. Per-agent/subagent scoped
+overrides and the `/debug prompt` view itself are both future work this
+phase only makes possible, not built here.
+
+**The byte-for-byte contract**: `TestCompileBaseSectionsMatchesSystemPrompt
+ByteForByte` (`systemprompt_test.go`) joins the nine parts' `Content` with
+`"\n"` and asserts equality against `systemPrompt(workspace)`'s own
+output — this is a refactor, not a behavior change, in its first pass,
+and passed on the first run once the nine section constants were copied
+verbatim from the original template rather than retyped from memory
+(retyping free text by hand is exactly the kind of place a stray comma or
+em-dash swap silently breaks byte-identity).
+
+**A real bug caught along the way, in a test rather than shipped code —
+almost**: `context_usage.go`'s `ContextUsage` keyed its `"system_prompt"`
+category directly off `partTokens["base"]`. That key only exists when
+`SystemPromptOverride` is set; in the default (far more common) case,
+`compilePreamble` now returns nine separately-IDed sections instead of
+one `"base"` part, so the lookup would have silently reported 0 tokens
+for the system prompt on every ordinary session — this one *did* almost
+ship, caught only by deliberately grepping every `"base"` reference in
+the package before considering the issue done, not by a pre-existing
+test (none checked the category's value, only that the slice had at
+least 5 entries). Fixed by summing every part **not** in the fixed set of
+other named categories (`tools-overview`, `background-job-guidance`,
+`project-context`, `memory`) — "whatever's left is the system prompt" —
+rather than hardcoding the nine section IDs a second time in this file,
+so a future phase adding another base section doesn't need a matching
+update here to stay correct. `TestContextUsageSystemPromptCategoryIsNonZero`
+(`service_coverage_test.go`) pins the regression directly.
+
+Every other test asserting exact message indices against the assembled
+preamble (`promptcompiler_test.go`'s part-count checks,
+`promptassembly_test.go`'s real-`Service.Run` integration test) shifted
+by `len(baseSectionOrder) - 1` (eight more parts than the old single
+`"base"`) — updated to compute offsets from `len(baseSectionOrder)`
+rather than hardcoded literals, so a tenth base section added later
+doesn't silently desync these tests' expected indices from the real
+assembled order again.

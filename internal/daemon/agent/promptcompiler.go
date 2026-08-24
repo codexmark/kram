@@ -107,6 +107,36 @@ func estimateToolDefinitionTokens(defs any) int {
 //     all stay exactly as cacheable as they already were; nothing earlier
 //     in the sequence is affected by a part appended at the end.
 
+// compileBaseSections turns systemprompt.go's nine named sections into
+// PromptParts, in the same order systemPrompt itself joins them — the
+// Model/Agent Profile phase's actual deliverable: section ordering as an
+// explicit, inspectable property of this list, instead of implicit in one
+// template string. Each part's ID matches the section's own name (see
+// systemprompt.go's doc comments for what each one owns); all are
+// RefreshStatic/Source "builtin" for the same reason "base" was — see
+// systemprompt.go's "Cache stability, per section" note.
+func compileBaseSections(workspace string) []PromptPart {
+	sections := []struct {
+		id      string
+		content string
+	}{
+		{"identity", identitySection(workspace)},
+		{"workflow", workflowSection},
+		{"skills", skillsSection},
+		{"memory-policy", memoryPolicySection},
+		{"delegation", delegationSection},
+		{"asking", askingSection},
+		{"coding-policy", codingPolicySection},
+		{"output", outputSection},
+		{"safety", safetySection},
+	}
+	parts := make([]PromptPart, len(sections))
+	for i, s := range sections {
+		parts[i] = PromptPart{ID: s.id, Placement: PlacementPreamble, Refresh: RefreshStatic, Source: "builtin", Content: s.content}
+	}
+	return parts
+}
+
 // toolsOverviewHeader/Footer bookend the generated tool list — Footer is
 // the "batch independent calls" line that used to close the hand-written
 // "# Tools" section; kept here since it's about tool usage generally and
@@ -219,12 +249,15 @@ func compileBackgroundJobGuidance(reg *tools.Registry) PromptPart {
 // Config.SystemPromptOverride's own doc comment for exactly what it can
 // and can't replace.
 func compilePreamble(workspace, projectContext string, haveProjectContext bool, memoryMsg openai.ChatMessage, haveMemory bool, reg *tools.Registry, toolOrder []string, systemPromptOverride string) []PromptPart {
-	baseContent := systemPrompt(workspace)
+	var parts []PromptPart
 	if systemPromptOverride != "" {
-		baseContent = systemPromptOverride
-	}
-	parts := []PromptPart{
-		{ID: "base", Placement: PlacementPreamble, Refresh: RefreshStatic, Source: "builtin", Content: baseContent},
+		// Wholesale replacement stays a single "base" part — see
+		// Config.SystemPromptOverride's own doc comment for exactly what
+		// it can and can't replace; the generated tools overview and
+		// background-job guidance below are never suppressed by it.
+		parts = append(parts, PromptPart{ID: "base", Placement: PlacementPreamble, Refresh: RefreshStatic, Source: "builtin", Content: systemPromptOverride})
+	} else {
+		parts = append(parts, compileBaseSections(workspace)...)
 	}
 	if reg != nil {
 		parts = append(parts, compileToolsOverview(reg, toolOrder))
