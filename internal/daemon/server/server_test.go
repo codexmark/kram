@@ -50,7 +50,10 @@ func newTestServerWithRegistry(t *testing.T, script []openai.ChatCompletionRespo
 	t.Cleanup(gwSrv.Close)
 
 	gw := gatewayclient.New(gwSrv.URL)
-	agentSvc := agent.New(st, gw, tr, agent.Config{Workspace: workspace, MaxTurns: 10})
+	agentSvc, err := agent.New(st, gw, tr, agent.Config{Workspace: workspace, MaxTurns: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
 	sessSvc := session.New(st)
 
 	return New(sessSvc, agentSvc, nil), tr
@@ -554,7 +557,10 @@ func TestStoreFailuresBecomeInternalServerErrors(t *testing.T) {
 		t.Fatal(err)
 	}
 	tr := tools.NewRegistry(workspace, st, nil)
-	agentSvc := agent.New(st, gatewayclient.New("http://127.0.0.1:1"), tr, agent.Config{Workspace: workspace, MaxTurns: 1})
+	agentSvc, err := agent.New(st, gatewayclient.New("http://127.0.0.1:1"), tr, agent.Config{Workspace: workspace, MaxTurns: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
 	srv := New(session.New(st), agentSvc, nil)
 	created, err := srv.sessions.Create("before close")
 	if err != nil {

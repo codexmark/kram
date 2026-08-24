@@ -86,6 +86,15 @@ type Config struct {
 	// what almost every caller wants; this exists as an escape hatch,
 	// not a recommendation.
 	PreferStreaming bool
+	// ToolOrder curates the generated Tools overview's presentation
+	// order (see compileToolsOverview) — it never changes which tools
+	// are offered, only where each one is listed. nil means today's
+	// plain alphabetical order. When set, it must contain
+	// tools.ToolOrderRest exactly once, marking where every unlisted
+	// tool is inserted (still alphabetical); New validates this,
+	// including that every named tool actually exists in the registry,
+	// and fails loudly rather than silently dropping a typo.
+	ToolOrder []string
 }
 
 func (c Config) withDefaults() Config {
@@ -223,12 +232,28 @@ type Service struct {
 }
 
 // New builds an agent Service.
-func New(st *store.Store, gw *gatewayclient.Client, tr *tools.Registry, cfg Config) *Service {
+// New builds a Service, or fails if cfg.ToolOrder is malformed or names
+// a tool tr doesn't actually have registered — the "fail loud instead of
+// a typo silently vanishing" guarantee the tool-order feature exists to
+// provide (see tools.ValidateToolOrder / tools.UnknownToolOrderNames).
+func New(st *store.Store, gw *gatewayclient.Client, tr *tools.Registry, cfg Config) (*Service, error) {
+	if err := tools.ValidateToolOrder(cfg.ToolOrder); err != nil {
+		return nil, fmt.Errorf("invalid ToolOrder: %w", err)
+	}
+	if tr != nil && cfg.ToolOrder != nil {
+		known := make(map[string]bool)
+		for _, info := range tr.AllTools() {
+			known[info.Name] = true
+		}
+		if unknown := tools.UnknownToolOrderNames(cfg.ToolOrder, known); len(unknown) > 0 {
+			return nil, fmt.Errorf("ToolOrder names unregistered tool(s): %v", unknown)
+		}
+	}
 	return &Service{
 		store: st, gateway: gw, tools: tr, cfg: cfg.withDefaults(),
 		pending: make(map[string]chan string), pendingApprovals: make(map[string]chan tools.ApprovalDecision),
 		heartbeatInterval: heartbeatInterval,
-	}
+	}, nil
 }
 
 // Tools passes through the registry's full tool listing (enabled or not)
@@ -501,7 +526,7 @@ func (s *Service) runLoop(ctx context.Context, sessionID, model string, depth in
 
 		nearBudget := turn == totalTurns-1
 		projectContext, haveProjectContext := loadProjectContext(s.cfg.Workspace)
-		preambleParts := compilePreamble(s.cfg.Workspace, projectContext, haveProjectContext, memoryMsg, haveMemory, s.tools)
+		preambleParts := compilePreamble(s.cfg.Workspace, projectContext, haveProjectContext, memoryMsg, haveMemory, s.tools, s.cfg.ToolOrder)
 		postscriptParts := compileTurnPostscript(emptyRetryUsed, nearBudget)
 		// Keep the visible definitions separately from the subset offered on
 		// this turn. The final soft-landing turn deliberately offers no tools,

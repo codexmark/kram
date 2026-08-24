@@ -26,7 +26,11 @@ func coverageService(t *testing.T) *Service {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
-	return New(st, gatewayclient.New("http://127.0.0.1:1"), tools.NewRegistry(workspace, st, nil), Config{Workspace: workspace})
+	svc, err := New(st, gatewayclient.New("http://127.0.0.1:1"), tools.NewRegistry(workspace, st, nil), Config{Workspace: workspace})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return svc
 }
 
 func TestConfigDefaultsAndServiceRegistryPassthrough(t *testing.T) {

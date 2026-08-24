@@ -11,7 +11,7 @@ import (
 )
 
 func TestCompilePreambleBaseOnly(t *testing.T) {
-	parts := compilePreamble("/ws", "", false, openai.ChatMessage{}, false, nil)
+	parts := compilePreamble("/ws", "", false, openai.ChatMessage{}, false, nil, nil)
 
 	if len(parts) != 1 {
 		t.Fatalf("parts = %d, want 1 (base only): %+v", len(parts), parts)
@@ -26,7 +26,7 @@ func TestCompilePreambleBaseOnly(t *testing.T) {
 }
 
 func TestCompilePreambleWithProjectContextOnly(t *testing.T) {
-	parts := compilePreamble("/ws", "some AGENTS.md text", true, openai.ChatMessage{}, false, nil)
+	parts := compilePreamble("/ws", "some AGENTS.md text", true, openai.ChatMessage{}, false, nil, nil)
 
 	if len(parts) != 2 {
 		t.Fatalf("parts = %d, want 2 (base + project-context): %+v", len(parts), parts)
@@ -45,7 +45,7 @@ func TestCompilePreambleWithProjectContextOnly(t *testing.T) {
 
 func TestCompilePreambleWithMemoryOnly(t *testing.T) {
 	memMsg := openai.ChatMessage{Role: "system", Content: "remembered fact"}
-	parts := compilePreamble("/ws", "", false, memMsg, true, nil)
+	parts := compilePreamble("/ws", "", false, memMsg, true, nil, nil)
 
 	if len(parts) != 2 {
 		t.Fatalf("parts = %d, want 2 (base + memory): %+v", len(parts), parts)
@@ -61,7 +61,7 @@ func TestCompilePreambleWithMemoryOnly(t *testing.T) {
 
 func TestCompilePreambleWithBothProjectContextAndMemory(t *testing.T) {
 	memMsg := openai.ChatMessage{Content: "remembered fact"}
-	parts := compilePreamble("/ws", "ctx", true, memMsg, true, nil)
+	parts := compilePreamble("/ws", "ctx", true, memMsg, true, nil, nil)
 
 	if len(parts) != 3 {
 		t.Fatalf("parts = %d, want 3 (base, project-context, memory): %+v", len(parts), parts)
@@ -79,7 +79,7 @@ func TestCompilePreambleWithBothProjectContextAndMemory(t *testing.T) {
 // compilePreamble's own "only include if present" handling — nil reg is
 // the shape evals/tests without a tool registry produce.
 func TestCompileToolsOverviewNilRegistryReturnsEmptyPart(t *testing.T) {
-	p := compileToolsOverview(nil)
+	p := compileToolsOverview(nil, nil)
 	if p.ID != "tools-overview" || p.Content != "" {
 		t.Errorf("nil registry part = %+v, want ID=tools-overview and empty Content", p)
 	}
@@ -94,7 +94,7 @@ func TestCompileToolsOverviewNilRegistryReturnsEmptyPart(t *testing.T) {
 func TestCompileToolsOverviewListsEnabledToolsAndSkipsDisabled(t *testing.T) {
 	reg := tools.NewRegistry(t.TempDir(), nil, map[string]bool{"bash": true})
 
-	p := compileToolsOverview(reg)
+	p := compileToolsOverview(reg, nil)
 
 	if !strings.HasPrefix(p.Content, "# Tools\n") {
 		t.Errorf("content should start with the # Tools header, got %q", p.Content[:min(40, len(p.Content))])
@@ -138,7 +138,7 @@ func TestCompileToolsOverviewExcludesPermissionFullyDeniedTool(t *testing.T) {
 	}
 
 	reg := tools.NewRegistry(workspace, nil, nil)
-	p := compileToolsOverview(reg)
+	p := compileToolsOverview(reg, nil)
 
 	if strings.Contains(p.Content, "delete_file — ") {
 		t.Errorf("a permission-denied tool must not be announced in the prompt with no matching wire-schema function, got: %s", p.Content)
@@ -154,6 +154,26 @@ func TestCompileToolsOverviewExcludesPermissionFullyDeniedTool(t *testing.T) {
 	}
 	if !foundInAllTools {
 		t.Fatal("test setup issue: delete_file should still be a registered tool")
+	}
+}
+
+// TestCompileToolsOverviewHonorsToolOrder confirms a configured order
+// changes the overview's rendered line order, not just VisibleTools()'s
+// own default alphabetical sort — the presentation-only ordering feature
+// this function exists to support (see tools.OrderToolNames).
+func TestCompileToolsOverviewHonorsToolOrder(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir()) // isolate from any real global permissions.json
+	reg := tools.NewRegistry(t.TempDir(), nil, nil)
+
+	p := compileToolsOverview(reg, []string{"run_background", tools.ToolOrderRest})
+
+	runBackgroundLine := strings.Index(p.Content, "run_background — ")
+	bashLine := strings.Index(p.Content, "bash — ")
+	if runBackgroundLine == -1 || bashLine == -1 {
+		t.Fatalf("expected both run_background and bash to appear, got: %s", p.Content)
+	}
+	if runBackgroundLine > bashLine {
+		t.Errorf("run_background should be listed before bash when explicitly ordered first, got:\n%s", p.Content)
 	}
 }
 

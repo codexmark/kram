@@ -134,16 +134,27 @@ const (
 // reg may be nil (evals/tests that build a Service without a tool
 // registry) — returns an empty part in that case, matching how the rest
 // of this file degrades gracefully when its inputs are absent.
-func compileToolsOverview(reg *tools.Registry) PromptPart {
+//
+// order curates presentation order only — see tools.OrderToolNames and
+// Config.ToolOrder's own doc comment. nil (the common case) preserves
+// today's plain alphabetical order exactly.
+func compileToolsOverview(reg *tools.Registry, order []string) PromptPart {
 	if reg == nil {
 		return PromptPart{ID: "tools-overview", Placement: PlacementPreamble, Refresh: RefreshStatic, Source: "builtin"}
 	}
 
+	visible := reg.VisibleTools()
+	names := make([]string, len(visible))
+	for i, t := range visible {
+		names[i] = t.Name()
+	}
+	names = tools.OrderToolNames(names, order)
+
 	var b strings.Builder
 	b.WriteString(toolsOverviewHeader)
-	for _, t := range reg.VisibleTools() {
-		md := reg.ToolMetadata(t.Name())
-		line := t.Name() + " — " + md.Summary
+	for _, name := range names {
+		md := reg.ToolMetadata(name)
+		line := name + " — " + md.Summary
 		if md.PreferOver != "" {
 			line += " (use this instead of " + md.PreferOver + ")"
 		}
@@ -161,12 +172,12 @@ func compileToolsOverview(reg *tools.Registry) PromptPart {
 // before this refactor existed — base identity, the tools overview
 // (generated — see compileToolsOverview), project context, and memory,
 // in that order, each only included if present.
-func compilePreamble(workspace, projectContext string, haveProjectContext bool, memoryMsg openai.ChatMessage, haveMemory bool, reg *tools.Registry) []PromptPart {
+func compilePreamble(workspace, projectContext string, haveProjectContext bool, memoryMsg openai.ChatMessage, haveMemory bool, reg *tools.Registry, toolOrder []string) []PromptPart {
 	parts := []PromptPart{
 		{ID: "base", Placement: PlacementPreamble, Refresh: RefreshStatic, Source: "builtin", Content: systemPrompt(workspace)},
 	}
 	if reg != nil {
-		parts = append(parts, compileToolsOverview(reg))
+		parts = append(parts, compileToolsOverview(reg, toolOrder))
 	}
 	if haveProjectContext {
 		parts = append(parts, PromptPart{

@@ -3412,3 +3412,63 @@ Tools-section fix was pure generation-mechanism change. No test asserted
 on the removed prose's exact wording, so no test updates were needed;
 `gofmt`/`vet`/`go test ./internal/daemon/agent/... ./internal/cli/app/...
 -race` all pass unchanged.
+
+---
+
+## Curated ordering for the generated Tools overview
+
+`compileToolsOverview` always rendered `VisibleTools()`'s tools in plain
+alphabetical order — no relationship to how often or how early a tool is
+actually needed, which matters more for the small/free-tier models
+Kram's fallback chain realistically runs on than for a frontier one.
+
+`internal/daemon/tools/toolorder.go` adds `ToolOrderRest` (the reserved
+`"<unlisted-tools>"` marker) plus two pure, registry-independent
+functions: `ValidateToolOrder` (structural — no duplicate entries,
+exactly one rest marker) and `OrderToolNames` (arranges an already-
+alphabetical name list per a configured order, inserting everything not
+explicitly listed, still alphabetical, at the rest marker's position).
+Deliberately two separate concerns in two functions: `ValidateToolOrder`
+needs no registry and can run before one exists, while checking that a
+listed name actually corresponds to a *registered* tool needs the real
+tool universe — that's `UnknownToolOrderNames`, called separately once a
+registry exists.
+
+`Config.ToolOrder []string` (`internal/daemon/agent`) is the new
+deployment-facing field. `New` is now fallible — `(*Service, error)`,
+was `*Service` — specifically so a malformed order or an unregistered
+tool name fails loudly at construction instead of the tool silently
+never appearing in the overview, the exact "fail loud" precedent the
+`VisibleTools()` fix (see the Tool Semantics Registry entry above) set.
+Four real call sites needed updating for the new signature
+(`daemon.go`, two in `server_test.go`, plus in-package test helpers in
+`promptassembly_test.go`/`service_coverage_test.go`) — a small,
+contained ripple, not the kind of change that argues against making a
+constructor properly fallible when it has something real to fail on.
+
+Deliberately **not** wired into `daemon.Config` or a CLI flag in this
+pass — `daemon.Config` already exposes only a handful of `agent.Config`'s
+many fields (most are defaulted inside `agent.New`/`withDefaults` with no
+corresponding flag at all), so `ToolOrder` staying a programmatic-only
+`agent.Config` field for now matches the existing pattern rather than
+being an oversight. Exposing it as a config-file key or CLI flag is a
+natural, low-risk follow-up once real usage wants it.
+
+`compileToolsOverview` itself only changed to route through
+`OrderToolNames` — `reg.VisibleTools()` still decides what's visible;
+ordering never adds to or removes from that set, and `Definitions()`'s
+wire-format tool array is untouched by this entirely, on purpose (no
+reason the model's actual tool-calling schema needs to care about
+presentation order, and touching it would risk reopening the exact
+two-code-paths-disagree bug class the `VisibleTools()` fix closed).
+
+One real bug caught along the way, in a new test rather than in shipped
+code: an early version of the ordering test used `"bash"` as its
+example tool and failed — not because ordering was wrong, but because
+`bash` was permission-denied on the machine running the test via a real
+global `~/.config/kram-gateway/permissions.json`, which `NewRegistry`
+legitimately reads (`permission.LoadConfig` merges the global file with
+the workspace's own). The test wasn't isolating `XDG_CONFIG_HOME` the
+way `permission_test.go`'s own `newPermTestRegistry` already does for
+exactly this reason — fixed by adding the same isolation, not by
+changing any product code.
