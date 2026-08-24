@@ -199,7 +199,7 @@ func (p *Gemini) ChatCompletion(ctx context.Context, req openai.ChatCompletionRe
 		model = p.model
 	}
 
-	system, contents := buildGeminiContents(req.Messages)
+	system, contents := buildGeminiContents(sanitizeToolHistory(req.Messages))
 
 	body := geminiRequest{SystemInstruction: system, Contents: contents, Tools: buildGeminiTools(req.Tools)}
 	payload, err := json.Marshal(body)

@@ -95,10 +95,10 @@ func TestResponsesTranslationAllMessageShapes(t *testing.T) {
 	if got[1].Content[0].Type != "output_text" || got[2].Type != "function_call" || got[4].Type != "function_call_output" {
 		t.Fatalf("input=%#v", got)
 	}
-	if buildResponsesTools(nil) != nil {
+	if buildResponsesTools(nil, true) != nil {
 		t.Fatal("empty tools should remain omitted")
 	}
-	if tools := buildResponsesTools(representativeTools()); len(tools) != 1 || tools[0].Type != "function" || tools[0].Name != "lookup" {
+	if tools := buildResponsesTools(representativeTools(), true); len(tools) != 2 || tools[0].Type != "function" || !tools[0].DeferLoading || tools[0].Name != "lookup" || tools[1].Type != "tool_search" {
 		t.Fatalf("tools=%#v", tools)
 	}
 }

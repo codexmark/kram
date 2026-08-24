@@ -213,7 +213,7 @@ func (p *Anthropic) ChatCompletion(ctx context.Context, req openai.ChatCompletio
 		model = p.model
 	}
 
-	system, messages := buildAnthropicMessages(req.Messages)
+	system, messages := buildAnthropicMessages(sanitizeToolHistory(req.Messages))
 
 	maxTokens := 4096
 	if req.MaxTokens != nil {

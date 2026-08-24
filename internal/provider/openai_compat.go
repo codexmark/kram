@@ -144,7 +144,7 @@ func (p *OpenAICompatible) ChatCompletion(ctx context.Context, req openai.ChatCo
 	body := req
 	body.Model = model
 	body.Stream = true
-	body.Messages = normalizeOpenAICompatMessages(body.Messages)
+	body.Messages = normalizeOpenAICompatMessages(sanitizeToolHistory(body.Messages))
 
 	payload, err := json.Marshal(body)
 	if err != nil {

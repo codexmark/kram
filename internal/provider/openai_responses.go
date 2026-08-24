@@ -5,7 +5,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/codexmark/kram/internal/openai"
@@ -76,13 +78,19 @@ type responsesInputItem struct {
 
 	// function_call_output (kram → reporting what a tool returned)
 	Output string `json:"output,omitempty"`
+
+	// encrypted reasoning replay (store:false continuity)
+	ID               string          `json:"id,omitempty"`
+	EncryptedContent string          `json:"encrypted_content,omitempty"`
+	Summary          json.RawMessage `json:"summary,omitempty"`
 }
 
 type responsesTool struct {
-	Type        string          `json:"type"` // "function"
-	Name        string          `json:"name"`
-	Description string          `json:"description,omitempty"`
-	Parameters  json.RawMessage `json:"parameters,omitempty"`
+	Type         string          `json:"type"` // "function" or "tool_search"
+	Name         string          `json:"name,omitempty"`
+	Description  string          `json:"description,omitempty"`
+	Parameters   json.RawMessage `json:"parameters,omitempty"`
+	DeferLoading bool            `json:"defer_loading,omitempty"`
 }
 
 type responsesRequest struct {
@@ -90,7 +98,13 @@ type responsesRequest struct {
 	Instructions string               `json:"instructions,omitempty"`
 	Input        []responsesInputItem `json:"input"`
 	Stream       bool                 `json:"stream"`
-	Tools        []responsesTool      `json:"tools,omitempty"`
+	// The ChatGPT-authenticated Codex backend rejects requests unless
+	// persistence is disabled explicitly ("Store must be set to false").
+	// Keep the field non-omitempty so false is present on the wire.
+	Store          bool            `json:"store"`
+	Tools          []responsesTool `json:"tools,omitempty"`
+	Include        []string        `json:"include,omitempty"`
+	PromptCacheKey string          `json:"prompt_cache_key,omitempty"`
 }
 
 // buildResponsesInput translates Kram's normalized messages into the
@@ -111,6 +125,11 @@ func buildResponsesInput(msgs []openai.ChatMessage) (instructions string, out []
 			out = append(out, responsesInputItem{Type: "function_call_output", CallID: m.ToolCallID, Output: m.Content})
 
 		case "assistant":
+			for _, item := range m.ProviderItems {
+				if item.Type == "reasoning" && item.EncryptedContent != "" {
+					out = append(out, responsesInputItem{Type: item.Type, ID: item.ID, EncryptedContent: item.EncryptedContent, Summary: item.Summary})
+				}
+			}
 			if m.Content != "" {
 				out = append(out, responsesInputItem{
 					Type: "message", Role: "assistant",
@@ -133,15 +152,29 @@ func buildResponsesInput(msgs []openai.ChatMessage) (instructions string, out []
 	return instructions, out
 }
 
-func buildResponsesTools(tools []openai.Tool) []responsesTool {
+func buildResponsesTools(tools []openai.Tool, deferred bool) []responsesTool {
 	if len(tools) == 0 {
 		return nil
 	}
-	out := make([]responsesTool, 0, len(tools))
+	extra := 0
+	if deferred {
+		extra = 1
+	}
+	out := make([]responsesTool, 0, len(tools)+extra)
 	for _, t := range tools {
-		out = append(out, responsesTool{Type: "function", Name: t.Function.Name, Description: t.Function.Description, Parameters: t.Function.Parameters})
+		out = append(out, responsesTool{Type: "function", Name: t.Function.Name, Description: t.Function.Description, Parameters: t.Function.Parameters, DeferLoading: deferred})
+	}
+	// GPT-5.4+ can discover deferred function schemas only when needed. The
+	// complete inventory remains known to hosted tool search, but schemas no
+	// longer consume every tool-calling round's prompt.
+	if deferred {
+		out = append(out, responsesTool{Type: "tool_search"})
 	}
 	return out
+}
+
+func supportsHostedToolSearch(model string) bool {
+	return strings.HasPrefix(model, "gpt-5.4") || strings.HasPrefix(model, "gpt-5.5") || strings.HasPrefix(model, "gpt-5.6")
 }
 
 // responsesStreamEvent covers the handful of Responses API streaming
@@ -150,18 +183,31 @@ func buildResponsesTools(tools []openai.Tool) []responsesTool {
 // before its argument deltas arrive), and the terminal "completed" event
 // carrying usage.
 type responsesStreamEvent struct {
-	Type  string `json:"type"`
-	Delta string `json:"delta"`
-	Item  struct {
-		Type      string `json:"type"`
-		CallID    string `json:"call_id"`
-		Name      string `json:"name"`
-		Arguments string `json:"arguments"`
+	Type        string `json:"type"`
+	Delta       string `json:"delta"`
+	Arguments   string `json:"arguments"`
+	ItemID      string `json:"item_id"`
+	OutputIndex int    `json:"output_index"`
+	Item        struct {
+		ID               string          `json:"id"`
+		Type             string          `json:"type"`
+		CallID           string          `json:"call_id"`
+		Name             string          `json:"name"`
+		Arguments        string          `json:"arguments"`
+		EncryptedContent string          `json:"encrypted_content"`
+		Summary          json.RawMessage `json:"summary"`
 	} `json:"item"`
 	Response struct {
 		Usage struct {
-			InputTokens  int `json:"input_tokens"`
-			OutputTokens int `json:"output_tokens"`
+			InputTokens        int `json:"input_tokens"`
+			OutputTokens       int `json:"output_tokens"`
+			InputTokensDetails struct {
+				CachedTokens     int `json:"cached_tokens"`
+				CacheWriteTokens int `json:"cache_write_tokens"`
+			} `json:"input_tokens_details"`
+			OutputTokensDetails struct {
+				ReasoningTokens int `json:"reasoning_tokens"`
+			} `json:"output_tokens_details"`
 		} `json:"usage"`
 	} `json:"response"`
 }
@@ -172,14 +218,17 @@ func (p *OpenAIResponses) ChatCompletion(ctx context.Context, req openai.ChatCom
 		model = p.model
 	}
 
-	instructions, input := buildResponsesInput(req.Messages)
+	instructions, input := buildResponsesInput(sanitizeToolHistory(req.Messages))
 
 	body := responsesRequest{
-		Model:        model,
-		Instructions: instructions,
-		Input:        input,
-		Stream:       true,
-		Tools:        buildResponsesTools(req.Tools),
+		Model:          model,
+		Instructions:   instructions,
+		Input:          input,
+		Stream:         true,
+		Store:          false,
+		Tools:          buildResponsesTools(req.Tools, supportsHostedToolSearch(model)),
+		Include:        []string{"reasoning.encrypted_content"},
+		PromptCacheKey: req.PromptCacheKey,
 	}
 
 	payload, err := json.Marshal(body)
@@ -206,7 +255,11 @@ func (p *OpenAIResponses) ChatCompletion(ctx context.Context, req openai.ChatCom
 	}
 	if resp.StatusCode >= 400 {
 		defer resp.Body.Close()
-		return nil, &HTTPError{Provider: p.id, StatusCode: resp.StatusCode, Status: resp.Status}
+		detail, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return nil, &HTTPError{
+			Provider: p.id, StatusCode: resp.StatusCode, Status: resp.Status,
+			Detail: strings.Join(strings.Fields(string(detail)), " "),
+		}
 	}
 
 	events := make(chan StreamEvent, 16)
@@ -215,8 +268,9 @@ func (p *OpenAIResponses) ChatCompletion(ctx context.Context, req openai.ChatCom
 		defer resp.Body.Close()
 
 		toolCalls := newToolCallAccumulator()
-		toolCallIndex := map[string]int{} // call_id -> accumulator index
-		var inputTokens, outputTokens int
+		toolArgsSeen := map[int]bool{}
+		var inputTokens, outputTokens, cachedTokens, cacheWriteTokens, reasoningTokens int
+		var providerItems []openai.ProviderItem
 
 		err := scanSSEData(resp.Body, func(data string) bool {
 			var evt responsesStreamEvent
@@ -234,24 +288,33 @@ func (p *OpenAIResponses) ChatCompletion(ctx context.Context, req openai.ChatCom
 				}
 			case "response.output_item.added":
 				if evt.Item.Type == "function_call" {
-					idx := len(toolCallIndex)
-					toolCallIndex[evt.Item.CallID] = idx
-					toolCalls.add(idx, evt.Item.CallID, evt.Item.Name, evt.Item.Arguments)
+					toolCalls.add(evt.OutputIndex, evt.Item.CallID, evt.Item.Name, evt.Item.Arguments)
+					toolArgsSeen[evt.OutputIndex] = evt.Item.Arguments != ""
+				}
+			case "response.output_item.done":
+				if evt.Item.Type == "reasoning" && evt.Item.EncryptedContent != "" {
+					providerItems = append(providerItems, openai.ProviderItem{Type: "reasoning", ID: evt.Item.ID, EncryptedContent: evt.Item.EncryptedContent, Summary: evt.Item.Summary})
 				}
 			case "response.function_call_arguments.delta":
-				// The delta carries the call_id via Item.CallID on some
-				// server builds and only positionally otherwise; when
-				// unknown, accumulate under a synthetic trailing index
-				// rather than dropping the fragment.
-				idx, ok := toolCallIndex[evt.Item.CallID]
-				if !ok {
-					idx = len(toolCallIndex)
-					toolCallIndex[evt.Item.CallID] = idx
+				// Codex identifies argument deltas by item_id/output_index,
+				// not by nesting call_id under item. OutputIndex is therefore
+				// the stable join key; using an absent call_id here used to
+				// create a second, nameless phantom tool call.
+				toolCalls.add(evt.OutputIndex, "", "", evt.Delta)
+				toolArgsSeen[evt.OutputIndex] = true
+			case "response.function_call_arguments.done":
+				// Some server builds send the complete arguments only in the
+				// done event. Do not append them when deltas already assembled
+				// the same value.
+				if !toolArgsSeen[evt.OutputIndex] && evt.Arguments != "" {
+					toolCalls.add(evt.OutputIndex, "", "", evt.Arguments)
 				}
-				toolCalls.add(idx, "", "", evt.Delta)
 			case "response.completed":
 				inputTokens = evt.Response.Usage.InputTokens
 				outputTokens = evt.Response.Usage.OutputTokens
+				cachedTokens = evt.Response.Usage.InputTokensDetails.CachedTokens
+				cacheWriteTokens = evt.Response.Usage.InputTokensDetails.CacheWriteTokens
+				reasoningTokens = evt.Response.Usage.OutputTokensDetails.ReasoningTokens
 				return false
 			}
 			return true
@@ -260,12 +323,33 @@ func (p *OpenAIResponses) ChatCompletion(ctx context.Context, req openai.ChatCom
 			events <- StreamEvent{Err: fmt.Errorf("%s: stream read: %w", p.id, err)}
 			return
 		}
-		events <- StreamEvent{Done: true, ToolCalls: toolCalls.finish(), Usage: &openai.Usage{
-			PromptTokens:     inputTokens,
-			CompletionTokens: outputTokens,
-			TotalTokens:      inputTokens + outputTokens,
-		}}
+		usage := &openai.Usage{
+			PromptTokens:       inputTokens,
+			CompletionTokens:   outputTokens,
+			TotalTokens:        inputTokens + outputTokens,
+			CachedPromptTokens: cachedTokens, CacheWritePromptTokens: cacheWriteTokens,
+			ReasoningTokens: reasoningTokens,
+		}
+		usage.EstimatedCostMicros = responsesEquivalentCostMicros(model, *usage)
+		events <- StreamEvent{Done: true, ToolCalls: toolCalls.finish(), ProviderItems: providerItems, Usage: usage}
 	}()
 
 	return events, nil
+}
+
+func responsesEquivalentCostMicros(model string, usage openai.Usage) int64 {
+	if !strings.HasPrefix(model, "gpt-5.5") && !strings.HasPrefix(model, "gpt-5.6") {
+		return 0
+	}
+	uncached := usage.PromptTokens - usage.CachedPromptTokens - usage.CacheWritePromptTokens
+	if uncached < 0 {
+		uncached = 0
+	}
+	// Current GPT-5.5/5.6 list price: $5/M input, $0.50/M cache read,
+	// $30/M output. GPT-5.6 cache writes are $6.25/M; 5.5 uses input rate.
+	writeRate := int64(5_000_000)
+	if strings.HasPrefix(model, "gpt-5.6") {
+		writeRate = 6_250_000
+	}
+	return (int64(uncached)*5_000_000 + int64(usage.CachedPromptTokens)*500_000 + int64(usage.CacheWritePromptTokens)*writeRate + int64(usage.CompletionTokens)*30_000_000) / 1_000_000
 }

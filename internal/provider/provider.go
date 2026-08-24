@@ -48,6 +48,7 @@ type StreamEvent struct {
 	Done             bool
 	Usage            *openai.Usage
 	ToolCalls        []openai.ToolCall
+	ProviderItems    []openai.ProviderItem
 	Err              error
 }
 
@@ -95,8 +96,15 @@ type HTTPError struct {
 	// Zero when absent or unparseable; a caller deciding on a Gateway
 	// Round retry then falls back to its own computed backoff.
 	RetryAfter time.Duration
+	// Detail is a bounded upstream error body when the adapter can safely
+	// capture one. It makes otherwise opaque 400s diagnosable without logging
+	// request credentials or the full request payload.
+	Detail string
 }
 
 func (e *HTTPError) Error() string {
+	if e.Detail != "" {
+		return fmt.Sprintf("%s: upstream returned %s: %s", e.Provider, e.Status, e.Detail)
+	}
 	return fmt.Sprintf("%s: upstream returned %s", e.Provider, e.Status)
 }

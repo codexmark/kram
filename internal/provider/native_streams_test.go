@@ -97,7 +97,7 @@ func TestResponsesFullStreamResolverAndFailures(t *testing.T) {
 			t.Errorf("auth=%q", r.Header.Get("Authorization"))
 		}
 		w.Header().Set("Content-Type", "text/event-stream")
-		lines := []string{"bad", `{"type":"response.output_text.delta","delta":"ok"}`, `{"type":"response.output_item.added","item":{"type":"function_call","call_id":"c1","name":"tool","arguments":"{"}}`, `{"type":"response.function_call_arguments.delta","delta":"}","item":{"call_id":"c1"}}`, `{"type":"response.function_call_arguments.delta","delta":"{}","item":{"call_id":"unknown"}}`, `{"type":"response.completed","response":{"usage":{"input_tokens":6,"output_tokens":7}}}`}
+		lines := []string{"bad", `{"type":"response.output_text.delta","delta":"ok"}`, `{"type":"response.output_item.added","output_index":0,"item":{"id":"fc1","type":"function_call","call_id":"c1","name":"tool","arguments":"{"}}`, `{"type":"response.function_call_arguments.delta","item_id":"fc1","output_index":0,"delta":"}"}`, `{"type":"response.completed","response":{"usage":{"input_tokens":6,"output_tokens":7}}}`}
 		for _, line := range lines {
 			fmt.Fprintf(w, "data: %s\n\n", line)
 		}
@@ -111,7 +111,7 @@ func TestResponsesFullStreamResolverAndFailures(t *testing.T) {
 	}
 	got := collectEvents(t, events)
 	last := got[len(got)-1]
-	if got[0].Delta != "ok" || !last.Done || last.Usage.TotalTokens != 13 || len(last.ToolCalls) != 2 {
+	if got[0].Delta != "ok" || !last.Done || last.Usage.TotalTokens != 13 || len(last.ToolCalls) != 1 || last.ToolCalls[0].Function.Arguments != "{}" {
 		t.Fatalf("events=%#v", got)
 	}
 	badResolve := NewOpenAIResponses("r", srv.URL, func(context.Context) (string, error) { return "", errors.New("expired") }, "", capabilities{})
