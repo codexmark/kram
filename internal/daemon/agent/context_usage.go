@@ -76,6 +76,9 @@ func (s *Service) ContextUsage(ctx context.Context, sessionID string) (ContextUs
 		{Name: "tool_overview", Tokens: partTokens["tools-overview"]},
 		{Name: "tool_definitions", Tokens: toolTokens},
 	}
+	if partTokens["background-job-guidance"] > 0 {
+		categories = append(categories, ContextCategory{Name: "background_job_guidance", Tokens: partTokens["background-job-guidance"]})
+	}
 	if partTokens["project-context"] > 0 {
 		categories = append(categories, ContextCategory{Name: "project_context", Tokens: partTokens["project-context"]})
 	}

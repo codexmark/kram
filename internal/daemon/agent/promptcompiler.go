@@ -168,16 +168,58 @@ func compileToolsOverview(reg *tools.Registry, order []string) PromptPart {
 	}
 }
 
+// backgroundJobGuidance is the cross-call habit no single tool's own
+// Description() can carry: run_background, process_list, process_output,
+// and process_kill each explain what they individually do, but nothing
+// tells the model how to use several of them together well. Written in
+// terms of what Kram's daemon actually supports today — polling, not
+// push notification (there is no job-finished event) — see
+// compileBackgroundJobGuidance's own doc comment for why this is
+// conditional on run_background actually being visible.
+const backgroundJobGuidance = `# Background processes
+
+Use run_background, not bash, for anything that keeps running (a dev server, a watcher, a build daemon).
+Track the process id it returns.
+Do not busy-poll process_output right after starting a job — check it at a natural point (after finishing other independent work, or right before answering if the job's output matters to your answer).
+process_kill a job once it is no longer needed rather than leaving it running past the turn.
+process_list recovers state if you lose track of which ids are still relevant — there is no notification when a job finishes; you have to check.`
+
+// compileBackgroundJobGuidance returns the background-process cross-call
+// guidance, but only when run_background is actually visible to the
+// model in this workspace — a deployment where the tool is disabled or
+// permission-denied shouldn't be told a workflow it can't use, the same
+// reasoning compileToolsOverview already applies per-tool via
+// VisibleTools(). reg == nil (evals/tests without a registry) also
+// returns an empty part, matching every other part's degrade-gracefully
+// behavior in this file.
+func compileBackgroundJobGuidance(reg *tools.Registry) PromptPart {
+	part := PromptPart{ID: "background-job-guidance", Placement: PlacementPreamble, Refresh: RefreshStatic, Source: "builtin"}
+	if reg == nil {
+		return part
+	}
+	for _, t := range reg.VisibleTools() {
+		if t.Name() == "run_background" {
+			part.Content = backgroundJobGuidance
+			return part
+		}
+	}
+	return part
+}
+
 // compilePreamble reproduces what runLoop's preamble block built inline
 // before this refactor existed — base identity, the tools overview
-// (generated — see compileToolsOverview), project context, and memory,
-// in that order, each only included if present.
+// (generated — see compileToolsOverview), background-job guidance
+// (generated — see compileBackgroundJobGuidance), project context, and
+// memory, in that order, each only included if present.
 func compilePreamble(workspace, projectContext string, haveProjectContext bool, memoryMsg openai.ChatMessage, haveMemory bool, reg *tools.Registry, toolOrder []string) []PromptPart {
 	parts := []PromptPart{
 		{ID: "base", Placement: PlacementPreamble, Refresh: RefreshStatic, Source: "builtin", Content: systemPrompt(workspace)},
 	}
 	if reg != nil {
 		parts = append(parts, compileToolsOverview(reg, toolOrder))
+		if guidance := compileBackgroundJobGuidance(reg); guidance.Content != "" {
+			parts = append(parts, guidance)
+		}
 	}
 	if haveProjectContext {
 		parts = append(parts, PromptPart{
