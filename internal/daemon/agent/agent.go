@@ -541,7 +541,16 @@ func (s *Service) runLoop(ctx context.Context, sessionID, model string, depth in
 
 		nearBudget := turn == totalTurns-1
 		projectContext, haveProjectContext := loadProjectContext(s.cfg.Workspace)
-		preambleParts := compilePreamble(s.cfg.Workspace, projectContext, haveProjectContext, memoryMsg, haveMemory, s.tools, s.cfg.ToolOrder, s.cfg.SystemPromptOverride)
+		// Only actually inject a fresh project-context/memory part when its
+		// content isn't already sitting, unchanged, in this session's own
+		// effective history from an earlier turn — see needsFreshInjection's
+		// doc comment. haveProjectContext/haveMemory above stay "is there
+		// any context/memory at all"; injectProjectContext/injectMemory is
+		// the narrower "does the model need a fresh copy on this call"
+		// compilePreamble actually consumes.
+		injectProjectContext := haveProjectContext && needsFreshInjection(effective, projectContextMarkerName, formatProjectContextContent(projectContext))
+		injectMemory := haveMemory && needsFreshInjection(effective, memoryMarkerName, memoryMsg.Content)
+		preambleParts := compilePreamble(s.cfg.Workspace, projectContext, injectProjectContext, memoryMsg, injectMemory, s.tools, s.cfg.ToolOrder, s.cfg.SystemPromptOverride)
 		postscriptParts := compileTurnPostscript(emptyRetryUsed, nearBudget)
 		// Keep the visible definitions separately from the subset offered on
 		// this turn. The final soft-landing turn deliberately offers no tools,
@@ -576,18 +585,44 @@ func (s *Service) runLoop(ctx context.Context, sessionID, model string, depth in
 			effective = pruned
 		}
 
+		// Persist a breadcrumb for whichever of project-context/memory is
+		// actually being injected fresh this call — the record
+		// needsFreshInjection reads back on a later turn to decide it can
+		// skip resending unchanged content (see promptcompiler.go). Only
+		// reached once we're actually proceeding to call the model this
+		// iteration (the Compact case above continues before this point),
+		// so a marker is never persisted for a decision that gets discarded.
+		if injectProjectContext {
+			if _, err := s.store.AppendMessage(sessionID, store.Message{
+				Role: "system", Name: projectContextMarkerName, Content: formatProjectContextContent(projectContext),
+			}); err != nil {
+				return RunResult{}, fmt.Errorf("persisting project-context marker: %w", err)
+			}
+		}
+		if injectMemory {
+			if _, err := s.store.AppendMessage(sessionID, store.Message{
+				Role: "system", Name: memoryMarkerName, Content: memoryMsg.Content,
+			}); err != nil {
+				return RunResult{}, fmt.Errorf("persisting memory marker: %w", err)
+			}
+		}
+
 		// Preamble order, most general first: who you are and how to work
 		// (systemPrompt) → this project's own rules (AGENTS.md) → facts
 		// remembered about this user/project (memory) → the conversation
-		// → any turn-specific reminders. None of the preamble is persisted
-		// into history: each part is rebuilt every turn from its current
-		// source, so editing AGENTS.md or writing a memory mid-conversation
-		// takes effect on the very next message instead of requiring a
-		// restart. Built via the Prompt Compiler (promptcompiler.go) —
-		// same messages this block always produced, just assembled through
-		// PromptPart values instead of inline literals, so the ordering and
-		// per-part refresh cadence are real, inspectable data instead of
-		// implicit in append-call order.
+		// → any turn-specific reminders. Project-context/memory are the
+		// two exceptions to "none of the preamble is persisted": once
+		// injected, a marker breadcrumb (not recomputed from scratch) lives
+		// on in history so an unchanged copy doesn't need resending on
+		// every later turn — see needsFreshInjection above. Everything
+		// else in the preamble is still rebuilt every turn from its
+		// current source, so editing AGENTS.md or writing a memory mid-
+		// conversation still takes effect on the very next message.
+		// Built via the Prompt Compiler (promptcompiler.go) — same
+		// messages this block always produced, just assembled through
+		// PromptPart values instead of inline literals, so the ordering
+		// and per-part refresh cadence are real, inspectable data instead
+		// of implicit in append-call order.
 		preamble := partsToMessages(preambleParts)
 		modelMessages := append(preamble, toModelMessages(effective)...)
 		modelMessages = append(modelMessages, partsToMessages(postscriptParts)...)

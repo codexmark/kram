@@ -59,7 +59,15 @@ func (s *Service) ContextUsage(ctx context.Context, sessionID string) (ContextUs
 
 	memoryMsg, haveMemory := s.recentMemoryMessage()
 	projectContext, haveProjectContext := loadProjectContext(s.cfg.Workspace)
-	parts := compilePreamble(s.cfg.Workspace, projectContext, haveProjectContext, memoryMsg, haveMemory, s.tools, s.cfg.ToolOrder, s.cfg.SystemPromptOverride)
+	// Mirror runLoop's own change-detection gate (see needsFreshInjection):
+	// messageTokens above already counts a persisted project-context/memory
+	// marker's tokens like any other history message, so unconditionally
+	// adding a fresh "project-context"/"memory" category here whenever
+	// content exists would double-count exactly the tokens this session's
+	// next real turn would actually skip resending.
+	injectProjectContext := haveProjectContext && needsFreshInjection(effective, projectContextMarkerName, formatProjectContextContent(projectContext))
+	injectMemory := haveMemory && needsFreshInjection(effective, memoryMarkerName, memoryMsg.Content)
+	parts := compilePreamble(s.cfg.Workspace, projectContext, injectProjectContext, memoryMsg, injectMemory, s.tools, s.cfg.ToolOrder, s.cfg.SystemPromptOverride)
 	toolTokens := estimateToolDefinitionTokens(s.tools.Definitions())
 	partTokens := make(map[string]int, len(parts))
 	for _, part := range parts {

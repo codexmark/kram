@@ -3897,3 +3897,109 @@ by `len(baseSectionOrder) - 1` (eight more parts than the old single
 rather than hardcoded literals, so a tenth base section added later
 doesn't silently desync these tests' expected indices from the real
 assembled order again.
+
+---
+
+## Skip re-injecting unchanged project-context/memory: persist once, reuse from history
+
+Project-context (AGENTS.md/CLAUDE.md) and memory were computed fresh and
+resent as preamble system messages on every eligible turn/iteration
+(`RefreshIteration`/`RefreshRun`), even when the content hadn't changed
+since the model already saw it earlier in the same session — pure waste
+against the context-window budget every single time, since Kram's model
+calls are stateless completions: nothing about a previous call's
+preamble carries forward on its own.
+
+That statelessness is exactly why "skip resending, the model already has
+it" can't just mean "omit the preamble part and trust the model to
+remember" — a completions API genuinely doesn't remember anything not
+present in *this* call's message array. The only way skipping is
+behaviorally safe is if the content the model needs is still actually
+present somewhere else in that array — meaning it has to live in
+*persisted conversation history* (`s.store.AppendMessage`), which
+`runLoop` already includes in full on every call via
+`compaction.EffectiveHistory`/`toModelMessages`, not in the ephemeral,
+recomputed-every-time preamble.
+
+So the mechanism is: the first time (or whenever changed) project-context
+or memory needs injecting, it's added to the preamble as before *and*
+persisted as a real `store.Message{Role: "system", Name: <marker>}` —
+`projectContextMarkerName`/`memoryMarkerName` (`promptcompiler.go`),
+mirroring `compaction.CompactionMarkerName`'s existing tagging
+convention. On a later eligible turn, before building a fresh preamble
+part, `needsFreshInjection` (`promptcompiler.go`) scans **effective**
+history via `lastMarkerContent` — the same "last one wins" scan shape
+`compaction.EffectiveHistory` itself already uses — for the most recent
+marker with that name. An exact content match still present there means
+the model already has it, persisted, included in this call's history for
+free; skip adding a fresh part. A mismatch (content changed) or no
+marker found (never injected, or the marker fell out of the effective
+window) means inject fresh, exactly as before.
+
+**The trickiest part, solved for free**: what if compaction has pruned
+the message that carried the last injection? `effective` here is already
+the *post*-`compaction.EffectiveHistory`-truncation slice — anything
+before the most recent compaction marker is already gone from it before
+`needsFreshInjection` ever runs. A stale project-context/memory marker
+from before a compaction naturally isn't found in the scan, so the
+change-detection gate correctly reports "needs injection" without any
+compaction-specific code in `needsFreshInjection` itself — reusing
+`EffectiveHistory`'s own truncation turned out to *be* the compaction-
+awareness the issue's own text worried this would need bespoke logic
+for. `TestRunLoopReinjectsAfterCompactionPrunesThePriorMarker`
+(`contextinjection_test.go`) pins this directly, simulating compaction by
+appending a real compaction-marker message rather than fighting token-
+budget thresholds to trigger one for real — isolates the actual mechanism
+under test (the scan's truncation boundary) instead of depending on a
+fragile token-count trigger.
+
+`compilePreamble` itself needed no new parameters for any of this —
+`haveProjectContext`/`haveMemory` were already its existing "include this
+part or not" gates; `runLoop` (and `ContextUsage`, see below) now compute
+those booleans as `haveX && needsFreshInjection(...)` before calling it,
+instead of passing the raw "does this exist at all" value straight
+through. `compilePreamble` stays exactly as pure as its own doc comment
+already claimed — no change-detection logic leaked into it.
+
+**A second real bug caught while wiring this up**: `ContextUsage`
+(`context_usage.go`) calls `compilePreamble` too, for its context-budget
+breakdown — and its `messageTokens` loop already counts *every* message
+in `effective`, including a persisted project-context/memory marker, as
+ordinary conversation content. Passing the raw unconditional
+`haveProjectContext`/`haveMemory` through unchanged would have double-
+counted those same tokens a second time under the `project_context`/
+`memory` categories once a marker was persisted — silently inflating the
+reported `used` total (and the footer's `◔ NN%` icon, which reads
+straight off it) above what a real request would actually cost.
+`ContextUsage` now runs the identical `needsFreshInjection` gate before
+calling `compilePreamble`, so the category appears only when a turn
+would really resend fresh content; once it's already persisted, those
+tokens still count (via `messageTokens`, same as any other history
+message), just without being double-attributed.
+`TestContextUsageOmitsProjectContextCategoryOnceAlreadyPersisted` pins
+both halves: the category disappears after the first turn persists the
+marker, and `Used` doesn't drop (confirming no tokens were silently lost,
+only recategorized).
+
+**A third, unrelated-but-adjacent bug caught along the way**: persisting
+these markers as real `store.Message{Role: "system"}` rows surfaced that
+`internal/cli/app`'s `historyLoadedMsg` handler (`model.go`) never
+filtered stored messages by role before rendering them — a `"system"`-
+role message (compaction summaries already, now also these markers) fell
+into `refreshTranscript`'s `default:` branch and rendered formatted
+exactly like a real assistant reply, "kram" tag and all, on session
+reopen. Fixed by skipping `Role == "system"` messages when building
+`m.messages` from loaded history — a one-line fix that also retroactively
+fixes the pre-existing compaction-marker case, not just the new markers
+this issue adds. `TestPickerAccountsToolsAndWizardKeys`'s sibling history
+test (`coverage_expansion_test.go`) gained a case pinning this: a
+`"system"`-role message in the loaded history must not appear in
+`m.messages` at all.
+
+Deliberately unchanged, per the issue's own scope: `RefreshPolicy`'s
+cadence semantics (project-context is still re-*evaluated* every
+iteration, memory still frozen per run — this only changed whether an
+evaluation that comes back identical actually gets resent) and
+`RefreshStatic` parts (base sections, tools overview) — already computed
+once per `Service` lifetime, so this specific waste never applied to
+them.

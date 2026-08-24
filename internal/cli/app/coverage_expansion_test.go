@@ -492,6 +492,19 @@ func TestUpdateMessageMatrix(t *testing.T) {
 	if len(m.messages) != 1 || m.messages[0].Content != "hi" || m.messages[0].Provider != "p" || cmd != nil {
 		t.Fatalf("history success state = %+v cmd=%v", m.messages, cmd != nil)
 	}
+	// "system"-role stored messages are internal prompt-compiler bookkeeping
+	// (compaction summaries, project-context/memory injection markers) —
+	// never a real turn, so historyLoadedMsg must drop them rather than
+	// rendering them as if the assistant had said them.
+	next, cmd = m.Update(historyLoadedMsg{messages: []daemonclient.Message{
+		{Role: "system", Content: "internal bookkeeping"},
+		{Role: "user", Content: "real turn"},
+		{Role: "assistant", Content: "real reply"},
+	}})
+	m = next.(Model)
+	if len(m.messages) != 2 || m.messages[0].Content != "real turn" || m.messages[1].Content != "real reply" || cmd != nil {
+		t.Fatalf("history with a system marker = %+v cmd=%v, want the system message dropped", m.messages, cmd != nil)
+	}
 
 	m.waiting = true
 	m.messages = append(m.messages, chatMessage{Role: "assistant", streaming: true})
