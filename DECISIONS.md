@@ -3697,3 +3697,47 @@ when the panel itself already had fresher data a moment ago.
 `TestClosingProcessPanelResumesBadgePollWithContinuity` each pin one edge
 of this mutual-exclusion contract directly, rather than trusting the
 6-second interval to make a double-poll bug show up in a fast test run.
+
+---
+
+## Terse glyph discipline for daemon notices
+
+`renderToolActivity` gives every tool call a consistent, terse one-line
+treatment — name, truncated args, a glyph distinguishing running/ok/
+failed. Daemon notices (`EventNotice`, surfaced as `msg.Notices` in the
+transcript) had no equivalent: every notice, regardless of what it
+actually reported, rendered identically as `styleHint.Render("· "+n)` —
+a stagnating retry loop read exactly the same as a routine "session
+history was compacted."
+
+Investigated what the daemon actually emits before adding a
+classification scheme: `internal/daemon/agent`'s six `EventNotice`
+call sites (`agent.go`'s image-capability fallback, compaction,
+textual-tool-markup stop/normalize pair, stagnation detection; `retry.go`'s
+transient-gateway-failure retry) are the complete, fixed set of notice
+text Kram's daemon produces today — there is no `Kind` field on the
+event, only free text, and adding one would be new daemon-side surface
+this issue's own scope explicitly excludes ("no new information should
+be surfaced that isn't already available; only how it's presented gets
+unified").
+
+`view.go` gains `noticeIsWarning(text string) bool`, matching against
+`noticeWarnPhrases` — stable substrings of three of those six known
+texts ("stagnation detected", "transient gateway failure", "Kram stopped
+it") that flag a real problem, as opposed to the other three (compaction,
+image fallback, markup silently normalized) which are routine. This is
+explicitly a fixed-set match against known daemon text, not a general
+classifier — the doc comment says so, so nobody mistakes it for one and
+tries to make it smarter than the six-string universe it actually covers.
+`renderNotice(text string) string` is the one function that turns a
+notice into a transcript line — a plain hint-styled bullet for the
+routine cases, `styleBadgeWarn`'s "⚠" for the three that warrant a second
+look — replacing both call sites in `refreshTranscript` (the streaming
+and settled-turn notice loops) that previously duplicated the same
+`styleHint.Render("· "+n)` inline.
+
+`TestNoticeIsWarningClassifiesKnownDaemonNotices` asserts against the
+actual six strings copied verbatim from `agent.go`/`retry.go` — a
+regression guard: if that text ever drifts, the test's expectations
+should be revisited deliberately, not silently reclassified by an
+unrelated wording change.
