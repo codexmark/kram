@@ -173,6 +173,61 @@ func TestRunTaskCreatesIsolatedSessionAndUsesModel(t *testing.T) {
 	}
 }
 
+// TestRunTaskSessionIsSubagentTitledAndFetchableByID confirms the two
+// facts issue #31's CLI-side picker filter (internal/cli/app/picker.go)
+// depends on, without any daemon-side change: RunTask's session is
+// discoverable by its "subagent: " title prefix (the same convention
+// store/search.go's own isSubagentTitle already uses), and its messages
+// are readable by session id through the same store methods any ordinary
+// session already uses — no special-casing needed for a subagent session
+// to be fetchable, live or after the fact.
+func TestRunTaskSessionIsSubagentTitledAndFetchableByID(t *testing.T) {
+	gw, _ := fakeGateway(t, []scriptedChatResponse{{content: "child answer"}})
+	defer gw.Close()
+	workspace := t.TempDir()
+	s := newTestService(t, workspace, gw.URL, Config{Workspace: workspace, Model: "parent", MaxTurns: 2})
+
+	before, err := s.store.ListSessions()
+	if err != nil {
+		t.Fatalf("ListSessions before RunTask: %v", err)
+	}
+	if _, err := s.RunTask(context.Background(), "investigate the flaky test", "", "child", 1); err != nil {
+		t.Fatalf("RunTask: %v", err)
+	}
+
+	after, err := s.store.ListSessions()
+	if err != nil {
+		t.Fatalf("ListSessions after RunTask: %v", err)
+	}
+	if len(after) != len(before)+1 {
+		t.Fatalf("session count = %d, want %d (+1 for the subagent session)", len(after), len(before)+1)
+	}
+	var subagentID string
+	for _, sess := range after {
+		if strings.HasPrefix(sess.Title, "subagent: ") {
+			subagentID = sess.ID
+		}
+	}
+	if subagentID == "" {
+		t.Fatalf("no session titled with the \"subagent: \" prefix among: %+v", after)
+	}
+
+	fetched, err := s.store.GetSession(subagentID)
+	if err != nil {
+		t.Fatalf("GetSession(%q): %v", subagentID, err)
+	}
+	if !strings.Contains(fetched.Title, "investigate the flaky test") {
+		t.Fatalf("fetched session title = %q, want it to contain the goal", fetched.Title)
+	}
+	msgs, err := s.store.ListMessages(subagentID)
+	if err != nil {
+		t.Fatalf("ListMessages(%q): %v", subagentID, err)
+	}
+	if len(msgs) == 0 {
+		t.Fatal("subagent session has no messages, want at least the delegated goal's turn")
+	}
+}
+
 func TestRunToolAndImageCapability(t *testing.T) {
 	s := coverageService(t)
 	path := filepath.Join(s.cfg.Workspace, "large.txt")

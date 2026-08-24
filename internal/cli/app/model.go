@@ -211,15 +211,19 @@ type Model struct {
 	mdRenderer *glamour.TermRenderer
 	mdWidth    int // width the current mdRenderer was built for
 
-	phase          phase
-	splashTarget   phase // screen revealed after the boot animation completes
-	splashFrame    int
-	sessionList    []daemonclient.Session
-	pickerCursor   int
-	pickerErr      error
-	pickerBusy     bool
-	newSessionText textinput.Model // title prompt, only shown after picking "new session"
-	titling        bool
+	phase        phase
+	splashTarget phase // screen revealed after the boot animation completes
+	splashFrame  int
+	sessionList  []daemonclient.Session
+	pickerCursor int
+	pickerErr    error
+	pickerBusy   bool
+	// pickerShowSubagents toggles the picker between ordinary sessions
+	// (default) and delegate_task's own subagent runs — see
+	// pickerVisibleSessions in picker.go.
+	pickerShowSubagents bool
+	newSessionText      textinput.Model // title prompt, only shown after picking "new session"
+	titling             bool
 
 	// accounts screen state — add/remove provider API keys without
 	// leaving the CLI. credStore is nil only if the local credentials
@@ -893,7 +897,8 @@ func (m Model) handlePickerKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, cmd
 	}
 
-	itemCount := len(m.sessionList) + 1 // +1 for the "new session" row
+	visible := m.pickerVisibleSessions()
+	itemCount := len(visible) + 1 // +1 for the "new session" row
 	switch msg.String() {
 	case "a":
 		m.phase = phaseAccounts
@@ -905,6 +910,15 @@ func (m Model) handlePickerKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.toolsStatus = ""
 		m.toolsLoading = true
 		return m, fetchToolsCmd(m.daemon)
+	case "s":
+		// Toggles between ordinary sessions (the default) and delegate_task's
+		// own subagent runs — kept out of the default list entirely so a
+		// session with dozens of delegations doesn't bury real
+		// conversations, mirroring session_search's own default
+		// SearchScopeUser exclusion. The two lists have different lengths,
+		// so the cursor resets rather than pointing at a now-unrelated row.
+		m.pickerShowSubagents = !m.pickerShowSubagents
+		m.pickerCursor = 0
 	case "up":
 		if m.pickerCursor > 0 {
 			m.pickerCursor--
@@ -920,7 +934,7 @@ func (m Model) handlePickerKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.newSessionText.Focus()
 			return m, nil
 		}
-		sess := m.sessionList[m.pickerCursor-1]
+		sess := visible[m.pickerCursor-1]
 		m.sessionID = sess.ID
 		m.phase = phaseChat
 		m.syncViewportSize()

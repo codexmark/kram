@@ -3741,3 +3741,77 @@ actual six strings copied verbatim from `agent.go`/`retry.go` — a
 regression guard: if that text ever drifts, the test's expectations
 should be revisited deliberately, not silently reclassified by an
 unrelated wording change.
+
+---
+
+## Subagent sessions: a separate, opt-in picker view instead of live streaming
+
+`delegate_task` runs a subagent to completion with `onEvent: nil`
+(`RunTask`, `internal/daemon/agent/agent.go`) — every event a running
+subagent would otherwise produce is silently dropped, so the parent
+transcript shows nothing between `tool_start: delegate_task(...)` and
+its eventual `tool_result`. The filed issue offered three options of
+increasing scope (bounded live event summaries; a live-poll inspection
+panel; after-the-fact browsing only) and recommended starting with the
+lowest-risk one — no changes to the live event/streaming architecture at
+all.
+
+Checked the actual premise before designing anything, the same way #32's
+terminal-color investigation did: `RunTask` already titles a subagent's
+session `"subagent: " + goal` (truncated to 60 runes) via
+`s.store.CreateSession`, and `Store.ListSessions`/`GetSession` return
+every session unfiltered — a subagent session was **already** fetchable
+by id and already appeared in the CLI's session picker (`picker.go`),
+selectable via the exact same `enter` → `loadHistoryCmd` path as any
+ordinary session. The issue's own "no change needed there" note about
+`RunTask` was correct; `TestRunTaskSessionIsSubagentTitledAndFetchableByID`
+(`internal/daemon/agent/service_coverage_test.go`) pins this directly —
+`ListSessions`/`GetSession`/`ListMessages` all already work on a subagent
+session with zero daemon-side special-casing.
+
+So the real gap wasn't "undiscoverable" — it was the opposite: every
+subagent session permanently and invisibly-in-plain-sight clutters the
+*same* list as real conversations, indistinguishable at a glance except
+by reading each title's text. A user who runs `delegate_task` often would
+eventually be scrolling past dozens of "subagent: ..." rows to find a
+real session.
+
+`internal/cli/app/picker.go` gains `isSubagentSessionTitle` (checking the
+`"subagent: "` prefix — duplicated from `store`'s own `isSubagentTitle`,
+since the CLI only ever sees a title over the daemon's HTTP API, never
+the store package directly) and `pickerVisibleSessions()`, which splits
+`m.sessionList` by that check and returns only the half
+`m.pickerShowSubagents` selects. The default view excludes subagent
+sessions entirely — deliberately mirroring `session_search`'s own default
+`SearchScopeUser` exclusion (`internal/daemon/store/search.go`), so the
+picker and the model's own search tool agree on what counts as a "real"
+session by default. The `"s"` key (`handlePickerKey`) toggles to a
+dedicated subagent-only view — its own header ("sessões de subagentes")
+and hint text, cursor reset to 0 on toggle since the two lists have
+different lengths and lengths change independently. The default view's
+hint line surfaces a count of hidden subagent sessions
+(`pickerSubagentCount`) rather than going silent about their existence
+entirely.
+
+`enter` selection was refactored to read from `pickerVisibleSessions()`
+instead of `m.sessionList` directly (both the cursor-bounds `itemCount`
+computation and the actual row lookup), so the two can never drift out of
+sync with each other.
+
+`TestPickerVisibleSessionsExcludesSubagentsByDefault`,
+`TestPickerSKeyTogglesToSubagentSessionsOnly`, and
+`TestPickerEnterOnSubagentSessionOpensItLikeAnyOther`
+(`internal/cli/app/picker_subagent_test.go`) cover the filter, the
+toggle+cursor-reset, and that a subagent session opens through the exact
+same `phaseChat`/`loadHistoryCmd` path an ordinary session already does —
+no new loading code path, just a different filter over which sessions
+reach the list.
+
+Deliberately out of scope, per the issue's own recommendation: live event
+streaming from a running subagent into the parent's own stream (options 1
+and 2) — `RunTask`'s `onEvent: nil` is untouched. A user can browse a
+subagent's session once it's finished (or, since nothing about reading is
+special-cased, even mid-run — the daemon doesn't distinguish), but there
+is still no live progress indicator in the parent transcript while
+`delegate_task` is running. That remains a real gap for a future issue if
+it turns out to matter in practice.
