@@ -7,7 +7,20 @@ import (
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/muesli/termenv"
 )
+
+// withColorProfile forces terminalColorProfile for the duration of the
+// test, restoring it after — the only way to exercise
+// supportsSmoothGradient's non-default branches deterministically,
+// since the real detected profile depends on whatever terminal actually
+// runs `go test`.
+func withColorProfile(t *testing.T, profile termenv.Profile) {
+	t.Helper()
+	orig := terminalColorProfile
+	terminalColorProfile = func() termenv.Profile { return profile }
+	t.Cleanup(func() { terminalColorProfile = orig })
+}
 
 func TestThinkingKIsDenseAndSingleLine(t *testing.T) {
 	plain := thinkingKPlain()
@@ -40,6 +53,64 @@ func TestThinkingKStalledStateAndModuloEdges(t *testing.T) {
 	}
 	if got := positiveModulo(10, 0); got != 0 {
 		t.Fatalf("positiveModulo with zero modulus = %d, want 0", got)
+	}
+}
+
+func TestSupportsSmoothGradientByProfile(t *testing.T) {
+	cases := []struct {
+		profile termenv.Profile
+		want    bool
+	}{
+		{termenv.TrueColor, true},
+		{termenv.ANSI256, true},
+		{termenv.ANSI, false},
+		{termenv.Ascii, false},
+	}
+	for _, tc := range cases {
+		withColorProfile(t, tc.profile)
+		if got := supportsSmoothGradient(); got != tc.want {
+			t.Errorf("supportsSmoothGradient() with profile %v = %v, want %v", tc.profile, got, tc.want)
+		}
+	}
+}
+
+// TestShimmerTextDegradesOnLimitedColorTerminals confirms the coarse
+// fallback actually engages on ANSI/Ascii — not just that
+// supportsSmoothGradient reports the right bool in isolation — and that
+// it never breaks the text itself (same visible runes, still styled).
+func TestShimmerTextDegradesOnLimitedColorTerminals(t *testing.T) {
+	for _, profile := range []termenv.Profile{termenv.ANSI, termenv.Ascii} {
+		withColorProfile(t, profile)
+		got := shimmerText("kram", 5)
+		if !strings.Contains(got, "k") || !strings.Contains(got, "m") {
+			t.Errorf("profile %v: shimmerText lost characters, got %q", profile, got)
+		}
+		if lipgloss.Width(got) != 4 {
+			t.Errorf("profile %v: shimmerText width = %d, want 4", profile, lipgloss.Width(got))
+		}
+	}
+}
+
+func TestShimmerTextEmptyInputReturnsEmpty(t *testing.T) {
+	if got := shimmerText("", 0); got != "" {
+		t.Errorf("shimmerText(\"\", 0) = %q, want empty", got)
+	}
+}
+
+// TestRenderThinkingKStaysTwoRunesOnLimitedColorTerminals mirrors
+// TestThinkingKIsDenseAndSingleLine's own width check, but forced onto
+// the coarse rendering path — the K's silhouette must survive the
+// fallback exactly like it does the smooth path.
+func TestRenderThinkingKStaysTwoRunesOnLimitedColorTerminals(t *testing.T) {
+	withColorProfile(t, termenv.ANSI)
+	for frame := -1; frame < 12; frame++ {
+		got := renderThinkingK(frame, false)
+		if width := lipgloss.Width(got); width != 2 {
+			t.Fatalf("frame %d width = %d, want 2 (ANSI-tier fallback)", frame, width)
+		}
+		if !strings.Contains(got, thinkingKPlain()) {
+			t.Fatalf("frame %d lost the K silhouette on the ANSI-tier fallback: %q", frame, got)
+		}
 	}
 }
 

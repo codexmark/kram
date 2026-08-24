@@ -5,6 +5,7 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/lucasb-eyer/go-colorful"
+	"github.com/muesli/termenv"
 )
 
 // shimmerFrom/To are the gradient endpoints for the "working" shimmer —
@@ -19,14 +20,49 @@ var (
 	shimmerTo, _   = colorful.Hex("#5fd7a7") // warm green, echoes styleBadgeOK
 )
 
+// terminalColorProfile is a var, not a direct lipgloss.ColorProfile()
+// call at each use site, so tests can force a specific tier without
+// depending on whatever terminal actually runs `go test` — see
+// shimmer_test.go's forced-profile cases.
+var terminalColorProfile = lipgloss.ColorProfile
+
+// supportsSmoothGradient reports whether the detected terminal can
+// render the continuous per-character BlendLuv sweep meaningfully.
+// TrueColor and ANSI256 have enough distinct steps for the sweep to read
+// as a genuine gradient. Ascii already degrades every color to none at
+// all, automatically, via lipgloss/termenv's own Profile.Convert — the
+// smooth-vs-not question doesn't even apply there, since there is no
+// color either way, with or without this check. Plain 16-color ANSI is
+// the one real gap: it has colors, but a continuous sine blend quantized
+// into only 16 buckets jumps between them unpredictably from one
+// character (or frame) to the next — not a broken render, just a coarse,
+// uncommitted-looking one where a deliberate two-color alternation reads
+// better. See shimmerText/renderThinkingK for where this actually
+// changes rendering.
+func supportsSmoothGradient() bool {
+	switch terminalColorProfile() {
+	case termenv.TrueColor, termenv.ANSI256:
+		return true
+	default: // termenv.ANSI, termenv.Ascii
+		return false
+	}
+}
+
 // shimmerText renders text with a color wave sweeping across its
-// characters, phase-shifted by frame so it animates as frame advances.
-// Falls back to plain bold text if text is empty — never worth a panic
-// over a cosmetic effect.
+// characters, phase-shifted by frame so it animates as frame advances,
+// on a terminal that can render it smoothly (see supportsSmoothGradient).
+// On a plain 16-color or no-color terminal it falls back to a coarser,
+// deliberate two-color alternation by character parity instead — still
+// legibly "alive," without the per-character color jitter a quantized
+// continuous blend would produce. Falls back to plain bold text if text
+// is empty — never worth a panic over a cosmetic effect.
 func shimmerText(text string, frame int) string {
 	runes := []rune(text)
 	if len(runes) == 0 {
 		return text
+	}
+	if !supportsSmoothGradient() {
+		return shimmerTextCoarse(runes, frame)
 	}
 	var out string
 	for i, r := range runes {
@@ -35,6 +71,26 @@ func shimmerText(text string, frame int) string {
 		phase := float64(i)/float64(len(runes))*2*math.Pi + float64(frame)*0.35
 		blend := (math.Sin(phase) + 1) / 2 // 0..1
 		c := shimmerFrom.BlendLuv(shimmerTo, blend)
+		out += lipgloss.NewStyle().Foreground(lipgloss.Color(c.Hex())).Bold(true).Render(string(r))
+	}
+	return out
+}
+
+// shimmerTextCoarse alternates each half of the text between the two
+// shimmer endpoints as flat, unblended colors — still auto-downsampled
+// to the nearest ANSI-16 color by lipgloss/termenv same as the smooth
+// path, but with only two fixed colors instead of a continuous quantized
+// sweep, so there's nothing to jitter. Which half is which color flips
+// every few frames, keeping some motion without per-character noise.
+func shimmerTextCoarse(runes []rune, frame int) string {
+	flipped := (frame/6)%2 == 1
+	mid := len(runes) / 2
+	var out string
+	for i, r := range runes {
+		c := shimmerFrom
+		if (i < mid) == flipped {
+			c = shimmerTo
+		}
 		out += lipgloss.NewStyle().Foreground(lipgloss.Color(c.Hex())).Bold(true).Render(string(r))
 	}
 	return out
@@ -65,11 +121,24 @@ func renderThinkingK(frame int, stalled bool) string {
 	// flow in opposite phases. The points themselves never disappear, so the K
 	// remains legible on every frame instead of turning back into a spinner.
 	active := positiveModulo(frame/2, len(plain))
+	smooth := supportsSmoothGradient()
 	result := ""
 	for i, r := range plain {
-		phase := float64(i)*math.Pi + float64(frame)*0.35
-		blend := (math.Sin(phase) + 1) / 2
-		color := shimmerFrom.BlendLuv(shimmerTo, blend)
+		var color colorful.Color
+		if smooth {
+			phase := float64(i)*math.Pi + float64(frame)*0.35
+			blend := (math.Sin(phase) + 1) / 2
+			color = shimmerFrom.BlendLuv(shimmerTo, blend)
+		} else {
+			// Same reasoning as shimmerTextCoarse: on a 16-color terminal,
+			// two fixed colors read more deliberately than a two-character
+			// quantized sweep, which has just as much room to jitter as a
+			// longer one despite the smaller rune count.
+			color = shimmerFrom
+			if i%2 == 1 {
+				color = shimmerTo
+			}
+		}
 		style := lipgloss.NewStyle().Foreground(lipgloss.Color(color.Hex())).Bold(i == active)
 		result += style.Render(string(r))
 	}

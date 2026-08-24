@@ -3551,3 +3551,48 @@ surface would be guessing at a shape nobody's asked for yet.
 halves of the contract in one test: the base part becomes exactly the
 override text (not appended, not templated — wholesale replacement),
 and the tools overview still renders normally alongside it.
+
+---
+
+## Terminal color-capability detection for the shimmer/thinking-K effects
+
+Checked the actual premise before writing any code, since it's easy to
+assume "nothing detects terminal capability" without reading how the
+rendering library actually works: `lipgloss.Color`'s `color(r)` method
+already calls `r.ColorProfile().Color(...)`, and `termenv.Profile.Convert`
+already returns `NoColor{}` outright for the `Ascii` profile. Every
+color Kram renders — including `shimmer.go`'s go-colorful gradient hex
+values — already auto-degrades correctly on a true no-color terminal,
+transparently, with zero code written for it. That half of the original
+concern doesn't hold up.
+
+What's real: **plain 16-color ANSI**. `termenv.Profile.Convert` for the
+`ANSI` profile downsamples an RGB hex to the nearest of only 16 buckets
+— correct, but coarse enough that `shimmerText`'s continuous per-
+character `BlendLuv` sine sweep (and `renderThinkingK`'s two-rune
+version of the same idea) quantizes unpredictably: adjacent characters,
+or the same character across adjacent frames, can jump between buckets
+in a way that reads as jitter rather than a deliberate sweep. Not
+broken — genuinely coarse and accidental, the actual gap worth closing.
+
+`supportsSmoothGradient()` (`internal/cli/app/shimmer.go`) checks
+`terminalColorProfile()` (a package var wrapping `lipgloss.ColorProfile`,
+overridable in tests — the real profile depends on whatever terminal
+happens to run `go test`, so a test needs to force it deterministically)
+and returns true only for `TrueColor`/`ANSI256`. `shimmerText` and
+`renderThinkingK` both branch on it: the smooth path is exactly today's
+existing code, unchanged; the coarse path (`shimmerTextCoarse` and the
+inline alternative in `renderThinkingK`) uses the same two shimmer
+endpoint colors but as flat, unblended values — no continuous math to
+quantize unpredictably, just a deliberate flip every few frames. `Ascii`
+takes the coarse branch too even though color already vanishes there
+regardless (per the premise check above) — cheap to skip the go-colorful
+math outright rather than compute a gradient nothing will render, and it
+makes the behavior explicit and tested instead of an accidental side
+effect of a downstream library.
+
+`go.mod`: `github.com/muesli/termenv` (already an indirect dependency
+through `lipgloss`) is now imported directly for `termenv.Profile`'s
+named constants, so `go mod tidy` promoted it — along with a few other
+already-indirect packages the tidy pass re-resolved as directly used —
+out of the `// indirect` block. No new dependency was added.
