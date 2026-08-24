@@ -95,6 +95,21 @@ type Config struct {
 	// including that every named tool actually exists in the registry,
 	// and fails loudly rather than silently dropping a typo.
 	ToolOrder []string
+	// SystemPromptOverride, when non-empty, replaces the "base"
+	// PromptPart's content (identity/workflow/skills/memory/delegation/
+	// asking/writing-code/output/safety — see systemPrompt) with this
+	// text instead of Kram's own. Every other preamble part — the
+	// generated tools overview, background-job guidance, project
+	// context, memory — is unaffected and still assembled normally
+	// around it; this deliberately can't suppress those, since the
+	// tools overview exists specifically so a tool can't go silently
+	// unmentioned (see the VisibleTools() fix), and an override that
+	// could also drop that would reopen the exact bug that fix closed.
+	// Empty (the default) means today's systemPrompt(workspace) output,
+	// unchanged. Sourcing this from a file or a CLI flag is left to the
+	// caller — this field takes the resolved text directly, matching
+	// how ToolOrder is a resolved value too, not a file path.
+	SystemPromptOverride string
 }
 
 func (c Config) withDefaults() Config {
@@ -526,7 +541,7 @@ func (s *Service) runLoop(ctx context.Context, sessionID, model string, depth in
 
 		nearBudget := turn == totalTurns-1
 		projectContext, haveProjectContext := loadProjectContext(s.cfg.Workspace)
-		preambleParts := compilePreamble(s.cfg.Workspace, projectContext, haveProjectContext, memoryMsg, haveMemory, s.tools, s.cfg.ToolOrder)
+		preambleParts := compilePreamble(s.cfg.Workspace, projectContext, haveProjectContext, memoryMsg, haveMemory, s.tools, s.cfg.ToolOrder, s.cfg.SystemPromptOverride)
 		postscriptParts := compileTurnPostscript(emptyRetryUsed, nearBudget)
 		// Keep the visible definitions separately from the subset offered on
 		// this turn. The final soft-landing turn deliberately offers no tools,

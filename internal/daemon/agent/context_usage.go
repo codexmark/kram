@@ -59,7 +59,7 @@ func (s *Service) ContextUsage(ctx context.Context, sessionID string) (ContextUs
 
 	memoryMsg, haveMemory := s.recentMemoryMessage()
 	projectContext, haveProjectContext := loadProjectContext(s.cfg.Workspace)
-	parts := compilePreamble(s.cfg.Workspace, projectContext, haveProjectContext, memoryMsg, haveMemory, s.tools, s.cfg.ToolOrder)
+	parts := compilePreamble(s.cfg.Workspace, projectContext, haveProjectContext, memoryMsg, haveMemory, s.tools, s.cfg.ToolOrder, s.cfg.SystemPromptOverride)
 	toolTokens := estimateToolDefinitionTokens(s.tools.Definitions())
 	partTokens := make(map[string]int, len(parts))
 	for _, part := range parts {
