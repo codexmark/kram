@@ -20,6 +20,11 @@ const (
 	processPollInterval = 750 * time.Millisecond
 	processListMaxRows  = 4
 	processLocalLogMax  = 500_000
+	// bgBadgePollInterval is the footer badge's own, much cheaper poll
+	// cadence — "does anything exist," not the full panel's log-following.
+	// A session with zero background processes shouldn't pay 750ms
+	// traffic just to keep an invisible badge honest.
+	bgBadgePollInterval = 6 * time.Second
 )
 
 type processSnapshotMsg struct {
@@ -74,6 +79,71 @@ func processPollTickCmd(generation int) tea.Cmd {
 	return tea.Tick(processPollInterval, func(time.Time) tea.Msg {
 		return processPollTickMsg{generation: generation}
 	})
+}
+
+type bgProcessListMsg struct {
+	generation int
+	processes  []daemonclient.BackgroundProcess
+	err        error
+}
+
+type bgBadgePollTickMsg struct{ generation int }
+
+// fetchProcessListCmd is the footer badge's own light poll: just the list
+// (no per-process output fetch), and — unlike fetchProcessSnapshotCmd — it
+// keeps running while the full Ctrl+B panel is closed instead of only
+// while it's open. The two never overlap: applyBgProcessList and
+// applyProcessSnapshot each stop rescheduling themselves once the other's
+// domain (panel open vs. closed) applies, so there's exactly one poll loop
+// live at a time (see openProcessPanel/closeProcessPanel).
+func fetchProcessListCmd(c *daemonclient.Client, generation int) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		processes, err := c.ListBackgroundProcesses(ctx)
+		return bgProcessListMsg{generation: generation, processes: processes, err: err}
+	}
+}
+
+func bgBadgePollTickCmd(generation int) tea.Cmd {
+	return tea.Tick(bgBadgePollInterval, func(time.Time) tea.Msg {
+		return bgBadgePollTickMsg{generation: generation}
+	})
+}
+
+// applyBgProcessList updates the footer badge's own process snapshot and,
+// as long as the panel hasn't opened in the meantime, reschedules itself —
+// the same response-driven poll shape applyProcessSnapshot already uses,
+// so there's never more than one in-flight badge request.
+func (m Model) applyBgProcessList(msg bgProcessListMsg) (tea.Model, tea.Cmd) {
+	if msg.generation != m.bgBadgeGeneration || m.active == panelProcesses {
+		return m, nil
+	}
+	if msg.err == nil {
+		m.bgProcesses = msg.processes
+	}
+	return m, bgBadgePollTickCmd(m.bgBadgeGeneration)
+}
+
+// bgProcessBadge renders the footer's low-profile "N bg" indicator, or ""
+// when there's nothing to show — a session with zero background processes
+// shouldn't grow the footer at all. Green while at least one is still
+// running, idle-gray once every process the badge knows about has ended.
+func (m Model) bgProcessBadge() string {
+	if len(m.bgProcesses) == 0 {
+		return ""
+	}
+	running := 0
+	for _, p := range m.bgProcesses {
+		if p.Running {
+			running++
+		}
+	}
+	style := styleBadgeIdle
+	if running > 0 {
+		style = styleBadgeOK
+	}
+	return style.Render(fmt.Sprintf("● %d bg", len(m.bgProcesses)))
 }
 
 func containsProcess(processes []daemonclient.BackgroundProcess, id string) bool {
@@ -143,6 +213,7 @@ func (m Model) applyProcessSnapshot(msg processSnapshotMsg) (tea.Model, tea.Cmd)
 func (m Model) openProcessPanel(id string) (tea.Model, tea.Cmd) {
 	m.active = panelProcesses
 	m.processGeneration++
+	m.bgBadgeGeneration++ // stops the badge's own poll loop while the full one takes over
 	m.processSelected = id
 	m.processLoading = true
 	m.processErr = nil
@@ -153,12 +224,19 @@ func (m Model) openProcessPanel(id string) (tea.Model, tea.Cmd) {
 	return m, fetchProcessSnapshotCmd(m.daemon, id, m.processCursor(), m.processGeneration)
 }
 
-func (m *Model) closeProcessPanel() {
+// closeProcessPanel returns a command resuming the footer badge's own poll
+// loop — the badge stops polling while the full panel is open (see
+// openProcessPanel), so closing it is the one place that loop needs to be
+// restarted, not just invalidated.
+func (m Model) closeProcessPanel() (tea.Model, tea.Cmd) {
 	m.active = panelNone
 	m.processGeneration++ // invalidates an in-flight localhost request/tick
+	m.bgBadgeGeneration++
+	m.bgProcesses = m.processes // best-effort continuity until the resumed poll lands
 	m.selection.active = false
 	m.syncViewportSize()
 	m.syncTranscriptRenderer()
+	return m, fetchProcessListCmd(m.daemon, m.bgBadgeGeneration)
 }
 
 func (m Model) selectProcess(id string) (tea.Model, tea.Cmd) {
