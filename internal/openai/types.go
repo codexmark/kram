@@ -23,6 +23,21 @@ type ChatMessage struct {
 	// ToolCallID and Name identify which call a role:"tool" message answers.
 	ToolCallID string `json:"tool_call_id,omitempty"`
 	Name       string `json:"name,omitempty"`
+	// ProviderItems carries opaque, replayable output state emitted by an
+	// upstream provider. Today this is used by the Responses adapter for
+	// encrypted reasoning items; other adapters ignore it. Keeping it on the
+	// assistant turn lets store:false conversations retain reasoning continuity.
+	ProviderItems []ProviderItem `json:"provider_items,omitempty"`
+}
+
+// ProviderItem is opaque provider state that must round-trip with an assistant
+// turn. Only encrypted reasoning is accepted by the Responses adapter; the
+// narrow shape prevents arbitrary response output from being replayed.
+type ProviderItem struct {
+	Type             string          `json:"type"`
+	ID               string          `json:"id,omitempty"`
+	EncryptedContent string          `json:"encrypted_content,omitempty"`
+	Summary          json.RawMessage `json:"summary,omitempty"`
 }
 
 // Tool is one function the model may call, described as JSON Schema —
@@ -77,14 +92,20 @@ type ToolCallFunction struct {
 // DECISIONS.md, "Sticky is run-scoped, not session-prefix-scoped").
 const RunIDHeader = "X-Kram-Run-Id"
 
+// PromptCacheKeyHeader groups calls from the same durable session for the
+// upstream prompt cache. It is intentionally separate from RunIDHeader: run IDs
+// change each user turn, while cache affinity should survive across turns.
+const PromptCacheKeyHeader = "X-Kram-Prompt-Cache-Key"
+
 // ChatCompletionRequest is the request body for POST /v1/chat/completions.
 type ChatCompletionRequest struct {
-	Model       string        `json:"model"`
-	Messages    []ChatMessage `json:"messages"`
-	Stream      bool          `json:"stream"`
-	MaxTokens   *int          `json:"max_tokens,omitempty"`
-	Temperature *float64      `json:"temperature,omitempty"`
-	Tools       []Tool        `json:"tools,omitempty"`
+	Model          string        `json:"model"`
+	Messages       []ChatMessage `json:"messages"`
+	Stream         bool          `json:"stream"`
+	MaxTokens      *int          `json:"max_tokens,omitempty"`
+	Temperature    *float64      `json:"temperature,omitempty"`
+	Tools          []Tool        `json:"tools,omitempty"`
+	PromptCacheKey string        `json:"-"`
 }
 
 // ChatCompletionChoice is one candidate answer in a non-streaming response.
@@ -96,9 +117,29 @@ type ChatCompletionChoice struct {
 
 // Usage reports token accounting for a request.
 type Usage struct {
-	PromptTokens     int `json:"prompt_tokens"`
-	CompletionTokens int `json:"completion_tokens"`
-	TotalTokens      int `json:"total_tokens"`
+	PromptTokens           int `json:"prompt_tokens"`
+	CompletionTokens       int `json:"completion_tokens"`
+	TotalTokens            int `json:"total_tokens"`
+	CachedPromptTokens     int `json:"cached_prompt_tokens,omitempty"`
+	CacheWritePromptTokens int `json:"cache_write_prompt_tokens,omitempty"`
+	ReasoningTokens        int `json:"reasoning_tokens,omitempty"`
+	// EstimatedCostMicros is list-price API-equivalent cost, not a charge to
+	// a ChatGPT subscription. Zero means no trustworthy price is known.
+	EstimatedCostMicros int64 `json:"estimated_cost_micros,omitempty"`
+}
+
+// AddUsage combines accounting from tool rounds, fallback candidates, or
+// gateway retries without losing cache/reasoning/cost detail.
+func AddUsage(a, b Usage) Usage {
+	return Usage{
+		PromptTokens:           a.PromptTokens + b.PromptTokens,
+		CompletionTokens:       a.CompletionTokens + b.CompletionTokens,
+		TotalTokens:            a.TotalTokens + b.TotalTokens,
+		CachedPromptTokens:     a.CachedPromptTokens + b.CachedPromptTokens,
+		CacheWritePromptTokens: a.CacheWritePromptTokens + b.CacheWritePromptTokens,
+		ReasoningTokens:        a.ReasoningTokens + b.ReasoningTokens,
+		EstimatedCostMicros:    a.EstimatedCostMicros + b.EstimatedCostMicros,
+	}
 }
 
 // ChatCompletionResponse is the non-streaming response body.
@@ -177,6 +218,7 @@ type AttemptInfo struct {
 	// comment for how a rejection (as opposed to a transport failure)
 	// gets classified.
 	Class FailureClass `json:"class,omitempty"`
+	Usage *Usage       `json:"usage,omitempty"`
 }
 
 // ScoreFactor is one weighted component of a scoring strategy's decision
@@ -210,9 +252,10 @@ type RankedProviderInfo struct {
 // (internal/provider), and re-fragmenting it for a stream Kram itself is
 // usually the only consumer of would just be extra work with no benefit.
 type ChatCompletionChunkDelta struct {
-	Role      string     `json:"role,omitempty"`
-	Content   string     `json:"content,omitempty"`
-	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
+	Role          string         `json:"role,omitempty"`
+	Content       string         `json:"content,omitempty"`
+	ToolCalls     []ToolCall     `json:"tool_calls,omitempty"`
+	ProviderItems []ProviderItem `json:"provider_items,omitempty"`
 }
 
 // ChatCompletionChunkChoice wraps a delta inside a streaming chunk.
@@ -272,4 +315,5 @@ type ErrorBody struct {
 	RetryAfterMS int64         `json:"retry_after_ms,omitempty"`
 	Cause        FailureClass  `json:"cause,omitempty"`
 	Attempts     []AttemptInfo `json:"attempts,omitempty"`
+	Usage        Usage         `json:"usage,omitempty"`
 }
