@@ -2,6 +2,7 @@ package app
 
 import (
 	"math"
+	"unicode"
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/lucasb-eyer/go-colorful"
@@ -96,51 +97,58 @@ func shimmerTextCoarse(runes []rune, frame int) string {
 	return out
 }
 
-// thinkingKPlain is a nine-point K packed into two Braille cells. Read as a
-// 4x4 dot matrix, it has a continuous left stem, a joined center, and two
-// diagonal arms:
-//
-// 1001
-// 1010
-// 1110
-// 1010
-//
-// Keeping the silhouette explicit is more important than maximizing density:
-// the previous ten-point variant filled the counter and read like a curve.
+// thinkingKPlain is the live indicator's base text: the product name
+// itself, lowercase, so a single letter uppercasing per frame (see
+// renderThinkingK) reads as "one letter growing" rather than shouting the
+// whole word. Kept as its own function (not just an inline literal) so
+// tests have one place to pull the base word from — same shape the
+// previous Braille-K glyph's own thinkingKPlain had.
 func thinkingKPlain() string {
-	return "⡧⡎"
+	return "kram"
 }
 
+// renderThinkingK renders the live indicator: "kram" with exactly one
+// letter uppercased and bold per frame, cycling K→r→a→m→(repeat) — "each
+// letter grows once" — while the color gradient sweep (BlendLuv smooth
+// path, or the two-color coarse fallback on limited-color terminals)
+// keeps moving across all four letters independently of which one is
+// currently emphasized, exactly as it already did for the previous
+// two-point Braille glyph this replaced.
 func renderThinkingK(frame int, stalled bool) string {
-	plain := []rune(thinkingKPlain())
+	letters := []rune(thinkingKPlain())
 	if stalled {
-		return styleBadgeWarn.Bold(true).Render(string(plain))
+		return styleBadgeWarn.Bold(true).Render(string(letters))
 	}
 
-	// A bright crest alternates between the stem and arms while their colors
-	// flow in opposite phases. The points themselves never disappear, so the K
-	// remains legible on every frame instead of turning back into a spinner.
-	active := positiveModulo(frame/2, len(plain))
+	active := positiveModulo(frame/2, len(letters))
 	smooth := supportsSmoothGradient()
 	result := ""
-	for i, r := range plain {
+	for i, r := range letters {
+		display := r
+		if i == active {
+			display = unicode.ToUpper(r)
+		}
 		var color colorful.Color
 		if smooth {
-			phase := float64(i)*math.Pi + float64(frame)*0.35
+			// Same continuous per-character sweep shimmerText itself uses,
+			// not the old 2-point glyph's harder i*math.Pi alternation —
+			// four letters read as a genuine moving gradient this way
+			// instead of a hard two-color checkerboard.
+			phase := float64(i)/float64(len(letters))*2*math.Pi + float64(frame)*0.35
 			blend := (math.Sin(phase) + 1) / 2
 			color = shimmerFrom.BlendLuv(shimmerTo, blend)
 		} else {
 			// Same reasoning as shimmerTextCoarse: on a 16-color terminal,
-			// two fixed colors read more deliberately than a two-character
-			// quantized sweep, which has just as much room to jitter as a
-			// longer one despite the smaller rune count.
+			// two fixed colors read more deliberately than a quantized
+			// sweep, which has just as much room to jitter as a longer one
+			// despite the smaller rune count.
 			color = shimmerFrom
 			if i%2 == 1 {
 				color = shimmerTo
 			}
 		}
 		style := lipgloss.NewStyle().Foreground(lipgloss.Color(color.Hex())).Bold(i == active)
-		result += style.Render(string(r))
+		result += style.Render(string(display))
 	}
 	return result
 }
