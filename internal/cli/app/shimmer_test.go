@@ -1,12 +1,13 @@
 package app
 
 import (
-	"math/bits"
 	"strings"
 	"testing"
 	"time"
+	"unicode"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/muesli/termenv"
 )
 
@@ -22,31 +23,40 @@ func withColorProfile(t *testing.T, profile termenv.Profile) {
 	t.Cleanup(func() { terminalColorProfile = orig })
 }
 
-func TestThinkingKIsDenseAndSingleLine(t *testing.T) {
-	plain := thinkingKPlain()
-	if plain != "⡧⡎" {
-		t.Fatalf("thinking K = %q, want compact Braille K", plain)
-	}
-	if width := lipgloss.Width(plain); width != 2 {
-		t.Fatalf("thinking K width = %d, want 2", width)
-	}
-	dots := 0
-	for _, r := range plain {
-		dots += bits.OnesCount(uint(r - 0x2800))
-	}
-	if dots != 9 {
-		t.Fatalf("thinking K dots = %d, want 9", dots)
+// TestThinkingKSpellsKramWithOneLetterUppercasedPerFrame confirms the
+// live indicator is the literal wordmark "kram" with exactly one letter
+// uppercased (the "growing" letter) per frame, cycling through all four —
+// the ANSI styling that colors/bolds individual letters differently
+// means the rendered word can't be asserted as one contiguous plain
+// substring, so this strips ANSI first (ansi.Strip) rather than
+// string-containing the raw styled output.
+func TestThinkingKSpellsKramWithOneLetterUppercasedPerFrame(t *testing.T) {
+	if plain := thinkingKPlain(); plain != "kram" {
+		t.Fatalf("thinking wordmark = %q, want %q", plain, "kram")
 	}
 	for frame := -1; frame < 12; frame++ {
-		if width := lipgloss.Width(renderThinkingK(frame, false)); width != 2 {
-			t.Fatalf("frame %d width = %d, want 2", frame, width)
+		visible := ansi.Strip(renderThinkingK(frame, false))
+		if strings.ToLower(visible) != "kram" {
+			t.Fatalf("frame %d rendered %q, want it to spell kram (case-insensitive)", frame, visible)
+		}
+		if width := lipgloss.Width(visible); width != 4 {
+			t.Fatalf("frame %d width = %d, want 4", frame, width)
+		}
+		upper := 0
+		for _, r := range visible {
+			if unicode.IsUpper(r) {
+				upper++
+			}
+		}
+		if upper != 1 {
+			t.Fatalf("frame %d has %d uppercase letters in %q, want exactly 1", frame, upper, visible)
 		}
 	}
 }
 
 func TestThinkingKStalledStateAndModuloEdges(t *testing.T) {
 	if got := renderThinkingK(3, true); !strings.Contains(got, thinkingKPlain()) {
-		t.Fatalf("stalled K lost its silhouette: %q", got)
+		t.Fatalf("stalled indicator lost its wordmark: %q", got)
 	}
 	if got := positiveModulo(-1, 2); got != 1 {
 		t.Fatalf("positiveModulo(-1, 2) = %d, want 1", got)
@@ -97,19 +107,19 @@ func TestShimmerTextEmptyInputReturnsEmpty(t *testing.T) {
 	}
 }
 
-// TestRenderThinkingKStaysTwoRunesOnLimitedColorTerminals mirrors
-// TestThinkingKIsDenseAndSingleLine's own width check, but forced onto
-// the coarse rendering path — the K's silhouette must survive the
-// fallback exactly like it does the smooth path.
-func TestRenderThinkingKStaysTwoRunesOnLimitedColorTerminals(t *testing.T) {
+// TestRenderThinkingKStaysFourRunesOnLimitedColorTerminals mirrors
+// TestThinkingKSpellsKramWithOneLetterUppercasedPerFrame's own checks,
+// but forced onto the coarse rendering path — the wordmark must survive
+// the fallback exactly like it does the smooth path.
+func TestRenderThinkingKStaysFourRunesOnLimitedColorTerminals(t *testing.T) {
 	withColorProfile(t, termenv.ANSI)
 	for frame := -1; frame < 12; frame++ {
-		got := renderThinkingK(frame, false)
-		if width := lipgloss.Width(got); width != 2 {
-			t.Fatalf("frame %d width = %d, want 2 (ANSI-tier fallback)", frame, width)
+		visible := ansi.Strip(renderThinkingK(frame, false))
+		if width := lipgloss.Width(visible); width != 4 {
+			t.Fatalf("frame %d width = %d, want 4 (ANSI-tier fallback)", frame, width)
 		}
-		if !strings.Contains(got, thinkingKPlain()) {
-			t.Fatalf("frame %d lost the K silhouette on the ANSI-tier fallback: %q", frame, got)
+		if strings.ToLower(visible) != "kram" {
+			t.Fatalf("frame %d lost the wordmark on the ANSI-tier fallback: %q", frame, visible)
 		}
 	}
 }
@@ -117,7 +127,8 @@ func TestRenderThinkingKStaysTwoRunesOnLimitedColorTerminals(t *testing.T) {
 func TestThinkingLineDistinguishesProgressFromStall(t *testing.T) {
 	now := time.Now()
 	working := Model{waitStartedAt: now.Add(-2 * time.Second), lastEventAt: now, animFrame: 2, workState: workModelActive}
-	if got := working.thinkingLine(); !strings.Contains(got, thinkingKPlain()) || !strings.Contains(got, "MODELO ATIVO") {
+	got := working.thinkingLine()
+	if !strings.Contains(strings.ToLower(ansi.Strip(got)), thinkingKPlain()) || !strings.Contains(got, "MODELO ATIVO") {
 		t.Fatalf("working line = %q", got)
 	}
 

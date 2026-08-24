@@ -4120,3 +4120,50 @@ replay already solves continuity across turns; this is purely
 presentational) and exposing `PreferStreaming` as an actual CLI/config
 toggle — a real, separate piece of work this issue's plumbing now sits
 ready for, but not something this issue's own scope asked for.
+
+---
+
+## Live indicator: the product's own name instead of an abstract glyph
+
+The live activity indicator (`renderThinkingK`, `internal/cli/app/
+shimmer.go`) rendered a two-Braille-cell K glyph (`⡧⡎`) — a real, deliberately-
+designed silhouette (see its prior doc comment on the 4x4 dot matrix), but
+abstract: it read as "a K shape," not as the product name, and the
+emphasis-cycling effect on only two points was subtle.
+
+Replaced with the literal word "kram": `thinkingKPlain()` now returns
+`"kram"` instead of the Braille pair, and `renderThinkingK` uppercases
+exactly one letter per frame — cycling `Kram` → `kArm` → `kaRm` → `kraM`
+→ repeat, "one letter growing" each frame, matching the mockup this was
+requested against directly. The color gradient sweep is unchanged in
+kind, only extended: the smooth path now uses the same continuous
+per-character phase formula `shimmerText` itself already uses
+(`i/len * 2π + frame*0.35`) across all four letters, rather than the old
+two-point glyph's `i*math.Pi` hard alternation — with only two points
+that alternation read as a genuine two-color flip, but stretched across
+four letters it would've looked like a checkerboard instead of a moving
+gradient, so the smoother formula was the correct generalization, not
+just a mechanical copy-paste of the old phase math. The coarse (limited-
+color-terminal) fallback keeps its existing two-fixed-color-by-parity
+treatment unchanged in shape, just across four letters instead of two.
+Stalled state is unchanged in spirit: still one `styleBadgeWarn.Bold(true)`
+call around the whole word, just the word itself instead of the glyph.
+
+**Test rewrite, not just renaming**: the old
+`TestThinkingKIsDenseAndSingleLine` asserted `lipgloss.Width == 2` and a
+9-Braille-dot count via `bits.OnesCount` — both meaningless for a 4-letter
+word, so replaced outright rather than patched. The harder part was
+`strings.Contains(got, thinkingKPlain())`-style assertions: the old glyph
+rendered fine as a byte-for-byte substring check even under per-rune
+ANSI styling (edge case: at any given frame only one of two points is
+bold, but this project's own past debugging established that lipgloss
+under `go test`'s non-TTY environment resolves to a no-color profile, so
+`Foreground()` calls are no-ops and only `Bold()`'s SGR codes actually
+wrap anything) — for four letters synonymous logic still holds, but
+asserting "spells kram" needed `ansi.Strip` first rather than raw
+substring matching, since a differently-cased letter breaks a literal
+`Contains(..., "kram")` check regardless of ANSI. New
+`TestThinkingKSpellsKramWithOneLetterUppercasedPerFrame` strips ANSI,
+lowercases, and asserts the result equals `"kram"` with exactly one
+uppercase rune, across the same `frame := -1; frame < 12` sweep the old
+test used — same coverage shape, correct assertions for the new content.
