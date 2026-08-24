@@ -67,6 +67,46 @@ func estimateToolDefinitionTokens(defs any) int {
 	return len(b) / 4
 }
 
+// Cache stability, per part — extending RefreshPolicy's own cadence
+// documentation with what actually matters for upstream prompt-cache
+// reuse (see openai.PromptCacheKeyHeader and the CachedPromptTokens/
+// EstimatedCostMicros telemetry that now measures its effect). A part
+// re-running every tool-loop iteration (see compilePreamble's call site
+// in runLoop) is not the same question as whether its *content* changes
+// between those runs — the two are conflated easily, so each part below
+// states the content question explicitly, not just its RefreshPolicy.
+//
+//   - "base" (RefreshStatic): content is systemPrompt(workspace) — re-
+//     derived fresh on every tool-loop iteration, but workspace never
+//     changes for a Service's lifetime, so the string is identical every
+//     time. Prefix-stable for the whole lifetime in practice.
+//   - "tools-overview" (RefreshStatic, see compileToolsOverview): same
+//     re-derived-but-identical shape as "base". Only changes if the
+//     registry's VisibleTools() set changes — a tool toggled in settings
+//     or a permission-policy edit — which doesn't happen mid-run today.
+//     Adding, removing, or reordering a visible tool invalidates cache
+//     reuse from this part onward for every request after that point.
+//   - "project-context" (RefreshIteration, see compilePreamble): read
+//     fresh from AGENTS.md/CLAUDE.md on every tool-loop iteration by
+//     design — it's the one part genuinely expected to legitimately
+//     differ turn to turn if the file changes mid-run. Sits after "base"
+//     and "tools-overview" in the assembled order, so a change here
+//     leaves those two reusable but invalidates this part and everything
+//     placed after it (memory, then conversation history) for that
+//     request.
+//   - "memory" (RefreshRun, see recentMemoryMessage): computed once
+//     before the tool-loop starts and reused unchanged for every
+//     iteration within that run — prefix-stable across a whole run's
+//     tool round-trips, the exact property RefreshRun's own doc comment
+//     says it exists for. Can differ between separate runs/user turns.
+//   - "empty-retry-nudge" / "turn-budget-soft-landing" (RefreshIteration,
+//     PlacementPostHistory, see compileTurnPostscript): always the very
+//     last part(s) in the message list, after conversation history. Their
+//     presence toggling between iterations changes *that* request's tail
+//     only — base, tools-overview, project-context, memory, and history
+//     all stay exactly as cacheable as they already were; nothing earlier
+//     in the sequence is affected by a part appended at the end.
+
 // toolsOverviewHeader/Footer bookend the generated tool list — Footer is
 // the "batch independent calls" line that used to close the hand-written
 // "# Tools" section; kept here since it's about tool usage generally and

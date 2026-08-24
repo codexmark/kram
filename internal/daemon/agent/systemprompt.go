@@ -36,6 +36,14 @@ import (
 // a tool can't be forgotten if the list is derived from the same place
 // it's registered.
 
+// Cache stability: this function's output only depends on workspace and
+// osDescription(), neither of which changes for a Service's lifetime —
+// so despite being called fresh on every internal tool-loop iteration
+// (see runLoop), the returned string is identical every time and stays
+// prefix-stable for upstream prompt caching across the whole lifetime.
+// See promptcompiler.go's "Cache stability, per part" note for how this
+// fits alongside the other assembled parts.
+
 // systemPrompt builds Kram's base agent prompt. workspace is the project
 // root every file/shell tool is confined to.
 func systemPrompt(workspace string) string {
