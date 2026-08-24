@@ -123,6 +123,13 @@ func (m Model) thinkingLine() string {
 	if m.segments > 1 {
 		meta += fmt.Sprintf(" · segmento %d/%d", m.segment, m.segments)
 	}
+	if !stalled && m.workState == workModelActive && m.reasoningPreview != "" {
+		// "pensando:" keeps this unmistakably a chain-of-thought excerpt,
+		// never readable as the model's actual answer — see
+		// agent.EventReasoning's own doc comment for why that distinction
+		// matters all the way down the stack this is fed from.
+		meta += " · pensando: " + boundedReasoningPreview(m.reasoningPreview)
+	}
 	if stalled {
 		sinceEvent := time.Since(m.lastEventAt).Round(time.Second)
 		label = "CONEXÃO SEM EVENTOS"
@@ -130,6 +137,20 @@ func (m Model) thinkingLine() string {
 		return indicator + "  " + styleBadgeWarn.Bold(true).Render(label) + "  " + rail + "  " + styleBadgeWarn.Render(meta)
 	}
 	return indicator + "  " + shimmerText(label, m.animFrame) + "  " + rail + "  " + styleMeta.Render(meta)
+}
+
+// reasoningPreviewMaxRunes bounds the live indicator's reasoning excerpt
+// to a handful of words, not the full growing chain-of-thought fragment —
+// same reasoning renderToolActivity's own 60-char args truncation uses.
+const reasoningPreviewMaxRunes = 50
+
+func boundedReasoningPreview(text string) string {
+	text = strings.TrimSpace(text)
+	runes := []rune(text)
+	if len(runes) > reasoningPreviewMaxRunes {
+		return string(runes[:reasoningPreviewMaxRunes]) + "…"
+	}
+	return text
 }
 
 func (m Model) activityLabel() string {

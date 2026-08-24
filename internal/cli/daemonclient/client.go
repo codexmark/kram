@@ -112,11 +112,13 @@ type RouteTrace struct {
 }
 
 // StreamEvent is one event from a message stream. Type selects which
-// other fields are meaningful: "delta" (Content), "tool_start" (Name,
-// Args), "tool_result" (Name, Result, OK), "notice" (Text), "question"
-// (QuestionID, Question, Options), "approval" (ApprovalID, Tool, Subject,
-// Options), "route_start" (none), "route_done" (RouteCall), "heartbeat",
-// "segment" (Segment/Segments), "done"
+// other fields are meaningful: "delta" (Content), "reasoning" (Content —
+// a reasoning-capable model's chain-of-thought fragment, best-effort and
+// never the model's actual answer; see agent.EventReasoning), "tool_start"
+// (Name, Args), "tool_result" (Name, Result, OK), "notice" (Text),
+// "question" (QuestionID, Question, Options), "approval" (ApprovalID,
+// Tool, Subject, Options), "route_start" (none), "route_done" (RouteCall),
+// "heartbeat", "segment" (Segment/Segments), "done"
 // (Message, Attempts, RouteTrace, Usage, ToolActivity, Compactions,
 // ImageNotice), or "error" (Error).
 type StreamEvent struct {

@@ -4003,3 +4003,120 @@ evaluation that comes back identical actually gets resent) and
 `RefreshStatic` parts (base sections, tools overview) — already computed
 once per `Service` lifetime, so this specific waste never applied to
 them.
+
+---
+
+## Surfacing streamed reasoning content in the live activity indicator
+
+`provider.StreamEvent.Reasoning` already carried a reasoning-capable
+model's live chain-of-thought fragments — but the only reader was
+`router.BoundedPeek`, purely as a liveness signal ("the provider is still
+producing tokens, not stalled"); the text itself was discarded
+immediately after. `thinkingLine()` showed the same zero-content status
+line whether or not a model was actively streaming visible reasoning.
+
+**Premise check before touching anything** (same discipline as #32's
+terminal-color investigation): does live per-token data from the gateway
+actually reach the daemon at all today? Traced `Service.callModel`
+(`internal/daemon/agent/agent.go`) and found the answer is "only when
+`Config.PreferStreaming` is true" — and nothing in the shipped CLI,
+wizard, or `daemon.Config` ever sets that field. The default path,
+`bufferedCall`, makes one non-streaming gateway HTTP call and waits,
+emitting only periodic `EventHeartbeat` pulses with zero per-token
+signal of any kind, reasoning included — a single buffered HTTP
+request/response has no incremental channel to relay anything live over,
+regardless of what this issue changes. So this feature is real, tested,
+and end-to-end correct, but — like `PreferStreaming` itself, which it
+extends rather than newly introduces — dormant in every shipped
+deployment today, exactly the way `streamCall` already was before this
+issue. Implemented anyway: the issue's own text frames this as wiring
+already-real data through, not adding a new capability, and the
+plumbing is the same regardless of whether `PreferStreaming` gets a
+CLI/config surface later.
+
+**The chain, one additive hop at a time** — sender-side kept structurally
+separate from Content/Delta at every layer (never risk a caller
+concatenating reasoning into what looks like the model's actual answer,
+the exact discipline `StreamEvent.Reasoning`'s own doc comment already
+established for the provider layer):
+
+1. `openai.ChatCompletionChunkDelta` gains `Reasoning string
+   \`json:"reasoning,omitempty"\`` — same "new optional field, `omitempty`,
+   doc comment" shape `ProviderItems` used when it was added.
+2. `internal/server/chat.go`'s `streamResponse` gains `writeReasoning`, a
+   sibling to `writeDelta` (not an overload — a shared "which field is
+   this for" boolean parameter is exactly the kind of thing that invites
+   the two getting swapped at a call site). `handle` calls it when
+   `evt.Reasoning != ""`. No change needed in `router.BoundedPeek` or
+   `streamResponse`'s replay of `peek.Buffered`: a reasoning-only event
+   seen during the peek already lands in `buffered` (appended before the
+   function's own liveness checks run), so it replays through `handle`
+   for free once `handle` knows to read it.
+3. `gatewayclient.StreamDelta` gains `Reasoning string`, populated in
+   `ChatCompletionStream` from `choice.Delta.Reasoning` alongside the
+   existing `Content` check (an `else if`, mirroring how `StreamEvent`
+   itself treats Delta/Reasoning/ToolCallProgress as mutually exclusive
+   per event).
+4. `agent.Event` gains `Reasoning string` and a new `EventReasoning`
+   kind — deliberately a distinct kind, not a flag on `EventDelta`, for
+   the same never-concatenate-with-the-answer reason. `streamCall` emits
+   it when `d.Reasoning != ""`. `bufferedCall` has nothing to emit here,
+   consistent with the premise check above.
+5. `internal/daemon/server/server.go`'s SSE `onEvent` switch gains
+   `case agent.EventReasoning: writeEvent(map[string]any{"type":
+   "reasoning", "content": evt.Reasoning})` — reusing the `"content"` key
+   `"delta"` already uses, distinguished only by `"type"`, matching how
+   `"notice"`'s `Text` and `"tool_result"`'s `Result` already reuse the
+   same-shaped fields differentiated purely by type elsewhere in this
+   switch.
+6. `daemonclient.StreamEvent` needed no new field at all — `Content`
+   already exists and `"reasoning"` decodes into it via the same generic
+   `json.Unmarshal` `MessageStream.Next()` already does for every event
+   type; only the type's doc comment gained a line documenting the new
+   case.
+7. CLI: `Model.reasoningPreview string` (new field) is set by
+   `handleStreamEvent`'s new `"reasoning"` case and cleared by `"delta"`
+   (real answer content started — the acceptance criterion "reverts to
+   status-only once real content starts arriving"), `"tool_start"`, and
+   `submit()` (a fresh turn shouldn't show a stale reasoning fragment
+   from the previous one). `thinkingLine()` appends
+   `" · pensando: " + boundedReasoningPreview(...)` to `meta`, gated on
+   `workState == workModelActive && !stalled` — `boundedReasoningPreview`
+   truncates to `reasoningPreviewMaxRunes = 50`, the same "a handful of
+   words, not the full blob" discipline `renderToolActivity`'s own
+   60-char args truncation already applies. The literal string
+   `"pensando:"` is the marking `StreamEvent.Reasoning`'s doc comment
+   asks every caller down the chain to preserve: unmistakably an excerpt
+   of the model's thinking, never readable as its answer.
+
+**Tests, one per hop plus the two the issue's own text asked for
+explicitly**: `TestStreamingRelaysReasoningFragmentsAsDeltaChunks` +
+`TestStreamingNonReasoningProviderUnaffected` (`internal/server/
+chat_test.go`); `TestChatCompletionStreamRelaysReasoningFragments`
+(`gatewayclient/stream_test.go`); `TestStreamCallEmitsReasoningEvent
+SeparateFromDelta` (`agent/buffered_test.go`);
+`TestHandleSendMessageRelaysReasoningEventOverSSE`
+(`daemon/server/server_test.go`, via a new `newStreamingTestServer`
+helper — `newTestServer`'s existing fake gateway always answers plain
+JSON regardless of `req.Stream`, so a real SSE-speaking fake was needed
+to exercise `PreferStreaming` at all); and CLI-side
+`TestHandleStreamEventReasoningSetsPreviewWithoutTouchingMessageContent`,
+`TestHandleStreamEventDeltaClearsReasoningPreview`,
+`TestHandleStreamEventToolStartClearsReasoningPreview`,
+`TestBoundedReasoningPreviewTruncatesLongText`, and
+`TestThinkingLineShowsReasoningPreviewOnlyWhileModelActive`
+(`internal/cli/app/reasoning_test.go`) — together covering every one of
+the issue's own three stated test requirements: a reasoning-emitting
+mock provider's fragments reaching the CLI-facing event stream, a
+non-reasoning provider's stream staying byte-for-byte unaffected (every
+pre-existing test in the full suite already covers this implicitly,
+since every field added across all seven hops is `omitempty`/additive),
+and the indicator correctly reverting to status-only once real content
+arrives.
+
+Deliberately out of scope, per the issue's own text: persisting
+reasoning into session history (`ProviderItems`/encrypted reasoning
+replay already solves continuity across turns; this is purely
+presentational) and exposing `PreferStreaming` as an actual CLI/config
+toggle — a real, separate piece of work this issue's plumbing now sits
+ready for, but not something this issue's own scope asked for.

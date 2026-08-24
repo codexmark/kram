@@ -833,6 +833,8 @@ func (s *Service) streamCall(ctx context.Context, model string, messages []opena
 		if d.Content != "" {
 			content.WriteString(d.Content)
 			emit(onEvent, Event{Kind: EventDelta, Content: d.Content})
+		} else if d.Reasoning != "" {
+			emit(onEvent, Event{Kind: EventReasoning, Reasoning: d.Reasoning})
 		}
 		if d.Done {
 			result = gatewayclient.Result{

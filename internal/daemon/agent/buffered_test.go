@@ -101,6 +101,53 @@ func TestCallModelUsesStreamingWhenPreferStreamingSet(t *testing.T) {
 	}
 }
 
+// TestStreamCallEmitsReasoningEventSeparateFromDelta confirms a
+// reasoning-carrying SSE chunk from the gateway reaches onEvent as a
+// distinct EventReasoning, never folded into an EventDelta's Content —
+// the property EventReasoning's own doc comment (and StreamEvent.
+// Reasoning's, further downstream) depends on.
+func TestStreamCallEmitsReasoningEventSeparateFromDelta(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Write([]byte("data: {\"choices\":[{\"index\":0,\"delta\":{\"reasoning\":\"weighing it up\"},\"finish_reason\":null}]}\n\n"))
+		w.Write([]byte("data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"final answer\"},\"finish_reason\":null}]}\n\n"))
+		w.Write([]byte("data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"))
+		w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer srv.Close()
+
+	s := &Service{gateway: gatewayclient.New(srv.URL), heartbeatInterval: heartbeatInterval, cfg: Config{PreferStreaming: true}}
+	var events []Event
+	if _, err := s.callModel(context.Background(), "default", nil, nil, func(e Event) { events = append(events, e) }); err != nil {
+		t.Fatal(err)
+	}
+
+	var sawReasoning, sawDelta bool
+	for _, e := range events {
+		if e.Kind == EventReasoning {
+			sawReasoning = true
+			if e.Reasoning != "weighing it up" {
+				t.Errorf("EventReasoning.Reasoning = %q, want %q", e.Reasoning, "weighing it up")
+			}
+			if e.Content != "" {
+				t.Errorf("EventReasoning also carried Content = %q, want empty", e.Content)
+			}
+		}
+		if e.Kind == EventDelta {
+			sawDelta = true
+			if e.Content != "final answer" {
+				t.Errorf("EventDelta.Content = %q, want %q (reasoning must not leak in)", e.Content, "final answer")
+			}
+		}
+	}
+	if !sawReasoning {
+		t.Fatalf("no EventReasoning emitted, got: %+v", events)
+	}
+	if !sawDelta {
+		t.Fatalf("no EventDelta emitted, got: %+v", events)
+	}
+}
+
 // TestCallModelUsesBufferedByDefault confirms the default (zero-value
 // Config) path is buffered, not streaming.
 func TestCallModelUsesBufferedByDefault(t *testing.T) {
