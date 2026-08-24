@@ -11,7 +11,7 @@ import (
 )
 
 func TestCompilePreambleBaseOnly(t *testing.T) {
-	parts := compilePreamble("/ws", "", false, openai.ChatMessage{}, false, nil, nil)
+	parts := compilePreamble("/ws", "", false, openai.ChatMessage{}, false, nil, nil, "")
 
 	if len(parts) != 1 {
 		t.Fatalf("parts = %d, want 1 (base only): %+v", len(parts), parts)
@@ -25,8 +25,38 @@ func TestCompilePreambleBaseOnly(t *testing.T) {
 	}
 }
 
+func TestCompilePreambleSystemPromptOverrideReplacesBaseOnly(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	reg := tools.NewRegistry(t.TempDir(), nil, nil)
+
+	parts := compilePreamble("/ws", "", false, openai.ChatMessage{}, false, reg, nil, "Custom house persona.")
+
+	if parts[0].ID != "base" || parts[0].Content != "Custom house persona." {
+		t.Errorf("base part = %+v, want Content=%q exactly (override replaces it wholesale)", parts[0], "Custom house persona.")
+	}
+	foundToolsOverview := false
+	for _, p := range parts {
+		if p.ID == "tools-overview" {
+			foundToolsOverview = true
+			if !strings.Contains(p.Content, "# Tools") {
+				t.Errorf("tools-overview must still be generated normally alongside an overridden base, got: %s", p.Content)
+			}
+		}
+	}
+	if !foundToolsOverview {
+		t.Error("tools-overview part missing — SystemPromptOverride must not suppress the generated overview")
+	}
+}
+
+func TestCompilePreambleEmptyOverridePreservesDefaultSystemPrompt(t *testing.T) {
+	parts := compilePreamble("/ws", "", false, openai.ChatMessage{}, false, nil, nil, "")
+	if !strings.Contains(parts[0].Content, "Kram") {
+		t.Errorf("empty override should leave the default systemPrompt() output in place, got: %q", parts[0].Content[:min(80, len(parts[0].Content))])
+	}
+}
+
 func TestCompilePreambleWithProjectContextOnly(t *testing.T) {
-	parts := compilePreamble("/ws", "some AGENTS.md text", true, openai.ChatMessage{}, false, nil, nil)
+	parts := compilePreamble("/ws", "some AGENTS.md text", true, openai.ChatMessage{}, false, nil, nil, "")
 
 	if len(parts) != 2 {
 		t.Fatalf("parts = %d, want 2 (base + project-context): %+v", len(parts), parts)
@@ -45,7 +75,7 @@ func TestCompilePreambleWithProjectContextOnly(t *testing.T) {
 
 func TestCompilePreambleWithMemoryOnly(t *testing.T) {
 	memMsg := openai.ChatMessage{Role: "system", Content: "remembered fact"}
-	parts := compilePreamble("/ws", "", false, memMsg, true, nil, nil)
+	parts := compilePreamble("/ws", "", false, memMsg, true, nil, nil, "")
 
 	if len(parts) != 2 {
 		t.Fatalf("parts = %d, want 2 (base + memory): %+v", len(parts), parts)
@@ -61,7 +91,7 @@ func TestCompilePreambleWithMemoryOnly(t *testing.T) {
 
 func TestCompilePreambleWithBothProjectContextAndMemory(t *testing.T) {
 	memMsg := openai.ChatMessage{Content: "remembered fact"}
-	parts := compilePreamble("/ws", "ctx", true, memMsg, true, nil, nil)
+	parts := compilePreamble("/ws", "ctx", true, memMsg, true, nil, nil, "")
 
 	if len(parts) != 3 {
 		t.Fatalf("parts = %d, want 3 (base, project-context, memory): %+v", len(parts), parts)

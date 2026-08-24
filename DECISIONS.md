@@ -3516,3 +3516,38 @@ project-context) is pinned there, not just its presence somewhere.
 the context-window breakdown, matching how `tools-overview`/
 `project-context`/`memory` already each get their own named bucket
 rather than folding into an undifferentiated total.
+
+---
+
+## Base-persona override without losing the generated sections
+
+`systemPrompt()` is one hand-written template; there was no supported
+way for a deployment to swap Kram's own identity/workflow/safety prose
+for its own house style short of forking the binary.
+
+`Config.SystemPromptOverride string` (`internal/daemon/agent`), when
+non-empty, replaces exactly the `base` `PromptPart`'s content in
+`compilePreamble` — the tools overview, background-job guidance,
+project context, and memory parts all still assemble normally around
+it. Deliberately narrower than "replace the whole prompt": the tools
+overview exists specifically so a tool can't go silently unmentioned
+(see the `VisibleTools()` fix); an override mechanism that could also
+suppress that would reopen the exact bug that fix closed. Same
+reasoning `compileBackgroundJobGuidance` (above) already leans on for a
+different part of the preamble.
+
+The field takes the resolved override *text* directly, not a file path
+— same choice `Config.ToolOrder` already made, for the same reason:
+`agent.Config` is a programmatic struct assembled by whoever constructs
+a `Service` (today, `daemon.go`), and neither field has been wired into
+`daemon.Config` or a CLI flag yet. Reading an override from a file (and
+failing loudly at startup if it's configured but unreadable, per the
+original request) is squarely the *caller's* job once that wiring
+exists — this package has no file-path concept to fail loudly about in
+the first place, so adding one here ahead of an actual CLI/config
+surface would be guessing at a shape nobody's asked for yet.
+
+`TestCompilePreambleSystemPromptOverrideReplacesBaseOnly` pins both
+halves of the contract in one test: the base part becomes exactly the
+override text (not appended, not templated — wholesale replacement),
+and the tools overview still renders normally alongside it.

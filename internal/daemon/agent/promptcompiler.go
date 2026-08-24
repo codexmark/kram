@@ -211,9 +211,20 @@ func compileBackgroundJobGuidance(reg *tools.Registry) PromptPart {
 // (generated — see compileToolsOverview), background-job guidance
 // (generated — see compileBackgroundJobGuidance), project context, and
 // memory, in that order, each only included if present.
-func compilePreamble(workspace, projectContext string, haveProjectContext bool, memoryMsg openai.ChatMessage, haveMemory bool, reg *tools.Registry, toolOrder []string) []PromptPart {
+// systemPromptOverride is Config.SystemPromptOverride, threaded through
+// as its own parameter rather than read off a Service field so this
+// function's pure "given these inputs, these parts" contract holds —
+// see the rest of this file's existing parameters for the same reason.
+// Empty means today's systemPrompt(workspace) output, unchanged; see
+// Config.SystemPromptOverride's own doc comment for exactly what it can
+// and can't replace.
+func compilePreamble(workspace, projectContext string, haveProjectContext bool, memoryMsg openai.ChatMessage, haveMemory bool, reg *tools.Registry, toolOrder []string, systemPromptOverride string) []PromptPart {
+	baseContent := systemPrompt(workspace)
+	if systemPromptOverride != "" {
+		baseContent = systemPromptOverride
+	}
 	parts := []PromptPart{
-		{ID: "base", Placement: PlacementPreamble, Refresh: RefreshStatic, Source: "builtin", Content: systemPrompt(workspace)},
+		{ID: "base", Placement: PlacementPreamble, Refresh: RefreshStatic, Source: "builtin", Content: baseContent},
 	}
 	if reg != nil {
 		parts = append(parts, compileToolsOverview(reg, toolOrder))
