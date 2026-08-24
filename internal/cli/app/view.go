@@ -53,7 +53,7 @@ func (m *Model) refreshTranscript() {
 			// turn is complete, the conventional answer-then-notices order is fine.
 			if msg.streaming {
 				for _, n := range msg.Notices {
-					b.WriteString(styleHint.Render("· "+n) + "\n")
+					b.WriteString(renderNotice(n) + "\n")
 				}
 			}
 			switch {
@@ -73,7 +73,7 @@ func (m *Model) refreshTranscript() {
 			}
 			if !msg.streaming {
 				for _, n := range msg.Notices {
-					b.WriteString("\n" + styleHint.Render("· "+n))
+					b.WriteString("\n" + renderNotice(n))
 				}
 				if row := renderFilesTouched(touchedFiles(msg.ToolActivity)); row != "" {
 					b.WriteString("\n" + row)
@@ -320,6 +320,43 @@ func (m Model) renderToolActivity(act daemonclient.ToolActivity) string {
 		label = styleMeta.Render(label)
 	}
 	return styleHint.Render("  ↳ ") + label + " " + mark
+}
+
+// noticeWarnPhrases are the substrings of the daemon's known EventNotice
+// texts (see internal/daemon/agent's EventNotice call sites in agent.go
+// and retry.go) that flag a real problem — a stagnating retry loop, a
+// transient gateway failure the daemon is retrying around, or the daemon
+// having to actively stop a provider from leaking raw tool markup — as
+// opposed to a benign informational notice (compaction ran, an image
+// capability fallback, markup the daemon simply normalized and moved
+// past). This is matched against a fixed, known set of daemon-emitted
+// strings, not a general-purpose classifier.
+var noticeWarnPhrases = []string{
+	"stagnation detected",
+	"transient gateway failure",
+	"Kram stopped it",
+}
+
+func noticeIsWarning(text string) bool {
+	for _, phrase := range noticeWarnPhrases {
+		if strings.Contains(text, phrase) {
+			return true
+		}
+	}
+	return false
+}
+
+// renderNotice is the single place a daemon notice's free text becomes a
+// transcript line — extending renderToolActivity's own terse-glyph
+// discipline to notices, which previously all rendered as an identical
+// hint-styled bullet regardless of whether they reported something worth
+// a second look or something entirely routine.
+func renderNotice(text string) string {
+	glyph := styleHint.Render("· ")
+	if noticeIsWarning(text) {
+		glyph = styleBadgeWarn.Render("⚠ ")
+	}
+	return glyph + styleHint.Render(text)
 }
 
 func joinNonEmpty(sep string, parts ...string) string {
