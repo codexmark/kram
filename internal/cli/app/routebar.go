@@ -39,7 +39,7 @@ func (m Model) renderRouteBar() string {
 		trail = m.renderRouteAttempts(m.routeCall.Attempts)
 	}
 
-	strategyBlock := styleHint.Render("estratégia:") + " " + styleBadgeAccent.Render(strings.ToUpper(strategy))
+	strategyBlock := styleHint.Render("estratégia:") + " " + styleBadgeAccent.Render(strings.ToUpper(strategy)) + styleHint.Render(" ▾")
 	left := joinNonEmpty("   ", strategyBlock, trail)
 
 	right := ""
@@ -60,6 +60,17 @@ func (m Model) renderRouteBar() string {
 		return truncate.StringWithTail(result, uint(m.width), "…")
 	}
 	return result
+}
+
+// routeBarStrategyWidth is the exact clickable width of the strategy block at
+// the left edge; the attempt trail beside it remains a passive diagnostic.
+func (m Model) routeBarStrategyWidth() int {
+	strategy := m.routeBarStrategyLabel()
+	if strategy == "" {
+		return 0
+	}
+	block := styleHint.Render("estratégia:") + " " + styleBadgeAccent.Render(strings.ToUpper(strategy)) + styleHint.Render(" ▾")
+	return lipgloss.Width(block)
 }
 
 // renderRoutingActivity is intentionally a candidate rail, not a fake live

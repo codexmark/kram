@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"time"
 
@@ -42,6 +43,7 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", s.handleHealth)
 	mux.HandleFunc("GET /admin/status", s.handleStatus)
+	mux.HandleFunc("POST /admin/strategy", s.handleSetStrategy)
 	mux.HandleFunc("POST /v1/chat/completions", s.handleChatCompletions)
 	return s.recoverMiddleware(s.logMiddleware(mux))
 }
@@ -89,14 +91,18 @@ type statusCombo struct {
 }
 
 type statusResponse struct {
-	Providers []statusProvider `json:"providers"`
-	Combos    []statusCombo    `json:"combos"`
+	Providers  []statusProvider `json:"providers"`
+	Combos     []statusCombo    `json:"combos"`
+	Strategies []string         `json:"strategies"`
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	snapshot := s.telemetry.Snapshot()
 
-	resp := statusResponse{Providers: make([]statusProvider, 0, len(s.providers))}
+	resp := statusResponse{
+		Providers:  make([]statusProvider, 0, len(s.providers)),
+		Strategies: router.KnownStrategyNames(),
+	}
 	for id, p := range s.providers {
 		resp.Providers = append(resp.Providers, statusProvider{
 			ID:             id,
@@ -114,6 +120,58 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(resp)
+}
+
+type setStrategyRequest struct {
+	Combo    string `json:"combo"`
+	Strategy string `json:"strategy"`
+}
+
+// handleSetStrategy changes routing for future model calls without
+// restarting the gateway. This is deliberately loopback-only: a gateway may
+// expose its OpenAI-compatible endpoint to a LAN, but that must not also give
+// remote callers an unauthenticated control plane.
+func (s *Server) handleSetStrategy(w http.ResponseWriter, r *http.Request) {
+	if !isLoopbackRequest(r) {
+		writeError(w, http.StatusForbidden, "strategy changes are only allowed from localhost")
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 4096)
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	var req setStrategyRequest
+	if err := decoder.Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid strategy request: "+err.Error())
+		return
+	}
+	if req.Combo == "" || req.Strategy == "" {
+		writeError(w, http.StatusBadRequest, "combo and strategy are required")
+		return
+	}
+	if err := s.router.SetStrategy(req.Combo, req.Strategy); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	var updated statusCombo
+	for _, c := range s.router.Combos() {
+		if c.ID == req.Combo {
+			updated = statusCombo{ID: c.ID, Strategy: c.Strategy, Providers: c.Providers}
+			break
+		}
+	}
+	s.logger.Info("routing strategy changed", "combo", req.Combo, "strategy", req.Strategy)
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(updated)
+}
+
+func isLoopbackRequest(r *http.Request) bool {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func writeError(w http.ResponseWriter, status int, message string) {

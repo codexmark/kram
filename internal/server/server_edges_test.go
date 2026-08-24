@@ -52,8 +52,44 @@ func TestHealthStatusAndNotFoundHandlers(t *testing.T) {
 	if err := json.Unmarshal(r.Body.Bytes(), &got); err != nil {
 		t.Fatal(err)
 	}
-	if len(got.Providers) != 1 || got.Providers[0].ID != "p" || got.Providers[0].Kind != "scripted" || len(got.Combos) != 1 || got.Combos[0].Strategy != "priority" {
+	if len(got.Providers) != 1 || got.Providers[0].ID != "p" || got.Providers[0].Kind != "scripted" || len(got.Combos) != 1 || got.Combos[0].Strategy != "priority" || len(got.Strategies) == 0 {
 		t.Fatalf("status=%#v", got)
+	}
+}
+
+func TestSetStrategyIsLoopbackOnlyAndUpdatesStatus(t *testing.T) {
+	s := statusTestServer(t, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	handler := s.Handler()
+
+	remote := httptest.NewRequest(http.MethodPost, "/admin/strategy", strings.NewReader(`{"combo":"default","strategy":"smart"}`))
+	remote.RemoteAddr = "192.0.2.4:4321"
+	remoteResult := httptest.NewRecorder()
+	handler.ServeHTTP(remoteResult, remote)
+	if remoteResult.Code != http.StatusForbidden {
+		t.Fatalf("remote mutation status=%d body=%s", remoteResult.Code, remoteResult.Body.String())
+	}
+
+	local := httptest.NewRequest(http.MethodPost, "/admin/strategy", strings.NewReader(`{"combo":"default","strategy":"smart"}`))
+	local.RemoteAddr = "127.0.0.1:4321"
+	localResult := httptest.NewRecorder()
+	handler.ServeHTTP(localResult, local)
+	if localResult.Code != http.StatusOK {
+		t.Fatalf("local mutation status=%d body=%s", localResult.Code, localResult.Body.String())
+	}
+	var updated statusCombo
+	if err := json.Unmarshal(localResult.Body.Bytes(), &updated); err != nil {
+		t.Fatal(err)
+	}
+	if updated.ID != "default" || updated.Strategy != "smart" {
+		t.Fatalf("updated=%+v", updated)
+	}
+
+	bad := httptest.NewRequest(http.MethodPost, "/admin/strategy", strings.NewReader(`{"combo":"default","strategy":"not-real"}`))
+	bad.RemoteAddr = "[::1]:4321"
+	badResult := httptest.NewRecorder()
+	handler.ServeHTTP(badResult, bad)
+	if badResult.Code != http.StatusBadRequest {
+		t.Fatalf("bad strategy status=%d body=%s", badResult.Code, badResult.Body.String())
 	}
 }
 

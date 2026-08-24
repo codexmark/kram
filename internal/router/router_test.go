@@ -87,6 +87,56 @@ func TestNewRejectsUnknownStrategy(t *testing.T) {
 	}
 }
 
+func TestSetStrategyChangesFutureRankingsAndStatus(t *testing.T) {
+	r, _ := newTestRouter(t, "priority", "a", "b", "c")
+	if err := r.SetStrategy("default", "round-robin"); err != nil {
+		t.Fatal(err)
+	}
+	if got := r.StrategyName("default"); got != "round-robin" {
+		t.Fatalf("StrategyName = %q, want round-robin", got)
+	}
+	combos := r.Combos()
+	if len(combos) != 1 || combos[0].Strategy != "round-robin" {
+		t.Fatalf("Combos = %+v", combos)
+	}
+	seen := map[string]bool{}
+	for i := 0; i < 5; i++ {
+		ranked, _, err := r.Rank("default", reqWithAffinity("same"), "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		seen[rankedIDs(ranked)] = true
+	}
+	if len(seen) < 2 {
+		t.Fatalf("runtime round-robin did not rotate: %v", seen)
+	}
+}
+
+func TestSetStrategyRejectsUnknownValuesWithoutChangingRouter(t *testing.T) {
+	r, _ := newTestRouter(t, "priority", "a")
+	if err := r.SetStrategy("missing", "smart"); err == nil {
+		t.Fatal("unknown combo should fail")
+	}
+	if err := r.SetStrategy("default", "invented"); err == nil {
+		t.Fatal("unknown strategy should fail")
+	}
+	if got := r.StrategyName("default"); got != "priority" {
+		t.Fatalf("failed mutation changed strategy to %q", got)
+	}
+}
+
+func TestKnownStrategyNamesReturnsCopy(t *testing.T) {
+	first := KnownStrategyNames()
+	if len(first) == 0 {
+		t.Fatal("strategy list is empty")
+	}
+	want := first[0]
+	first[0] = "mutated"
+	if got := KnownStrategyNames()[0]; got != want {
+		t.Fatalf("caller mutated strategy source of truth: %q", got)
+	}
+}
+
 func TestDeclaredOrderStrategyNeverRotates(t *testing.T) {
 	// Empty strategy string — the "paid provider leads" case from
 	// autoStrategy — must preserve exact declared order every call.

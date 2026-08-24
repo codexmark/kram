@@ -75,6 +75,7 @@ type panel int
 const (
 	panelNone panel = iota
 	panelStrategy
+	panelStrategyPicker
 	panelContext
 	panelRoute
 	panelProcesses
@@ -146,9 +147,14 @@ type Model struct {
 
 	active panel
 
-	strategyData  statusclient.Status
-	strategyErr   error
-	strategyFocus int
+	strategyData        statusclient.Status
+	strategyErr         error
+	strategyFocus       int
+	strategyPickerFocus int
+	strategySwitching   bool
+	strategyPickerErr   error
+	strategyNotice      string
+	strategyNoticeRev   int
 
 	contextData daemonclient.ContextUsage
 	contextErr  error
@@ -513,6 +519,35 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.strategyErr = msg.err
 		if msg.err == nil {
 			m.strategyData = msg.status
+			if m.active == panelStrategyPicker {
+				m.syncStrategyPickerFocus()
+			}
+		}
+		return m, nil
+
+	case strategySetMsg:
+		m.strategySwitching = false
+		if msg.err != nil {
+			m.strategyPickerErr = msg.err
+			return m, nil
+		}
+		for i := range m.strategyData.Combos {
+			if m.strategyData.Combos[i].ID == msg.combo.ID {
+				m.strategyData.Combos[i] = msg.combo
+			}
+		}
+		m.routeCall = nil // an old completed call must not overwrite the new label
+		m.strategyPickerErr = nil
+		m.strategyNoticeRev++
+		m.strategyNotice = "✓ estratégia: " + strings.ToUpper(msg.combo.Strategy)
+		m.active = panelNone
+		m.syncViewportSize()
+		m.syncTranscriptRenderer()
+		return m, clearStrategyNoticeCmd(m.strategyNoticeRev)
+
+	case strategyNoticeClearMsg:
+		if msg.revision == m.strategyNoticeRev {
+			m.strategyNotice = ""
 		}
 		return m, nil
 
@@ -694,6 +729,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	switch msg.String() {
+	case "ctrl+s":
+		return m.togglePanel(panelStrategyPicker)
+
 	case "ctrl+p":
 		return m.togglePanel(panelStrategy)
 
@@ -769,6 +807,12 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
+		if m.active == panelStrategyPicker {
+			if m.strategyPickerFocus > 0 {
+				m.strategyPickerFocus--
+			}
+			return m, nil
+		}
 		m.viewport.LineUp(1)
 		return m, nil
 
@@ -785,12 +829,21 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
+		if m.active == panelStrategyPicker {
+			if n := len(m.availableStrategies()); m.strategyPickerFocus < n-1 {
+				m.strategyPickerFocus++
+			}
+			return m, nil
+		}
 		m.viewport.LineDown(1)
 		return m, nil
 
 	case "enter":
 		if m.active == panelProcesses {
 			return m, nil
+		}
+		if m.active == panelStrategyPicker {
+			return m.applyFocusedStrategy()
 		}
 		if m.active != panelNone {
 			m.active = panelNone
@@ -868,6 +921,17 @@ func (m Model) handlePickerKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	if m.phase == phaseSplash {
 		return m, nil
+	}
+	if msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft && msg.Y == 0 && m.routeBarStrategyLabel() != "" {
+		if msg.X >= 0 && msg.X < m.routeBarStrategyWidth() {
+			return m.togglePanel(panelStrategyPicker)
+		}
+	}
+	if msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft && m.active == panelStrategyPicker {
+		if index, ok := m.strategyPickerIndexAtRow(msg.Y); ok {
+			m.strategyPickerFocus = index
+			return m.applyFocusedStrategy()
+		}
 	}
 	viewportRow := msg.Y - routeBarHeight
 	insideBody := viewportRow >= 0 && viewportRow < m.viewport.Height
@@ -994,6 +1058,10 @@ func (m Model) togglePanel(p panel) (tea.Model, tea.Cmd) {
 	switch p {
 	case panelStrategy:
 		m.strategyFocus = 0
+		return m, fetchStatusCmd(m.gateway)
+	case panelStrategyPicker:
+		m.strategyPickerErr = nil
+		m.syncStrategyPickerFocus()
 		return m, fetchStatusCmd(m.gateway)
 	case panelContext:
 		return m, fetchContextCmd(m.daemon, m.sessionID)

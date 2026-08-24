@@ -15,8 +15,9 @@ func TestFetchDecodesStatus(t *testing.T) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(Status{
-			Providers: []Provider{{ID: "p1", Kind: "anthropic", BreakerOpen: false, Stats: ProviderStats{Requests: 10}}},
-			Combos:    []Combo{{ID: "default", Strategy: "smart", Providers: []string{"p1"}}},
+			Providers:  []Provider{{ID: "p1", Kind: "anthropic", BreakerOpen: false, Stats: ProviderStats{Requests: 10}}},
+			Combos:     []Combo{{ID: "default", Strategy: "smart", Providers: []string{"p1"}}},
+			Strategies: []string{"priority", "smart"},
 		})
 	}))
 	defer srv.Close()
@@ -31,6 +32,43 @@ func TestFetchDecodesStatus(t *testing.T) {
 	}
 	if len(status.Combos) != 1 || status.Combos[0].ID != "default" {
 		t.Errorf("Combos = %+v, want one entry for default", status.Combos)
+	}
+	if len(status.Strategies) != 2 || status.Strategies[1] != "smart" {
+		t.Errorf("Strategies = %+v", status.Strategies)
+	}
+}
+
+func TestSetStrategySendsMutationAndDecodesCombo(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/admin/strategy" {
+			t.Fatalf("request = %s %s", r.Method, r.URL.Path)
+		}
+		var body map[string]string
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		if body["combo"] != "default" || body["strategy"] != "round-robin" {
+			t.Fatalf("body=%v", body)
+		}
+		_ = json.NewEncoder(w).Encode(Combo{ID: "default", Strategy: "round-robin", Providers: []string{"a", "b"}})
+	}))
+	defer srv.Close()
+
+	updated, err := New(srv.URL).SetStrategy(context.Background(), "default", "round-robin")
+	if err != nil || updated.Strategy != "round-robin" {
+		t.Fatalf("updated=%+v err=%v", updated, err)
+	}
+}
+
+func TestSetStrategyReturnsGatewayErrorMessage(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(`{"error":{"message":"unknown strategy"}}`))
+	}))
+	defer srv.Close()
+
+	if _, err := New(srv.URL).SetStrategy(context.Background(), "default", "bad"); err == nil || err.Error() != "gateway: unknown strategy" {
+		t.Fatalf("err=%v", err)
 	}
 }
 

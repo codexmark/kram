@@ -1320,6 +1320,16 @@ Wide terminals can show provider names, outcome glyphs, and latency. Narrower la
 
 While a model call is in flight, Kram shows a generic routing state because the daemon does not yet receive true per-attempt live progress from inside the gateway fallback loop.
 
+Click the strategy block (marked with `▾`) or press `Ctrl+S` to open the
+runtime strategy picker. Arrow keys move, `Enter` applies, `Esc` cancels, and
+clicking an option applies it directly. A change is atomic and affects the
+next model call; a call whose ranking already began finishes with its original
+strategy. Runtime choices deliberately reset when the gateway restarts — edit
+`config.yaml` when the change should be permanent.
+
+The mutation endpoint is loopback-only even when the gateway's inference API
+is exposed to a LAN.
+
 ## `Ctrl+R` — full RouteTrace
 
 Shows the most recently completed user run:

@@ -6,6 +6,7 @@
 package statusclient
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -40,8 +41,9 @@ type Combo struct {
 
 // Status is the full /admin/status payload.
 type Status struct {
-	Providers []Provider `json:"providers"`
-	Combos    []Combo    `json:"combos"`
+	Providers  []Provider `json:"providers"`
+	Combos     []Combo    `json:"combos"`
+	Strategies []string   `json:"strategies"`
 }
 
 // Client talks to a kram-gateway instance's status endpoint.
@@ -77,4 +79,41 @@ func (c *Client) Fetch(ctx context.Context) (Status, error) {
 		return Status{}, fmt.Errorf("decoding gateway status: %w", err)
 	}
 	return status, nil
+}
+
+// SetStrategy changes combo's runtime strategy for future model calls. The
+// gateway intentionally exposes this mutation only to loopback clients.
+func (c *Client) SetStrategy(ctx context.Context, combo, strategy string) (Combo, error) {
+	payload, err := json.Marshal(map[string]string{"combo": combo, "strategy": strategy})
+	if err != nil {
+		return Combo{}, fmt.Errorf("encoding strategy request: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/admin/strategy", bytes.NewReader(payload))
+	if err != nil {
+		return Combo{}, fmt.Errorf("building strategy request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return Combo{}, fmt.Errorf("calling gateway: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		var body struct {
+			Error struct {
+				Message string `json:"message"`
+			} `json:"error"`
+		}
+		if json.NewDecoder(resp.Body).Decode(&body) == nil && body.Error.Message != "" {
+			return Combo{}, fmt.Errorf("gateway: %s", body.Error.Message)
+		}
+		return Combo{}, fmt.Errorf("gateway returned %s", resp.Status)
+	}
+
+	var updated Combo
+	if err := json.NewDecoder(resp.Body).Decode(&updated); err != nil {
+		return Combo{}, fmt.Errorf("decoding strategy response: %w", err)
+	}
+	return updated, nil
 }

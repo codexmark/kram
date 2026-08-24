@@ -31,6 +31,7 @@ type combo struct {
 	id           string
 	strategyName string
 	strategy     Strategy
+	strategyOpts strategyOptions
 	providers    []provider.Provider
 	response     config.ResponseGateConfig
 }
@@ -73,7 +74,7 @@ func New(cfg *config.Config, providers map[string]provider.Provider, breakers *b
 		opts := resolveStrategyOptions(cc.StrategyOptions)
 		combos[cc.ID] = &combo{
 			id: cc.ID, strategyName: cc.Strategy, strategy: newStrategy(cc.Strategy, opts),
-			providers: ps, response: cc.Response,
+			strategyOpts: opts, providers: ps, response: cc.Response,
 		}
 	}
 
@@ -81,6 +82,33 @@ func New(cfg *config.Config, providers map[string]provider.Provider, breakers *b
 		combos: combos, defaultCombo: cfg.DefaultCombo,
 		breakers: breakers, telemetry: tel, qualityHints: qualityHints,
 	}, nil
+}
+
+// SetStrategy atomically replaces comboID's strategy for future rankings.
+// Existing requests keep the immutable combo snapshot they already loaded,
+// so changing strategy never races with or rewrites an in-flight attempt.
+// Stateful strategy data (round-robin cursor, sticky/LKGP history) starts
+// fresh because it belongs to the strategy instance being replaced.
+func (r *Router) SetStrategy(comboID, name string) error {
+	if !validStrategyName(name) || name == "" {
+		return unknownStrategyError(comboID, name)
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	current, ok := r.combos[comboID]
+	if !ok {
+		return fmt.Errorf("unknown combo %q", comboID)
+	}
+	if current.strategyName == name {
+		return nil
+	}
+
+	next := *current
+	next.strategyName = name
+	next.strategy = newStrategy(name, current.strategyOpts)
+	r.combos[comboID] = &next
+	return nil
 }
 
 // Resolve maps a client-supplied "model" value to a combo ID: an exact

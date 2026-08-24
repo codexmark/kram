@@ -58,6 +58,13 @@ var knownStrategyNames = []string{
 	"lkgp", "p2c",
 }
 
+// KnownStrategyNames returns the strategies accepted by SetStrategy and the
+// config loader. The copy keeps callers from mutating the router's source of
+// truth while still letting status/UI surfaces discover the live list.
+func KnownStrategyNames() []string {
+	return append([]string(nil), knownStrategyNames...)
+}
+
 func validStrategyName(name string) bool {
 	if name == "" {
 		return true

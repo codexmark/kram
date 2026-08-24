@@ -231,6 +231,8 @@ func (m Model) View() string {
 	switch m.active {
 	case panelStrategy:
 		b.WriteString(m.renderStrategyPanel())
+	case panelStrategyPicker:
+		b.WriteString(m.renderStrategyPicker())
 	case panelContext:
 		b.WriteString(m.renderContextPanel())
 	case panelRoute:
@@ -250,7 +252,9 @@ func (m Model) View() string {
 // the route bar."
 func (m Model) renderFooter() string {
 	tokens := ""
-	if m.copyNotice != "" {
+	if m.strategyNotice != "" {
+		tokens = styleBadgeOK.Render(m.strategyNotice)
+	} else if m.copyNotice != "" {
 		tokens = styleBadgeOK.Render(m.copyNotice)
 	} else if last := m.lastAssistantTokens(); last != "" {
 		tokens = styleMeta.Render(last)
@@ -264,7 +268,7 @@ func (m Model) renderFooter() string {
 // click target starts.
 func (m Model) footerRightBlock() string {
 	return joinNonEmpty("  ", m.contextIcon(), styleHint.Render("^b processos"),
-		styleHint.Render("^r rota"), styleHint.Render("^t contexto"), styleHint.Render("^p estratégia"))
+		styleHint.Render("^r rota"), styleHint.Render("^t contexto"), styleHint.Render("^s estratégia"), styleHint.Render("^p detalhes"))
 }
 
 // contextIcon is the discreet, clickable context-window badge: a filled

@@ -128,6 +128,20 @@ func fetchStatusCmd(c *statusclient.Client) tea.Cmd {
 	}
 }
 
+type strategySetMsg struct {
+	combo statusclient.Combo
+	err   error
+}
+
+func setStrategyCmd(c *statusclient.Client, combo, strategy string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		updated, err := c.SetStrategy(ctx, combo, strategy)
+		return strategySetMsg{combo: updated, err: err}
+	}
+}
+
 type contextResultMsg struct {
 	usage daemonclient.ContextUsage
 	err   error
