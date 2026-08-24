@@ -70,9 +70,27 @@ func (s *Service) ContextUsage(ctx context.Context, sessionID string) (ContextUs
 	used := summaryTokens + messageTokens + fixedTokens
 	free := policy.RemainingHistoryTokens(summaryTokens + messageTokens)
 
+	// system_prompt sums every part that isn't one of the other named
+	// categories below — either the single "base" part
+	// (SystemPromptOverride set) or the Model/Agent Profile phase's nine
+	// named base sections (see compileBaseSections), whichever
+	// compilePreamble actually produced. Summed rather than keyed by a
+	// fixed ID list so this stays correct if a future phase adds more
+	// base sections without this file needing a matching update.
+	nonBaseCategoryIDs := map[string]bool{
+		"tools-overview": true, "background-job-guidance": true,
+		"project-context": true, "memory": true,
+	}
+	systemPromptTokens := 0
+	for id, tok := range partTokens {
+		if !nonBaseCategoryIDs[id] {
+			systemPromptTokens += tok
+		}
+	}
+
 	categories := []ContextCategory{
 		{Name: "messages", Tokens: messageTokens},
-		{Name: "system_prompt", Tokens: partTokens["base"]},
+		{Name: "system_prompt", Tokens: systemPromptTokens},
 		{Name: "tool_overview", Tokens: partTokens["tools-overview"]},
 		{Name: "tool_definitions", Tokens: toolTokens},
 	}

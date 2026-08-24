@@ -146,6 +146,38 @@ func TestContextUsageAndRunFailures(t *testing.T) {
 	}
 }
 
+// TestContextUsageSystemPromptCategoryIsNonZero is the regression test
+// for a real bug the Model/Agent Profile phase's split introduced and
+// caught along the way: context_usage.go used to key its "system_prompt"
+// category directly off partTokens["base"], which only exists when
+// Config.SystemPromptOverride is set — in the default (no override) case,
+// compilePreamble now returns nine separately-IDed base sections instead
+// of one "base" part, so that lookup would have silently reported 0
+// tokens for the system prompt on every session that doesn't use an
+// override, which is the common case.
+func TestContextUsageSystemPromptCategoryIsNonZero(t *testing.T) {
+	s := coverageService(t)
+	if _, err := s.store.CreateSession("sp", "session"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.store.AppendMessage("sp", store.Message{Role: "user", Content: "hello"}); err != nil {
+		t.Fatal(err)
+	}
+	usage, err := s.ContextUsage(context.Background(), "sp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, cat := range usage.Categories {
+		if cat.Name == "system_prompt" {
+			if cat.Tokens <= 0 {
+				t.Fatalf("system_prompt category = %d tokens, want > 0: %+v", cat.Tokens, usage.Categories)
+			}
+			return
+		}
+	}
+	t.Fatalf("no system_prompt category in %+v", usage.Categories)
+}
+
 func TestRunTaskCreatesIsolatedSessionAndUsesModel(t *testing.T) {
 	gw, requests := fakeGateway(t, []scriptedChatResponse{{content: "child answer"}})
 	defer gw.Close()

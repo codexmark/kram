@@ -13,15 +13,15 @@ import (
 func TestCompilePreambleBaseOnly(t *testing.T) {
 	parts := compilePreamble("/ws", "", false, openai.ChatMessage{}, false, nil, nil, "")
 
-	if len(parts) != 1 {
-		t.Fatalf("parts = %d, want 1 (base only): %+v", len(parts), parts)
+	if len(parts) != len(baseSectionOrder) {
+		t.Fatalf("parts = %d, want %d (base sections only): %+v", len(parts), len(baseSectionOrder), parts)
 	}
 	p := parts[0]
-	if p.ID != "base" || p.Placement != PlacementPreamble || p.Refresh != RefreshStatic || p.Source != "builtin" {
-		t.Errorf("base part = %+v, want ID=base Placement=Preamble Refresh=Static Source=builtin", p)
+	if p.ID != "identity" || p.Placement != PlacementPreamble || p.Refresh != RefreshStatic || p.Source != "builtin" {
+		t.Errorf("first base part = %+v, want ID=identity Placement=Preamble Refresh=Static Source=builtin", p)
 	}
 	if !strings.Contains(p.Content, "Kram") {
-		t.Errorf("base part content doesn't look like systemPrompt output: %q", p.Content[:min(80, len(p.Content))])
+		t.Errorf("identity part content doesn't look like systemPrompt output: %q", p.Content[:min(80, len(p.Content))])
 	}
 }
 
@@ -58,10 +58,11 @@ func TestCompilePreambleEmptyOverridePreservesDefaultSystemPrompt(t *testing.T) 
 func TestCompilePreambleWithProjectContextOnly(t *testing.T) {
 	parts := compilePreamble("/ws", "some AGENTS.md text", true, openai.ChatMessage{}, false, nil, nil, "")
 
-	if len(parts) != 2 {
-		t.Fatalf("parts = %d, want 2 (base + project-context): %+v", len(parts), parts)
+	want := len(baseSectionOrder) + 1 // base sections + project-context
+	if len(parts) != want {
+		t.Fatalf("parts = %d, want %d (base sections + project-context): %+v", len(parts), want, parts)
 	}
-	p := parts[1]
+	p := parts[len(baseSectionOrder)]
 	if p.ID != "project-context" || p.Placement != PlacementPreamble || p.Refresh != RefreshIteration || p.Source != "AGENTS.md" {
 		t.Errorf("project-context part = %+v, want ID=project-context Placement=Preamble Refresh=Iteration Source=AGENTS.md", p)
 	}
@@ -77,10 +78,11 @@ func TestCompilePreambleWithMemoryOnly(t *testing.T) {
 	memMsg := openai.ChatMessage{Role: "system", Content: "remembered fact"}
 	parts := compilePreamble("/ws", "", false, memMsg, true, nil, nil, "")
 
-	if len(parts) != 2 {
-		t.Fatalf("parts = %d, want 2 (base + memory): %+v", len(parts), parts)
+	want := len(baseSectionOrder) + 1 // base sections + memory
+	if len(parts) != want {
+		t.Fatalf("parts = %d, want %d (base sections + memory): %+v", len(parts), want, parts)
 	}
-	p := parts[1]
+	p := parts[len(baseSectionOrder)]
 	if p.ID != "memory" || p.Placement != PlacementPreamble || p.Refresh != RefreshRun || p.Source != "memory" {
 		t.Errorf("memory part = %+v, want ID=memory Placement=Preamble Refresh=Run Source=memory", p)
 	}
@@ -93,16 +95,28 @@ func TestCompilePreambleWithBothProjectContextAndMemory(t *testing.T) {
 	memMsg := openai.ChatMessage{Content: "remembered fact"}
 	parts := compilePreamble("/ws", "ctx", true, memMsg, true, nil, nil, "")
 
-	if len(parts) != 3 {
-		t.Fatalf("parts = %d, want 3 (base, project-context, memory): %+v", len(parts), parts)
+	want := len(baseSectionOrder) + 2 // base sections, project-context, memory
+	if len(parts) != want {
+		t.Fatalf("parts = %d, want %d (base sections, project-context, memory): %+v", len(parts), want, parts)
 	}
-	gotIDs := []string{parts[0].ID, parts[1].ID, parts[2].ID}
-	wantIDs := []string{"base", "project-context", "memory"}
-	for i := range wantIDs {
-		if gotIDs[i] != wantIDs[i] {
-			t.Errorf("order[%d] = %q, want %q (full order: %v)", i, gotIDs[i], wantIDs[i], gotIDs)
+	tailIDs := []string{parts[len(baseSectionOrder)].ID, parts[len(baseSectionOrder)+1].ID}
+	wantTail := []string{"project-context", "memory"}
+	for i := range wantTail {
+		if tailIDs[i] != wantTail[i] {
+			t.Errorf("tail order[%d] = %q, want %q (full order: %v)", i, tailIDs[i], wantTail[i], allPartIDs(parts))
 		}
 	}
+	if parts[0].ID != baseSectionOrder[0] {
+		t.Errorf("first part = %q, want the first base section %q", parts[0].ID, baseSectionOrder[0])
+	}
+}
+
+func allPartIDs(parts []PromptPart) []string {
+	ids := make([]string, len(parts))
+	for i, p := range parts {
+		ids[i] = p.ID
+	}
+	return ids
 }
 
 // TestCompileToolsOverviewNilRegistryReturnsEmptyPart matches
