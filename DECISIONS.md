@@ -3472,3 +3472,47 @@ the workspace's own). The test wasn't isolating `XDG_CONFIG_HOME` the
 way `permission_test.go`'s own `newPermTestRegistry` already does for
 exactly this reason — fixed by adding the same isolation, not by
 changing any product code.
+
+---
+
+## Cross-call usage guidance for background processes
+
+`run_background`, `process_list`, `process_output`, and `process_kill`
+each have a solid per-tool `Description()`, but none of them — and
+nothing else — told the model the habits that make using several of
+them together actually work: don't busy-poll `process_output` right
+after starting a job, track which ids you've started, check output at a
+natural point rather than immediately, clean up a job that's no longer
+needed. No single tool's description can carry this; it only exists
+across calls. The same class of gap the Tool Semantics Registry closed
+for tool *visibility*, here for tool *usage habits spanning several
+calls* — and the concrete symptom the "Kram couldn't run `expo start`"
+finding surfaced in the first place: reaching for `run_background`
+correctly is only half the problem if the model then uses it badly.
+
+`compileBackgroundJobGuidance` (`internal/daemon/agent/
+promptcompiler.go`) follows `compileToolsOverview`'s own pattern
+exactly: check `reg.VisibleTools()` for `run_background`'s presence,
+return an empty part otherwise. A deployment where the tool is disabled
+or permission-denied gets no guidance for a workflow it can't use — the
+same reasoning, and literally the same `VisibleTools()` call, that keeps
+the Tools overview itself honest.
+
+The guidance text is written in terms of what Kram's daemon actually
+does today — polling, not push notification. There is no job-finished
+event; the closing line says so explicitly ("there is no notification
+when a job finishes; you have to check") specifically so nobody is
+tempted to soften that into vaguer prose later that reads as promising a
+capability that doesn't exist. `TestCompileBackgroundJobGuidancePresent
+WhenRunBackgroundVisible` asserts on that directly, not just that the
+guidance is present.
+
+Wired into `compilePreamble` right after the tools overview.
+`TestRunLoopPromptAssemblyContract` — the real-registry, real-`Service.Run`
+regression test — went from asserting on 5 messages to 6; the new
+message's exact position (`[2]`, between the tools overview and
+project-context) is pinned there, not just its presence somewhere.
+`context_usage.go` also gained a `background_job_guidance` category in
+the context-window breakdown, matching how `tools-overview`/
+`project-context`/`memory` already each get their own named bucket
+rather than folding into an undifferentiated total.

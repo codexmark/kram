@@ -177,6 +177,70 @@ func TestCompileToolsOverviewHonorsToolOrder(t *testing.T) {
 	}
 }
 
+func TestCompileBackgroundJobGuidanceNilRegistryReturnsEmptyPart(t *testing.T) {
+	p := compileBackgroundJobGuidance(nil)
+	if p.ID != "background-job-guidance" || p.Content != "" {
+		t.Errorf("nil registry part = %+v, want ID=background-job-guidance and empty Content", p)
+	}
+}
+
+// TestCompileBackgroundJobGuidancePresentWhenRunBackgroundVisible confirms
+// the guidance appears — and doesn't overclaim a notification capability
+// Kram's daemon doesn't have — when run_background is actually offered.
+func TestCompileBackgroundJobGuidancePresentWhenRunBackgroundVisible(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	reg := tools.NewRegistry(t.TempDir(), nil, nil)
+
+	p := compileBackgroundJobGuidance(reg)
+
+	if p.Content == "" {
+		t.Fatal("expected non-empty guidance when run_background is visible")
+	}
+	if !strings.Contains(p.Content, "run_background") {
+		t.Errorf("guidance should mention run_background, got: %s", p.Content)
+	}
+	if strings.Contains(strings.ToLower(p.Content), "notif") && !strings.Contains(p.Content, "no notification") {
+		t.Errorf("guidance must not claim a notification capability Kram's daemon doesn't have, got: %s", p.Content)
+	}
+}
+
+// TestCompileBackgroundJobGuidanceAbsentWhenRunBackgroundDisabled mirrors
+// the same "don't tell the model about a workflow it can't use" discipline
+// compileToolsOverview already applies via VisibleTools().
+func TestCompileBackgroundJobGuidanceAbsentWhenRunBackgroundDisabled(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	reg := tools.NewRegistry(t.TempDir(), nil, map[string]bool{"run_background": true})
+
+	p := compileBackgroundJobGuidance(reg)
+
+	if p.Content != "" {
+		t.Errorf("expected no guidance when run_background is settings-disabled, got: %s", p.Content)
+	}
+}
+
+// TestCompileBackgroundJobGuidanceAbsentWhenPermissionDenied covers the
+// other axis VisibleTools() checks — a Strict-style deny-all policy, not
+// just the settings toggle.
+func TestCompileBackgroundJobGuidanceAbsentWhenPermissionDenied(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	workspace := t.TempDir()
+	kramDir := filepath.Join(workspace, ".kram")
+	if err := os.MkdirAll(kramDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	permJSON := `{"rules":[{"tool":"run_background","decision":"deny"}]}`
+	if err := os.WriteFile(filepath.Join(kramDir, "permissions.json"), []byte(permJSON), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	reg := tools.NewRegistry(workspace, nil, nil)
+
+	p := compileBackgroundJobGuidance(reg)
+
+	if p.Content != "" {
+		t.Errorf("expected no guidance when run_background is permission-denied, got: %s", p.Content)
+	}
+}
+
 func TestCompileTurnPostscriptNeitherFlag(t *testing.T) {
 	parts := compileTurnPostscript(false, false)
 	if len(parts) != 0 {

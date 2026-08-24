@@ -133,8 +133,8 @@ func TestRunLoopPromptAssemblyContract(t *testing.T) {
 		t.Fatalf("expected exactly 1 gateway request, got %d", len(reqs))
 	}
 	msgs := reqs[0]
-	if len(msgs) != 5 {
-		t.Fatalf("expected 5 messages ([0]base [1]tools-overview [2]AGENTS.md [3]memory [4]user turn), got %d: %+v", len(msgs), msgs)
+	if len(msgs) != 6 {
+		t.Fatalf("expected 6 messages ([0]base [1]tools-overview [2]background-job-guidance [3]AGENTS.md [4]memory [5]user turn), got %d: %+v", len(msgs), msgs)
 	}
 	if msgs[0].Role != "system" || msgs[0].Content == "" {
 		t.Errorf("msgs[0] should be the non-empty base system prompt, got %+v", msgs[0])
@@ -142,14 +142,17 @@ func TestRunLoopPromptAssemblyContract(t *testing.T) {
 	if msgs[1].Role != "system" || !strings.Contains(msgs[1].Content, "# Tools") || !strings.Contains(msgs[1].Content, "run_background") {
 		t.Errorf("msgs[1] should be the generated tools overview (mentioning run_background, among every other registered tool), got %+v", msgs[1])
 	}
-	if msgs[2].Role != "system" || !strings.Contains(msgs[2].Content, "Always run tests before finishing.") {
-		t.Errorf("msgs[2] should be the AGENTS.md project-context message, got %+v", msgs[2])
+	if msgs[2].Role != "system" || !strings.Contains(msgs[2].Content, "run_background, not bash") {
+		t.Errorf("msgs[2] should be the background-job guidance (run_background is visible in this real registry), got %+v", msgs[2])
 	}
-	if msgs[3].Role != "system" || !strings.Contains(msgs[3].Content, "the user prefers terse answers") {
-		t.Errorf("msgs[3] should be the memory message, got %+v", msgs[3])
+	if msgs[3].Role != "system" || !strings.Contains(msgs[3].Content, "Always run tests before finishing.") {
+		t.Errorf("msgs[3] should be the AGENTS.md project-context message, got %+v", msgs[3])
 	}
-	if msgs[4].Role != "user" || msgs[4].Content != "oi" {
-		t.Errorf("msgs[4] should be the real conversation turn, got %+v", msgs[4])
+	if msgs[4].Role != "system" || !strings.Contains(msgs[4].Content, "the user prefers terse answers") {
+		t.Errorf("msgs[4] should be the memory message, got %+v", msgs[4])
+	}
+	if msgs[5].Role != "user" || msgs[5].Content != "oi" {
+		t.Errorf("msgs[5] should be the real conversation turn, got %+v", msgs[5])
 	}
 }
 
