@@ -70,3 +70,34 @@ func TestOAuthOnlyAccountsSupportOAuth(t *testing.T) {
 		}
 	}
 }
+
+// TestDeepSeekProviderMatchesOfficialDocs pins the exact values sourced
+// from DeepSeek's own API docs (api-docs.deepseek.com) at the time this
+// entry was added (issue #20) — a regression test, not just a comment,
+// so an accidental future edit (e.g. someone "helpfully" appending /v1
+// to BaseURL to match the OpenAI/OpenRouter entries' convention) fails
+// loudly instead of silently breaking every request.
+func TestDeepSeekProviderMatchesOfficialDocs(t *testing.T) {
+	var p *Provider
+	for i := range Providers {
+		if Providers[i].ID == "deepseek" {
+			p = &Providers[i]
+			break
+		}
+	}
+	if p == nil {
+		t.Fatal("no \"deepseek\" entry in Providers")
+	}
+	if p.Kind != "openai-compat" {
+		t.Errorf("Kind = %q, want openai-compat (DeepSeek's API is OpenAI-compatible, no dedicated adapter needed)", p.Kind)
+	}
+	if p.BaseURL != "https://api.deepseek.com" {
+		t.Errorf("BaseURL = %q, want %q (no /v1 suffix — DeepSeek's documented endpoint is .../chat/completions directly)", p.BaseURL, "https://api.deepseek.com")
+	}
+	if p.EnvVar != "DEEPSEEK_API_KEY" {
+		t.Errorf("EnvVar = %q, want DEEPSEEK_API_KEY", p.EnvVar)
+	}
+	if !p.SupportsTools {
+		t.Error("SupportsTools = false, want true — every current DeepSeek model accepts tool/function calling")
+	}
+}

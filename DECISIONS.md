@@ -1312,6 +1312,27 @@ TUI. Ctrl+P falls back to the pre-Combos-v2 provider-list/telemetry view
 for non-scoring strategies (priority, round-robin, prefix-affinity),
 which never produce a ranking — there's nothing to show a breakdown of.
 
+### Strategy selection is live, atomic, and deliberately session-scoped
+
+The route bar's strategy block is a control as well as a status label: its
+`▾`, a mouse click, or `Ctrl+S` opens the same picker. The available names come
+from `GET /admin/status`, whose list is exported by the router itself, rather
+than being duplicated in the TUI. Selection calls `POST /admin/strategy`; the
+control-plane mutation is rejected for non-loopback peers even if someone has
+intentionally exposed the inference endpoint to a LAN.
+
+`Router.SetStrategy` replaces the combo with a new immutable snapshot under
+the router lock instead of mutating a strategy pointer that an in-flight rank
+may still be reading. Calls already ranked finish under the old snapshot;
+future calls see the new one. Switching also creates a fresh strategy instance,
+so state owned by round-robin/sticky/LKGP does not leak across strategy modes.
+
+The selection is runtime-only. Silently rewriting an explicit, workspace, or
+global config file from a generic gateway admin endpoint would make ownership
+ambiguous and could persist a TUI experiment into unrelated sessions. The
+picker says the next call changes immediately; durable policy remains an
+explicit `config.yaml` edit.
+
 ### Two real bugs, found only by testing this live
 
 Both were caught by actually running the CLI against real mock providers
@@ -1560,6 +1581,16 @@ not Chat Completions) serving a restricted model set — never
 convenience: the resulting token simply doesn't work there. It's its own
 catalog entry (`openai-chatgpt`) and its own adapter
 (`internal/provider/openai_responses.go`, `Kind: "openai-responses"`).
+
+The live Codex backend also requires two request flags that the public
+Responses API shape does not make safe to infer from zero values: streaming
+must be enabled and persistence must be disabled explicitly. Authentication
+can succeed while an otherwise valid request still fails with `400 Store must
+be set to false`. `responsesRequest.Store` therefore deliberately has no
+`omitempty` tag and every request sends `"store": false`; a wire-level test
+guards the field's presence, not merely its Go zero value. This was verified
+end to end with a real ChatGPT subscription through Kram's gateway, which
+returned content from `openai-chatgpt` rather than a fallback provider.
 
 ### Anthropic's client_id is real but unofficial — said so, not hidden
 
@@ -3177,3 +3208,137 @@ One operational issue was intentionally not encoded into Kram: Rails and
 Bundler installed into Ruby's user-gem bin directory, which the host shell did
 not have on `PATH`. Local symlinks fixed that machine. Kram should report such a
 command-resolution problem, not mutate a user's shell profile automatically.
+
+### Malformed tool history is quarantined at every provider boundary
+
+A live long-running Rails session exposed two related failures. A fallback
+model ended a streamed `run_background` argument halfway through a JSON string;
+Kram executed it, persisted the resulting `invalid arguments` tool result, and
+then every later provider rejected the durable session. The ChatGPT Codex
+backend returned an opaque 400, while the lab router happened to expose the
+useful `Unterminated string` detail. A separate capture showed the Responses
+adapter producing a real `skill_list` call plus a second empty phantom call.
+
+The phantom was a wire-shape bug: Codex argument-delta events identify their
+parent with top-level `output_index`/`item_id`; Kram looked for a nested
+`item.call_id`, did not find it, and allocated a new accumulator slot. Responses
+stream assembly now joins on `output_index` and consumes the complete
+`response.function_call_arguments.done` value only when no deltas arrived.
+
+**Decision:** a tool call may leave a provider adapter only when it has a
+non-empty ID, a non-empty function name, and object-shaped JSON arguments.
+Empty arguments are the one safe normalization and become `{}`. Truncated,
+scalar, nameless, or ID-less calls are discarded before execution. On replay,
+every provider adapter also sanitizes durable history and removes both an
+invalid call and its now-orphaned tool result. This quarantine is intentionally
+non-destructive: the database remains an audit record, while the outbound
+payload becomes valid again and an unhealthy fallback cannot permanently
+poison a healthy provider or session.
+
+The Responses adapter additionally captures at most 4 KiB of an HTTP error
+body, collapses control whitespace, and attaches it to the typed error. The
+request and credential are never logged. Status-only `400 Bad Request` was not
+enough to distinguish authentication, a required request flag, and poisoned
+history during the live diagnosis.
+
+### Token accounting is execution-wide; provider optimizations stay capability-scoped
+
+A live Codex-backed session made 71 upstream requests and reported roughly 2.57
+million prompt tokens. Two independent effects were hidden by the old UI: each
+tool round resent the complete tool inventory and durable history, while the
+gateway only returned the winning candidate's usage. A response rejected by the
+quality gate, followed by a fallback, consumed real tokens but disappeared from
+the run total. Gateway-round retries had the same accounting hole.
+
+**Decision:** usage is additive across completed candidates, fallbacks, model
+tool rounds, and gateway retries. The normalized usage shape preserves cache
+reads, cache writes, reasoning tokens, and an optional API-list-price equivalent.
+The latter is explicitly an estimate, never presented as a charge against a
+ChatGPT subscription. Provider telemetry records every completed candidate,
+including a response later rejected by the gate.
+
+Prompt-cache affinity is session-scoped and sent out-of-band, separate from the
+run-scoped routing key. A run key must change each user turn to keep Sticky
+routing honest; a cache key must remain stable so the unchanged prompt prefix can
+be reused across turns.
+
+Advanced savings are enabled only where the provider contract supports them:
+
+- the ChatGPT Responses adapter requests encrypted reasoning output with
+  `store:false`, persists the completed reasoning item beside its assistant turn,
+  and replays it on the following request. `previous_response_id` is deliberately
+  not used because the ChatGPT Codex backend rejects it;
+- GPT-5.4+ Responses models receive deferred function definitions plus hosted
+  `tool_search`, so the full schema catalog is loaded only when the model selects
+  a function. Older Responses models and all other adapters keep eager tools;
+- GPT-5.5 uses a stable `prompt_cache_key` with the backend's default retention.
+  The public Responses API documents `prompt_cache_retention`, but the
+  ChatGPT-authenticated Codex backend rejected that field in the live smoke, so
+  Kram deliberately omits it here. Other adapters receive the stable affinity
+  internally but never get unsupported wire fields.
+
+This capability boundary matters: sending Responses-only fields to LM Studio,
+Anthropic, Gemini, or a generic OpenAI-compatible endpoint turns an optimization
+into a request-breaking 400. Universal accounting is centralized; wire-level
+optimization remains adapter-owned.
+
+---
+
+## DeepSeek provider (issue #20)
+
+Requested in [#20](https://github.com/codexmark/kram/issues/20): Kram only
+offered Anthropic, OpenAI, and Gemini, all of which cost more per token
+than DeepSeek for comparable quality on many workloads. Confirmed against
+DeepSeek's own API docs (api-docs.deepseek.com, fetched live rather than
+assumed from memory — the model lineup and endpoint shape are exactly the
+kind of detail that goes stale) before writing anything: DeepSeek's API
+is fully OpenAI-compatible, so this needed **zero new adapter code** —
+just a new `providercatalog.Providers`/`Accounts` entry pointing
+`internal/provider.OpenAICompatible` (the same adapter OpenAI, OpenRouter,
+and OpenCode Zen already use) at DeepSeek's endpoint.
+
+Two details confirmed against the docs specifically because getting them
+wrong would have silently broken things rather than failed loudly:
+
+- **`BaseURL` has no `/v1` suffix.** DeepSeek's documented endpoint is
+  `https://api.deepseek.com/chat/completions`, not `.../v1/chat/completions`
+  — unlike OpenAI's and OpenRouter's catalog entries, which do carry
+  `/v1`. `OpenAICompatible.ChatCompletion` builds the request URL as
+  `p.baseURL+"/chat/completions"` with no path normalization, so an
+  incorrect assumption here (e.g. copying the `/v1` convention from the
+  other entries "for consistency") would have sent every DeepSeek request
+  to a 404 instead of a working endpoint. Live-verified: a real
+  `kram-gateway` instance routing to a plain `http.Server` that serves
+  only `/chat/completions` (returning 404 on any other path, including
+  `/v1/chat/completions`) completed a real request successfully — proof
+  the adapter hits the exact path DeepSeek expects, not just that the
+  code compiles.
+- **Reasoning/"thinking mode" streams via a `reasoning_content` delta
+  field**, confirmed directly from DeepSeek's docs. This was already
+  handled — `internal/provider/openai_compat.go` has captured
+  `reasoning_content` (alongside OpenRouter's differently-named
+  `reasoning`) since an earlier fix for DeepSeek-R1-compatible local
+  servers, specifically to avoid the "provider looks dead while it's
+  actually reasoning" `router.BoundedPeek` misclassification this project
+  has hit more than once (see the local-reasoning-server entry above).
+  `TestOpenAICompatCapturesReasoningContentField` already covers this at
+  the unit level; the same live gateway check above additionally proved
+  it end to end — a `reasoning_content` chunk sent ahead of real content
+  did not leak into the final answer and did not break the response.
+
+`SupportsImages` is deliberately left `false`: DeepSeek's only
+vision-capable model (`deepseek-v4-flash-vision-exp`) is marked
+experimental in their own docs, so `DefaultModel` pins the stable
+`deepseek-v4-flash` instead and image support isn't claimed until a
+non-experimental vision model ships. `SupportsTools: true` — DeepSeek's
+current models all accept function calling. No `SupportsOAuth` — paste-a-key
+only, like OpenAI and Gemini, since DeepSeek has no browser-login flow to
+wire into `internal/oauthflow`.
+
+`TestDeepSeekProviderMatchesOfficialDocs` (`internal/providercatalog/
+catalog_test.go`) pins `Kind`, `BaseURL`, `EnvVar`, and `SupportsTools`
+as a regression test, not just a code comment — the concrete failure mode
+it guards against is exactly the "helpfully" append `/v1` mistake above,
+which would otherwise pass every existing generic catalog invariant test
+(`TestEveryProviderHasARequiredEnvVar`, etc.) while being completely
+broken in practice.

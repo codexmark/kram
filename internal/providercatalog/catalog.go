@@ -68,6 +68,24 @@ var Providers = []Provider{
 	// timeline the models list doesn't warn about; the "latest" aliases
 	// exist specifically so a pinned reference doesn't rot the same way.
 	{ID: "gemini", Label: "Google AI Studio (Gemini)", Kind: "gemini", EnvVar: "GEMINI_API_KEY", DefaultModel: "gemini-flash-latest", SupportsImages: true, SupportsTools: true, SignupURL: "https://aistudio.google.com/apikey"},
+	// DeepSeek is OpenAI-compatible (confirmed against its own API docs,
+	// api-docs.deepseek.com — no dedicated adapter needed, same as
+	// OpenAI/OpenRouter/OpenCode Zen below). BaseURL deliberately has no
+	// "/v1" suffix: DeepSeek's documented endpoint is
+	// https://api.deepseek.com/chat/completions, not .../v1/chat/completions
+	// — confirmed live against their docs, not guessed from the OpenAI
+	// convention other entries here happen to follow. DeepSeek's
+	// reasoning/"thinking mode" models stream chain-of-thought via a
+	// "reasoning_content" delta field — internal/provider/openai_compat.go
+	// already captures that field name (added earlier for DeepSeek-R1-
+	// compatible local servers), so no provider-side change was needed to
+	// support it correctly instead of it being misread as a stalled
+	// attempt. Not marked SupportsImages: deepseek-v4-flash-vision-exp is
+	// the only vision-capable model in the lineup and is explicitly
+	// experimental — the catalog pins the non-experimental flash model as
+	// DefaultModel instead, so this stays false until a stable vision
+	// model ships. See issue #20.
+	{ID: "deepseek", Label: "DeepSeek", Kind: "openai-compat", BaseURL: "https://api.deepseek.com", EnvVar: "DEEPSEEK_API_KEY", DefaultModel: "deepseek-v4-flash", SupportsTools: true, SignupURL: "https://platform.deepseek.com/api_keys"},
 	{ID: "openrouter-gptoss", Label: "OpenRouter (free: gpt-oss-20b)", Kind: "openai-compat", BaseURL: openRouterBaseURL, EnvVar: "OPENROUTER_API_KEY", DefaultModel: "openai/gpt-oss-20b:free", SupportsTools: true, FreeTier: true, SignupURL: "https://openrouter.ai/keys", SupportsOAuth: true},
 	{ID: "openrouter-gemma", Label: "OpenRouter (free: gemma-4-31b)", Kind: "openai-compat", BaseURL: openRouterBaseURL, EnvVar: "OPENROUTER_API_KEY", DefaultModel: "google/gemma-4-31b-it:free", SupportsTools: true, FreeTier: true, SignupURL: "https://openrouter.ai/keys", SupportsOAuth: true},
 	{ID: "openrouter-nemotron", Label: "OpenRouter (free: nemotron-3-super)", Kind: "openai-compat", BaseURL: openRouterBaseURL, EnvVar: "OPENROUTER_API_KEY", DefaultModel: "nvidia/nemotron-3-super-120b-a12b:free", SupportsTools: true, FreeTier: true, SignupURL: "https://openrouter.ai/keys", SupportsOAuth: true},
@@ -114,6 +132,7 @@ var Accounts = []Account{
 	{ID: "openai", Label: "OpenAI", EnvVar: "OPENAI_API_KEY", SignupURL: "https://platform.openai.com/api-keys"},
 	{ID: "openai-chatgpt", Label: "OpenAI (via login ChatGPT — beta)", EnvVar: "OPENAI_CHATGPT_ACCESS_TOKEN", SignupURL: "https://chatgpt.com", SupportsOAuth: true, OAuthOnly: true},
 	{ID: "gemini", Label: "Google AI Studio (Gemini)", EnvVar: "GEMINI_API_KEY", SignupURL: "https://aistudio.google.com/apikey"},
+	{ID: "deepseek", Label: "DeepSeek", EnvVar: "DEEPSEEK_API_KEY", SignupURL: "https://platform.deepseek.com/api_keys"},
 	{ID: "openrouter", Label: "OpenRouter", EnvVar: "OPENROUTER_API_KEY", SignupURL: "https://openrouter.ai/keys", SupportsOAuth: true},
 	{ID: "opencode-zen", Label: "OpenCode Zen", EnvVar: "OPENCODE_ZEN_API_KEY", SignupURL: "https://opencode.ai/auth"},
 }
