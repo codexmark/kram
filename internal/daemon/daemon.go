@@ -82,7 +82,10 @@ func Run(ctx context.Context, cfg Config, logger *slog.Logger) error {
 	defer mcpManager.Close()
 	toolRegistry.RegisterMCP(mcpManager)
 
-	agentSvc := agent.New(st, gw, toolRegistry, agent.Config{Model: cfg.Model, MaxTurns: cfg.MaxTurns, Workspace: absWorkspace})
+	agentSvc, err := agent.New(st, gw, toolRegistry, agent.Config{Model: cfg.Model, MaxTurns: cfg.MaxTurns, Workspace: absWorkspace})
+	if err != nil {
+		return fmt.Errorf("building agent service: %w", err)
+	}
 	// agentSvc implements tools.Delegator (RunTask) for the delegate_task
 	// tool — wired after construction since Registry can't import agent
 	// (agent already imports tools) without a cycle.

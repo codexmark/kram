@@ -36,7 +36,11 @@ func newTestService(t *testing.T, workspace string, gatewayURL string, cfg Confi
 	}
 	tr := tools.NewRegistry(workspace, st, nil)
 	gw := gatewayclient.New(gatewayURL)
-	return New(st, gw, tr, cfg)
+	svc, err := New(st, gw, tr, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return svc
 }
 
 func newTestSession(t *testing.T, s *Service, id string) {
