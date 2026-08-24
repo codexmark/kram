@@ -509,6 +509,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.messages = m.messages[:0]
 		for _, hm := range msg.messages {
+			// A "system"-role stored message is always internal
+			// prompt-compiler bookkeeping (a compaction summary, or the
+			// project-context/memory injection markers from issue #27) —
+			// never a real turn. Rendering it in the default: branch of
+			// refreshTranscript would show it formatted as if the
+			// assistant had said it, which it never did.
+			if hm.Role == "system" {
+				continue
+			}
 			m.messages = append(m.messages, chatMessage{Role: hm.Role, Content: hm.Content, Provider: hm.Provider})
 		}
 		m.refreshTranscript()

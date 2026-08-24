@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 
+	"github.com/codexmark/kram/internal/daemon/store"
 	"github.com/codexmark/kram/internal/daemon/tools"
 	"github.com/codexmark/kram/internal/openai"
 )
@@ -236,11 +237,71 @@ func compileBackgroundJobGuidance(reg *tools.Registry) PromptPart {
 	return part
 }
 
+// formatProjectContextContent wraps AGENTS.md/CLAUDE.md's raw text in the
+// framing header the model sees — factored out so runLoop's change-
+// detection gate (needsFreshInjection, below) compares against the exact
+// same bytes this function puts in the preamble part, rather than
+// re-deriving the wrap and risking the two drifting apart.
+func formatProjectContextContent(projectContext string) string {
+	return "Project context (from AGENTS.md/CLAUDE.md):\n\n" + projectContext
+}
+
+// projectContextMarkerName/memoryMarkerName tag a persisted store.Message
+// as a change-detection breadcrumb for compilePreamble's project-context/
+// memory parts — see needsFreshInjection's own doc comment for why this
+// exists and lastMarkerContent for how it's read back.
+const (
+	projectContextMarkerName = "kram:project_context"
+	memoryMarkerName         = "kram:memory"
+)
+
+// lastMarkerContent scans effective history for the most recent message
+// tagged name, mirroring compaction.EffectiveHistory's own "last one wins"
+// scan exactly (same package, same pattern, deliberately not reusing that
+// function itself since it scans for a different fixed marker). Because
+// effective is already the post-compaction-truncation slice
+// compaction.EffectiveHistory produces, a marker from before the last
+// compaction is naturally absent here without this function needing to
+// know anything about compaction itself — that's what makes reusing the
+// existing scan shape enough to solve the "was the last injection pruned
+// away" half of change detection for free.
+func lastMarkerContent(effective []store.Message, name string) (content string, found bool) {
+	for i := len(effective) - 1; i >= 0; i-- {
+		if effective[i].Role == "system" && effective[i].Name == name {
+			return effective[i].Content, true
+		}
+	}
+	return "", false
+}
+
+// needsFreshInjection is the actual token-savings mechanism issue #27
+// exists for: project-context and memory are expensive to resend as a
+// fresh preamble part on every eligible turn/iteration when the content
+// hasn't changed since the model already saw it, persisted verbatim in
+// this session's own history (see runLoop's AppendMessage calls tagged
+// projectContextMarkerName/memoryMarkerName). Returns true (inject) when
+// there's no still-effective prior injection, or its content differs from
+// freshContent — false (skip; the model already has it from history)
+// when an exact match is still within the effective window. See
+// lastMarkerContent's doc comment for how compaction pruning the prior
+// injection away is handled without any compaction-specific code here.
+func needsFreshInjection(effective []store.Message, markerName, freshContent string) bool {
+	last, found := lastMarkerContent(effective, markerName)
+	return !found || last != freshContent
+}
+
 // compilePreamble reproduces what runLoop's preamble block built inline
 // before this refactor existed — base identity, the tools overview
 // (generated — see compileToolsOverview), background-job guidance
 // (generated — see compileBackgroundJobGuidance), project context, and
-// memory, in that order, each only included if present.
+// memory, in that order, each only included if present. haveProjectContext/
+// haveMemory are the caller's fully-resolved decision of whether to
+// include a fresh part this call — runLoop passes false there (distinct
+// from "there's no project context/memory at all") when needsFreshInjection
+// says an identical copy is already persisted in this session's effective
+// history, so this function itself stays a pure "given these already-
+// decided inputs, these parts" contract with no change-detection logic of
+// its own.
 // systemPromptOverride is Config.SystemPromptOverride, threaded through
 // as its own parameter rather than read off a Service field so this
 // function's pure "given these inputs, these parts" contract holds —
@@ -268,7 +329,7 @@ func compilePreamble(workspace, projectContext string, haveProjectContext bool, 
 	if haveProjectContext {
 		parts = append(parts, PromptPart{
 			ID: "project-context", Placement: PlacementPreamble, Refresh: RefreshIteration, Source: "AGENTS.md",
-			Content: "Project context (from AGENTS.md/CLAUDE.md):\n\n" + projectContext,
+			Content: formatProjectContextContent(projectContext),
 		})
 	}
 	if haveMemory {
