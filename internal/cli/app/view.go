@@ -75,6 +75,9 @@ func (m *Model) refreshTranscript() {
 				for _, n := range msg.Notices {
 					b.WriteString("\n" + styleHint.Render("· "+n))
 				}
+				if row := renderFilesTouched(touchedFiles(msg.ToolActivity)); row != "" {
+					b.WriteString("\n" + row)
+				}
 			}
 		}
 	}

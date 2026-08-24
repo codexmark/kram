@@ -3596,3 +3596,45 @@ through `lipgloss`) is now imported directly for `termenv.Profile`'s
 named constants, so `go mod tidy` promoted it — along with a few other
 already-indirect packages the tidy pass re-resolved as directly used —
 out of the `// indirect` block. No new dependency was added.
+
+---
+
+## Per-turn "files touched" summary row
+
+A finished turn showed each tool call inline (`↳ edit_file(...) ✓`) but
+nothing summarized, at a glance, which files actually changed once the
+transcript scrolled past that turn — the same problem Claude Code's own
+diff-stat-style summary line solves, and one of the concrete gaps this
+session's on-screen-presentation research flagged against Kram's current
+transcript.
+
+`internal/cli/app/filestouched.go` (new): `touchedFiles` walks a turn's
+`[]daemonclient.ToolActivity` and extracts the real path(s) each
+*mutation* tool call touched, by parsing the tool's own raw JSON `Args`
+— not guessing from free text. `edit_file`/`write_file`/`delete_file`
+all declare `{"path": "..."}`; `move_file` declares
+`{"old_path", "new_path"}` and contributes both, since a rename affects
+two locations, not one. Read-only tools (`read_file`, `grep`, `glob`,
+`list_dir`, ...) are excluded on purpose — this row is about what
+changed, not what was merely inspected, so it stays a meaningful signal
+rather than degrading into "everything the turn looked at." Malformed
+args fail the `json.Unmarshal` silently and contribute nothing, rather
+than panicking a rendering path over a tool call that (for whatever
+reason) didn't parse — this is a display nicety, not a load-bearing
+correctness check.
+
+Paths are deduplicated, preserving first-touched order (a file edited
+twice in one turn should only get one chip). `renderFilesTouched` caps
+the row at `filesTouchedShownLimit = 6` chips, folding the rest into a
+trailing `+N mais` — matching the same reasoning `filesTouchedShownLimit`'s
+own doc comment gives: a turn with a dozen edits shouldn't grow this row
+into its own scroll-worthy block. Empty input renders nothing, so a
+read-only turn's transcript doesn't grow an empty label.
+
+Wired into `view.go`'s `refreshTranscript`, in the same `if !msg.streaming`
+block that already renders the turn's durable notices once streaming is
+done — appearing after them, as the last line of a completed turn. It
+deliberately does not render while `msg.streaming` is true: the set of
+touched files for a still-running turn is incomplete, and a row that
+grows chip-by-chip mid-turn would read as flicker rather than a settled
+summary.
