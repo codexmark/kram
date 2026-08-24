@@ -252,9 +252,17 @@ type RankedProviderInfo struct {
 // (internal/provider), and re-fragmenting it for a stream Kram itself is
 // usually the only consumer of would just be extra work with no benefit.
 type ChatCompletionChunkDelta struct {
-	Role          string         `json:"role,omitempty"`
-	Content       string         `json:"content,omitempty"`
-	ToolCalls     []ToolCall     `json:"tool_calls,omitempty"`
+	Role      string     `json:"role,omitempty"`
+	Content   string     `json:"content,omitempty"`
+	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
+	// Reasoning is a fragment of a reasoning-capable model's chain-of-
+	// thought, mirroring provider.StreamEvent.Reasoning's own contract:
+	// best-effort, optional, and never the model's actual answer — a
+	// chunk carries either Content or Reasoning, never a mix, so a
+	// consumer can't accidentally concatenate the two into one answer
+	// string. Most providers in Kram's fallback chain never set this;
+	// omitted entirely rather than sent empty.
+	Reasoning     string         `json:"reasoning,omitempty"`
 	ProviderItems []ProviderItem `json:"provider_items,omitempty"`
 }
 

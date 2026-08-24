@@ -191,6 +191,8 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 		switch evt.Kind {
 		case agent.EventDelta:
 			writeEvent(map[string]any{"type": "delta", "content": evt.Content})
+		case agent.EventReasoning:
+			writeEvent(map[string]any{"type": "reasoning", "content": evt.Reasoning})
 		case agent.EventToolStart:
 			writeEvent(map[string]any{"type": "tool_start", "name": evt.ToolName, "args": evt.ToolArgs})
 		case agent.EventToolResult:

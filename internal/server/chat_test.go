@@ -235,6 +235,86 @@ func TestStreamingToolCallsCompletionStillSucceeds(t *testing.T) {
 	}
 }
 
+// allChunks parses every SSE chunk in body, in order — unlike
+// terminalChunk, which only returns the one carrying FinishReason.
+func allChunks(t *testing.T, body string) []openai.ChatCompletionChunk {
+	t.Helper()
+	var out []openai.ChatCompletionChunk
+	for _, line := range strings.Split(body, "\n") {
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		data := strings.TrimPrefix(line, "data: ")
+		if data == "[DONE]" {
+			continue
+		}
+		var chunk openai.ChatCompletionChunk
+		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
+			t.Fatalf("parsing SSE chunk %q: %v", data, err)
+		}
+		out = append(out, chunk)
+	}
+	return out
+}
+
+// TestStreamingRelaysReasoningFragmentsAsDeltaChunks confirms
+// provider.StreamEvent.Reasoning — previously consumed only by
+// router.BoundedPeek as a liveness signal and then discarded — now
+// reaches the client as its own SSE chunk, on
+// ChatCompletionChunkDelta.Reasoning, never mixed into Content.
+func TestStreamingRelaysReasoningFragmentsAsDeltaChunks(t *testing.T) {
+	s, _ := newStreamTestServer(t, []provider.StreamEvent{
+		{Reasoning: "considering the options"},
+		{Delta: "hello"},
+		{Delta: " world", Done: true},
+	})
+
+	rec := postStreamingChat(t, s)
+	chunks := allChunks(t, rec.Body.String())
+
+	foundReasoning := false
+	for _, c := range chunks {
+		if len(c.Choices) == 0 {
+			continue
+		}
+		delta := c.Choices[0].Delta
+		if delta.Reasoning == "considering the options" {
+			foundReasoning = true
+			if delta.Content != "" {
+				t.Errorf("reasoning chunk also carried Content = %q, want empty (never mixed)", delta.Content)
+			}
+		}
+	}
+	if !foundReasoning {
+		t.Fatalf("no chunk carried the reasoning fragment, got chunks: %+v", chunks)
+	}
+
+	chunk := terminalChunk(t, rec.Body.String())
+	if got := *chunk.Choices[0].FinishReason; got != "stop" {
+		t.Fatalf("finish_reason = %q, want stop (reasoning must not prevent a normal completion)", got)
+	}
+}
+
+// TestStreamingNonReasoningProviderUnaffected confirms a script that
+// never emits Reasoning produces no Reasoning-carrying chunks at all —
+// the additive field must not change behavior for the common case.
+func TestStreamingNonReasoningProviderUnaffected(t *testing.T) {
+	s, _ := newStreamTestServer(t, []provider.StreamEvent{
+		{Delta: "hello"},
+		{Delta: " world", Done: true},
+	})
+
+	rec := postStreamingChat(t, s)
+	for _, c := range allChunks(t, rec.Body.String()) {
+		if len(c.Choices) == 0 {
+			continue
+		}
+		if c.Choices[0].Delta.Reasoning != "" {
+			t.Fatalf("unexpected reasoning content in a script that never emitted any: %+v", c)
+		}
+	}
+}
+
 func containsStr(list []string, want string) bool {
 	for _, s := range list {
 		if s == want {

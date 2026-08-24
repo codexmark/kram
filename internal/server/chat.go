@@ -357,6 +357,20 @@ func (s *Server) streamResponse(w http.ResponseWriter, comboID string, routeCtx 
 		})
 	}
 
+	// writeReasoning mirrors writeDelta for provider.StreamEvent.Reasoning
+	// fragments — a distinct function, not an overload of writeDelta, so a
+	// call site can't accidentally pass reasoning text into the Content
+	// field (or vice versa) the way a shared "which field is this for"
+	// boolean parameter would invite.
+	writeReasoning := func(reasoning string) {
+		write(openai.ChatCompletionChunk{
+			ID: id, Object: "chat.completion.chunk", Created: created, Model: model,
+			Choices: []openai.ChatCompletionChunkChoice{{
+				Index: 0, Delta: openai.ChatCompletionChunkDelta{Reasoning: reasoning},
+			}},
+		})
+	}
+
 	// finalize is the single place this attempt's terminal state becomes
 	// truthful and final — the router only ever hears about success here,
 	// once it's real, so the client's trail and the router's own Sticky/
@@ -402,6 +416,8 @@ func (s *Server) streamResponse(w http.ResponseWriter, comboID string, routeCtx 
 		}
 		if evt.Delta != "" {
 			writeDelta(evt.Delta, "")
+		} else if evt.Reasoning != "" {
+			writeReasoning(evt.Reasoning)
 		}
 		if evt.Done {
 			sawTerminal = true

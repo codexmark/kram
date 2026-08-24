@@ -63,6 +63,38 @@ func TestChatCompletionStreamAssemblesTextDeltas(t *testing.T) {
 	}
 }
 
+// TestChatCompletionStreamRelaysReasoningFragments confirms a
+// gateway-emitted reasoning delta (ChatCompletionChunkDelta.Reasoning)
+// reaches StreamDelta.Reasoning, kept separate from Content — never
+// concatenated into the assembled answer text the way Content deltas are.
+func TestChatCompletionStreamRelaysReasoningFragments(t *testing.T) {
+	srv := sseServer(t, []string{
+		`{"choices":[{"index":0,"delta":{"reasoning":"thinking it through"},"finish_reason":null}]}`,
+		`{"choices":[{"index":0,"delta":{"content":"answer"},"finish_reason":null}]}`,
+		`{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"provider":"p1"}`,
+	})
+	defer srv.Close()
+
+	c := New(srv.URL)
+	deltas, err := c.ChatCompletionStream(context.Background(), "default", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := collectDeltas(t, deltas)
+
+	var reasoning, content string
+	for _, d := range got {
+		reasoning += d.Reasoning
+		content += d.Content
+	}
+	if reasoning != "thinking it through" {
+		t.Errorf("assembled reasoning = %q, want %q", reasoning, "thinking it through")
+	}
+	if content != "answer" {
+		t.Errorf("assembled content = %q, want %q (reasoning must not leak into it)", content, "answer")
+	}
+}
+
 func TestChatCompletionStreamCarriesToolCallsOnFinish(t *testing.T) {
 	srv := sseServer(t, []string{
 		`{"choices":[{"index":0,"delta":{"tool_calls":[{"id":"call_1","type":"function","function":{"name":"bash","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}`,

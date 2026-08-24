@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -57,6 +58,90 @@ func newTestServerWithRegistry(t *testing.T, script []openai.ChatCompletionRespo
 	sessSvc := session.New(st)
 
 	return New(sessSvc, agentSvc, nil), tr
+}
+
+// newStreamingTestServer wires a real Server against a real temp-file
+// store, backed by a fake gateway that speaks real SSE (unlike
+// newTestServer's plain-JSON fake, it honors req.Stream) — the setup
+// TestHandleSendMessageRelaysReasoningEventOverSSE needs, since
+// PreferStreaming only ever produces per-fragment events (reasoning
+// included) on the streaming gateway path (see streamCall).
+func newStreamingTestServer(t *testing.T, sseBody string) *Server {
+	t.Helper()
+	workspace := t.TempDir()
+	st, err := store.Open(filepath.Join(workspace, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := tools.NewRegistry(workspace, st, nil)
+
+	gwSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, sseBody)
+	}))
+	t.Cleanup(gwSrv.Close)
+
+	gw := gatewayclient.New(gwSrv.URL)
+	agentSvc, err := agent.New(st, gw, tr, agent.Config{Workspace: workspace, MaxTurns: 10, PreferStreaming: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessSvc := session.New(st)
+	return New(sessSvc, agentSvc, nil)
+}
+
+// TestHandleSendMessageRelaysReasoningEventOverSSE confirms
+// agent.EventReasoning — emitted by streamCall when Config.PreferStreaming
+// is set — reaches the daemon's own SSE stream as {"type":"reasoning",
+// "content":...}, the last hop before internal/cli/daemonclient.
+func TestHandleSendMessageRelaysReasoningEventOverSSE(t *testing.T) {
+	sseBody := "data: {\"choices\":[{\"index\":0,\"delta\":{\"reasoning\":\"weighing it up\"},\"finish_reason\":null}]}\n\n" +
+		"data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"final answer\"},\"finish_reason\":null}]}\n\n" +
+		"data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n" +
+		"data: [DONE]\n\n"
+	srv := newStreamingTestServer(t, sseBody)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	createResp, _ := http.Post(ts.URL+"/sessions", "application/json", strings.NewReader(`{"title":"x"}`))
+	var created struct {
+		ID string `json:"id"`
+	}
+	json.NewDecoder(createResp.Body).Decode(&created)
+	createResp.Body.Close()
+
+	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/sessions/"+created.ID+"/messages", bytes.NewReader([]byte(`{"content":"oi"}`)))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	scanner := bufio.NewScanner(resp.Body)
+	var sawReasoning bool
+	for scanner.Scan() {
+		line := scanner.Text()
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		data := strings.TrimPrefix(line, "data: ")
+		if data == "[DONE]" {
+			break
+		}
+		var evt map[string]any
+		if json.Unmarshal([]byte(data), &evt) != nil {
+			continue
+		}
+		if evt["type"] == "reasoning" {
+			sawReasoning = true
+			if evt["content"] != "weighing it up" {
+				t.Errorf("reasoning event content = %v, want %q", evt["content"], "weighing it up")
+			}
+		}
+	}
+	if !sawReasoning {
+		t.Fatal("no \"reasoning\" SSE event reached the daemon's own stream")
+	}
 }
 
 func TestHandleHealthReturnsOK(t *testing.T) {

@@ -204,6 +204,14 @@ type Model struct {
 	heartbeats    int
 	segment       int
 	segments      int
+	// reasoningPreview is the freshest chain-of-thought fragment a
+	// reasoning-capable model streamed (see agent.EventReasoning) — shown
+	// only in the live activity indicator, never in the transcript, and
+	// only for as long as the model hasn't started producing real answer
+	// content yet (see handleStreamEvent's "delta" case, which clears
+	// it). Empty for the vast majority of providers, which never stream
+	// reasoning at all.
+	reasoningPreview string
 
 	width, height int
 	ready         bool
@@ -1128,6 +1136,7 @@ func (m Model) submit() (tea.Model, tea.Cmd) {
 	m.lastEventAt = time.Now()
 	m.workState = workPreparing
 	m.activeTool = ""
+	m.reasoningPreview = ""
 	m.heartbeats = 0
 	m.segment = 1
 	m.segments = 0
@@ -1174,13 +1183,22 @@ func (m Model) handleStreamEvent(msg streamEventMsg) (tea.Model, tea.Cmd) {
 	switch msg.event.Type {
 	case "delta":
 		m.workState = workWriting
+		m.reasoningPreview = "" // real answer content started; the indicator reverts to status-only
 		if lm := last(); lm != nil {
 			lm.Content += msg.event.Content
 		}
 		m.refreshTranscript()
 
+	case "reasoning":
+		// Still workModelActive: reasoning is not an answer and never
+		// touches lm.Content — see EventReasoning's own doc comment. Only
+		// the freshest fragment is kept, not an accumulating blob;
+		// thinkingLine truncates it further for display.
+		m.reasoningPreview = msg.event.Content
+
 	case "tool_start":
 		m.workState = workToolActive
+		m.reasoningPreview = ""
 		m.activeTool = msg.event.Name
 		m.toolStartedAt = time.Now()
 		if lm := last(); lm != nil {

@@ -17,7 +17,11 @@ import (
 // picture the non-streaming Result carries: which provider served it, the
 // fallback trail, usage, and any tool calls the model is requesting.
 type StreamDelta struct {
-	Content       string
+	Content string
+	// Reasoning mirrors openai.ChatCompletionChunkDelta.Reasoning — a
+	// best-effort chain-of-thought fragment, never set alongside Content
+	// on the same delta. Most providers never send it.
+	Reasoning     string
 	Done          bool
 	ToolCalls     []openai.ToolCall
 	ProviderItems []openai.ProviderItem
@@ -103,6 +107,12 @@ func (c *Client) ChatCompletionStream(ctx context.Context, model string, message
 			if choice.Delta.Content != "" {
 				select {
 				case out <- StreamDelta{Content: choice.Delta.Content}:
+				case <-ctx.Done():
+					return
+				}
+			} else if choice.Delta.Reasoning != "" {
+				select {
+				case out <- StreamDelta{Reasoning: choice.Delta.Reasoning}:
 				case <-ctx.Done():
 					return
 				}

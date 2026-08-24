@@ -9,6 +9,16 @@ const (
 	// turns produce no deltas (the model isn't "saying" anything, it's
 	// deciding what to call).
 	EventDelta EventKind = "delta"
+	// EventReasoning is a fragment of a reasoning-capable model's chain-
+	// of-thought, mirroring gatewayclient.StreamDelta.Reasoning — kept as
+	// a distinct kind from EventDelta, never folded into Content, so a
+	// caller can't accidentally treat it as (or concatenate it into) the
+	// model's actual answer. Best-effort: most providers in Kram's
+	// fallback chain never send it, and only streamCall (reached when
+	// Config.PreferStreaming opts a session in) can observe it at all —
+	// bufferedCall's single non-streaming gateway call has no
+	// per-fragment signal of any kind to relay.
+	EventReasoning EventKind = "reasoning"
 	// EventToolStart fires right before a tool call executes.
 	EventToolStart EventKind = "tool_start"
 	// EventToolResult fires right after, success or failure either way.
@@ -71,6 +81,7 @@ const (
 type Event struct {
 	Kind       EventKind
 	Content    string   // EventDelta
+	Reasoning  string   // EventReasoning
 	ToolName   string   // EventToolStart, EventToolResult
 	ToolArgs   string   // EventToolStart
 	ToolResult string   // EventToolResult
