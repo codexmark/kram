@@ -82,7 +82,22 @@ func Run(ctx context.Context, cfg Config, logger *slog.Logger) error {
 	defer mcpManager.Close()
 	toolRegistry.RegisterMCP(mcpManager)
 
-	agentSvc, err := agent.New(st, gw, toolRegistry, agent.Config{Model: cfg.Model, MaxTurns: cfg.MaxTurns, Workspace: absWorkspace})
+	agentSvc, err := agent.New(st, gw, toolRegistry, agent.Config{
+		Model: cfg.Model, MaxTurns: cfg.MaxTurns, Workspace: absWorkspace,
+		// The real daemon defaults to the streaming gateway path so the
+		// live activity indicator's reasoning excerpt (see EventReasoning)
+		// actually has something to show for reasoning-capable models —
+		// PreferStreaming's own doc comment stays the honest, narrower
+		// "opt-in escape hatch" description of what the field itself does;
+		// this is the one place that makes the opposite choice for the
+		// real, deployed daemon. Accepted tradeoff: streaming commits to
+		// the first candidate router.BoundedPeek sees a meaningful signal
+		// from, so a candidate that fails mid-stream fails the whole turn
+		// with it — no further gateway-side fallback once headers are
+		// sent, unlike the buffered path's try-every-candidate-first
+		// behavior.
+		PreferStreaming: true,
+	})
 	if err != nil {
 		return fmt.Errorf("building agent service: %w", err)
 	}

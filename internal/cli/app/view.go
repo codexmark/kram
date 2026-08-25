@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/codexmark/kram/internal/cli/daemonclient"
 )
@@ -340,7 +341,64 @@ func (m Model) renderToolActivity(act daemonclient.ToolActivity) string {
 	} else {
 		label = styleMeta.Render(label)
 	}
-	return styleHint.Render("  ↳ ") + label + " " + mark
+	line := styleHint.Render("  ↳ ") + label + " " + mark
+	if preview := renderToolResultPreview(act); preview != "" {
+		line += "\n" + preview
+	}
+	return line
+}
+
+// toolResultPreviewMaxLines/Width bound the inline preview to a handful
+// of short lines — the same "a glimpse, not the whole blob" discipline
+// renderNotice/boundedReasoningPreview already apply elsewhere in this
+// file — not the full raw output, which can already be arbitrarily large
+// (see processpanel.go's own processLocalLogMax cap on that separate,
+// dedicated observer).
+const (
+	toolResultPreviewMaxLines = 4
+	toolResultPreviewMaxWidth = 100
+)
+
+// renderToolResultPreview shows a bounded excerpt of what a finished
+// tool call actually printed — right under its name(args) ✓/✗ line,
+// styled the same dim hint color as everything else in this file that's
+// supporting detail rather than the model's own words. Only for a
+// completed, non-background call: act.Running has no result yet to show
+// (Kram's tool execution doesn't stream partial output mid-call — a
+// real gap, not a design choice, see DECISIONS.md), and a run_background
+// process already has its own dedicated live observer (Ctrl+B,
+// processpanel.go) that's a strictly better place to watch its output
+// than a static excerpt frozen at start time would be.
+func renderToolResultPreview(act daemonclient.ToolActivity) string {
+	if act.Running || act.ProcessID != "" || strings.TrimSpace(act.Result) == "" {
+		return ""
+	}
+	clean := strings.ReplaceAll(ansi.Strip(act.Result), "\r\n", "\n")
+	clean = strings.TrimRight(clean, "\n")
+	lines := strings.Split(clean, "\n")
+	shown := lines
+	overflow := 0
+	if len(shown) > toolResultPreviewMaxLines {
+		shown = shown[:toolResultPreviewMaxLines]
+		overflow = len(lines) - toolResultPreviewMaxLines
+	}
+	var b strings.Builder
+	for i, line := range shown {
+		runes := []rune(strings.TrimRight(line, " \t"))
+		if len(runes) > toolResultPreviewMaxWidth {
+			line = string(runes[:toolResultPreviewMaxWidth]) + "…"
+		} else {
+			line = string(runes)
+		}
+		if i > 0 {
+			b.WriteString("\n")
+		}
+		b.WriteString(styleHint.Render("      " + line))
+	}
+	if overflow > 0 {
+		b.WriteString("\n" + styleHint.Render(fmt.Sprintf("      … +%d linhas", overflow)))
+	}
+	return b.String()
 }
 
 // noticeWarnPhrases are the substrings of the daemon's known EventNotice
