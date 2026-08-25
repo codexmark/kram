@@ -253,6 +253,16 @@ func providerKindForEnvVar(envVar string) (kind, baseURL string, ok bool) {
 // the real response lands, the footer settles on real telemetry instead.
 type animTickMsg time.Time
 
+// animTickInterval is animFrame's real-time update rate — the frame
+// counter driving every shimmer/gradient animation in this package
+// (shimmerText, renderThinkingK, renderActivityRail, the route bar's own
+// pulse dot). Bumped from the original 120ms for smoother-looking motion
+// (more samples of the same real-time sweep, not a faster one) — see
+// shimmer.go's shimmerPhasePerFrame/activeStepFrames, which derive their
+// own per-frame constants from this so consumers don't need to be
+// re-tuned by hand whenever this changes.
+const animTickInterval = 50 * time.Millisecond
+
 func animTickCmd() tea.Cmd {
-	return tea.Tick(120*time.Millisecond, func(t time.Time) tea.Msg { return animTickMsg(t) })
+	return tea.Tick(animTickInterval, func(t time.Time) tea.Msg { return animTickMsg(t) })
 }

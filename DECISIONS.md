@@ -4242,3 +4242,85 @@ execution side of every tool, not a CLI-only rendering change. Told to
 the user directly rather than half-implementing something that looks
 live but isn't: what shipped here is the achievable half of "like Codex"
 with current data, not the whole thing.
+
+---
+
+## Two real bugs a user caught live: clipped transcript lines, choppy indicator
+
+A user ran the actual built binary and pasted screenshots. Two concrete,
+verifiable problems came out of that — the kind of bug that's easy to
+miss reading code in isolation and obvious the moment someone's real
+terminal shows it.
+
+**Clipped, not wrapped, transcript lines.** Opening the Ctrl+B process
+observer narrows the chat viewport (`chatViewportWidth`,
+`processpanel.go`) so the tiled process pane has room. Three pieces of
+transcript content were never width-aware against that narrower value:
+
+- A still-streaming message's plain-text content (`refreshTranscript`'s
+  `case msg.streaming:`) had **no width constraint at all** — unlike the
+  finished-message path, which glamour already wraps at `m.mdRenderer`'s
+  configured width. bubbles' own `viewport.Model` doesn't wrap an
+  overflowing line on its own; it clips it, silently dropping whatever
+  didn't fit. The screenshot showed exactly this: "...exatamente p" with
+  the rest of the sentence gone.
+- `renderToolActivity`'s args truncation was a **fixed 60-rune cap** —
+  fine on a wide terminal, still wider than a tiled 40-column chat
+  column.
+- The tool-result preview from the previous entry used a **fixed
+  100-rune cap** — same problem, freshly introduced by that same change.
+
+Fixed by making all three derive their limit from the actual current
+`m.viewport.Width` instead of a bare constant: `styleBody.Width(w)` now
+wraps streaming content properly (lipgloss's own word-wrap, the same
+mechanism `renderProcessPane`'s tiled pane already relies on for its
+bordered layout, so this isn't a new technique — just applied somewhere
+it was missing); `toolActivityArgsLimit`/the preview's width computation
+both cap at `min(originalTunedMax, max(floor, viewportWidth-overhead))`
+— narrowing correctly when tiled, never exceeding the original tuned
+maximum on a wide terminal so neither line tries to fill unnecessary
+horizontal space. `truncateToWidth` is the one shared rune-bounded
+"…"-suffixed helper both call sites now use, replacing two near-
+duplicate truncation loops.
+
+`TestStreamingContentWrapsToNarrowViewport` is the regression test that
+actually matters here — it doesn't just check line width (bubbles'
+`View()` clips to width regardless of whether the underlying content was
+pre-wrapped, so a width-only assertion would pass even with the bug
+still present), it counts occurrences of a repeated marker word in the
+rendered output and asserts none were lost, which is the actual
+observable symptom a user hit. `TestRenderToolResultPreviewTruncatesWide
+LineToViewportWidth` and `TestRenderToolActivityArgsTruncatesToNarrowVi
+ewport` cover the other two spots the same way, forcing a narrow
+`m.viewport.Width` directly rather than going through the full tile-mode
+layout machinery.
+
+**Choppy "kram" indicator, "quero... como uma onda."** The letter-
+cycling wordmark (see the entry above on replacing the Braille K) ran at
+the original 120ms tick rate inherited from before that change — with a
+4-letter word and the `frame/2` active-index cadence, that's a visible
+jump roughly once per second per letter, reported directly as feeling
+"travada" (stuck/janky), not the intended continuous wave motion.
+
+`animTickInterval` (`commands.go`) dropped from 120ms to 50ms — more
+frequent frames, sampling the same underlying animation more densely
+rather than literally speeding it up. The distinction matters: naively
+lowering the tick interval alone, with every consumer's per-frame
+constant left as a hardcoded number tuned against the old 120ms
+baseline, would have silently sped up *every* shimmer/pulse animation in
+the app by the same ~2.4x factor (shimmerText's general use, the route
+bar's own pulse dot, the activity rail) — a correctness bug of exactly
+the same shape as `PreferStreaming`'s "one hop changes, downstream
+assumptions don't automatically follow" pattern seen elsewhere this
+session. Instead, `shimmer.go` gained two tick-rate-derived package vars:
+`shimmerPhasePerFrame` (rescales the old `*0.35` phase-per-frame constant
+against `animTickInterval`, preserving the original ~2.9 rad/s real-time
+sweep speed at whatever tick rate is configured) and `activeStepFrames`
+(rescales the old hardcoded `frame/2` active-index divisor the same way,
+preserving the original ~240ms dwell time per active node/letter).
+`shimmerText`, `renderThinkingK`, `renderActivityRail`, and routebar.go's
+pulse dot all switched from their old hardcoded `0.35`/`frame/2` to these
+shared, derived values — one source of truth for "how fast does
+animation actually move," decoupled from "how often is it sampled,"
+instead of four independently-tuned magic numbers that would drift out
+of sync the next time either changes.
