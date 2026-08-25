@@ -10,8 +10,10 @@ package providerping
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 )
@@ -86,6 +88,58 @@ func Ping(ctx context.Context, kind, baseURL, apiKey string) Result {
 	default:
 		return Result{Status: StatusOK, Latency: elapsed}
 	}
+}
+
+// ListModels queries baseURL's OpenAI-compatible "/models" endpoint and
+// returns the model IDs it advertises, sorted — the exact same request
+// Ping's "openai-compat" branch already makes for a connectivity check,
+// just reading the body instead of discarding it. Lets a caller (the
+// CLI's custom-provider form) offer a real, currently-available model to
+// pick from instead of asking the user to type one by hand and find out
+// later, at the first real turn, whether they got it right. apiKey may
+// be empty for a no-auth local/LAN server, matching buildPingRequest's
+// own "openai-compat" convention.
+func ListModels(ctx context.Context, baseURL, apiKey string) ([]string, error) {
+	ctx, cancel := context.WithTimeout(ctx, pingTimeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/models", nil)
+	if err != nil {
+		return nil, fmt.Errorf("requisição inválida: %w", err)
+	}
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("sem resposta: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		return nil, fmt.Errorf("chave inválida")
+	}
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+
+	var body struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		return nil, fmt.Errorf("resposta inesperada: %w", err)
+	}
+
+	ids := make([]string, 0, len(body.Data))
+	for _, m := range body.Data {
+		if m.ID != "" {
+			ids = append(ids, m.ID)
+		}
+	}
+	sort.Strings(ids)
+	return ids, nil
 }
 
 // buildPingRequest mirrors each kind's real auth convention from

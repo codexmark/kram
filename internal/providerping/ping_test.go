@@ -2,8 +2,10 @@ package providerping
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -152,5 +154,78 @@ func TestPingRespectsContextCancellation(t *testing.T) {
 	res := Ping(ctx, "openai-compat", srv.URL, "x")
 	if res.Status != StatusDown {
 		t.Errorf("Status = %v, want StatusDown when the context is canceled before a response arrives", res.Status)
+	}
+}
+
+func TestListModelsReturnsSortedIDs(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/models" {
+			t.Errorf("expected GET /models, got %s", r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer sk-test" {
+			t.Errorf("Authorization = %q, want Bearer sk-test", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"data":[{"id":"qwen3.5-9b"},{"id":"prism-ml/bonsai-27b"},{"id":""}]}`)
+	}))
+	defer srv.Close()
+
+	got, err := ListModels(context.Background(), srv.URL, "sk-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"prism-ml/bonsai-27b", "qwen3.5-9b"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("ListModels = %v, want %v (sorted, empty ID dropped)", got, want)
+	}
+}
+
+func TestListModelsNoAuthHeaderWhenKeyEmpty(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "" {
+			t.Errorf("Authorization = %q, want no header for a no-auth local server", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"data":[{"id":"llama-3"}]}`)
+	}))
+	defer srv.Close()
+
+	got, err := ListModels(context.Background(), srv.URL, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0] != "llama-3" {
+		t.Errorf("ListModels = %v, want [llama-3]", got)
+	}
+}
+
+func TestListModelsUnauthorized(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+
+	_, err := ListModels(context.Background(), srv.URL, "bad-key")
+	if err == nil {
+		t.Fatal("expected an error for a 401 response")
+	}
+}
+
+func TestListModelsMalformedBody(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "not json")
+	}))
+	defer srv.Close()
+
+	_, err := ListModels(context.Background(), srv.URL, "")
+	if err == nil {
+		t.Fatal("expected an error for a malformed response body")
+	}
+}
+
+func TestListModelsUnreachable(t *testing.T) {
+	_, err := ListModels(context.Background(), "http://127.0.0.1:1", "")
+	if err == nil {
+		t.Fatal("expected an error for an unreachable server")
 	}
 }

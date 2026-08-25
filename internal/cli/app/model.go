@@ -276,6 +276,15 @@ type Model struct {
 	accountsAddingCustom bool
 	customFormInputs     []textinput.Model
 	customFormCursor     int
+	// customFormFetchingModels/customFormModelOptions/customFormModelCursor/
+	// customFormPickingModel drive the "buscar modelos" (ctrl+l on the
+	// modelo field) sub-flow: a real GET {base_url}/models fetch
+	// (fetchCustomModelsCmd) that lets the user pick a currently-available
+	// model instead of typing one by hand — see handleCustomProviderFormKey.
+	customFormFetchingModels bool
+	customFormModelOptions   []string
+	customFormModelCursor    int
+	customFormPickingModel   bool
 
 	// tools/skills toggle screen state.
 	toolSettings *toolsettings.Store
@@ -619,6 +628,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.accountsPinging = false
 		m.accountsPings = msg.results
 		m.wizardProviderOverrideVisible = m.wizardMode && m.wizardHasProvider() && !m.wizardHasOperationalProvider()
+		return m, nil
+
+	case customModelListMsg:
+		m.customFormFetchingModels = false
+		if msg.err != nil {
+			m.accountsStatus = "erro ao buscar modelos: " + msg.err.Error()
+			return m, nil
+		}
+		if len(msg.models) == 0 {
+			m.accountsStatus = "nenhum modelo encontrado nesse servidor."
+			return m, nil
+		}
+		m.customFormModelOptions = msg.models
+		m.customFormModelCursor = 0
+		m.customFormPickingModel = true
+		m.accountsStatus = ""
 		return m, nil
 
 	case oauthURLMsg:

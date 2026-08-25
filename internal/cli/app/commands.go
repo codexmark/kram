@@ -232,6 +232,27 @@ func pingAccountsCmd(credStore *credentials.Store, customProviders []customprovi
 	}
 }
 
+// customModelListMsg carries the result of one fetchCustomModelsCmd call
+// — either a real, sorted list of model IDs the server currently
+// advertises, or an error the form falls back to manual typing on.
+type customModelListMsg struct {
+	models []string
+	err    error
+}
+
+// fetchCustomModelsCmd queries baseURL's "/models" endpoint (via
+// providerping.ListModels — the same CLI-talks-directly-to-the-third-
+// party-server carve-out pingAccountsCmd above already uses) so the
+// custom-provider form can offer a real, currently-available model to
+// pick from instead of asking the user to type one by hand. apiKey may
+// be empty for a no-auth local/LAN server.
+func fetchCustomModelsCmd(baseURL, apiKey string) tea.Cmd {
+	return func() tea.Msg {
+		models, err := providerping.ListModels(context.Background(), baseURL, apiKey)
+		return customModelListMsg{models: models, err: err}
+	}
+}
+
 // providerKindForEnvVar finds the adapter kind/base URL to use for
 // pinging an account — providercatalog.Accounts is the deduplicated
 // one-row-per-credential view, but pinging needs the same Kind/BaseURL

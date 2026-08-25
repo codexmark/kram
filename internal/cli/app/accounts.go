@@ -275,11 +275,61 @@ func (m Model) renderAccounts() string {
 // cursor order.
 var customFormLabels = []string{"nome", "url", "api key (opcional)", "modelo", "aceita tool calling? (s/n)"}
 
+// customFormModelListMaxRows bounds how many fetched model options render
+// at once — a LAN router can advertise hundreds (real example seen this
+// session: a self-hosted aggregator with 200+ entries) — windowed around
+// the cursor the same way processpanel.go's visibleProcessIndices already
+// windows a potentially-long process list, rather than dumping every row.
+const customFormModelListMaxRows = 10
+
+// visibleModelIndices mirrors visibleProcessIndices' own windowing exactly
+// (see processpanel.go), generalized to any cursor/count pair rather than
+// reading them off Model — the fetched-models list is the second place
+// this shape is needed.
+func visibleModelIndices(cursor, count int) []int {
+	if count == 0 {
+		return nil
+	}
+	visible := minInt(customFormModelListMaxRows, count)
+	start := cursor - visible/2
+	if start < 0 {
+		start = 0
+	}
+	if start+visible > count {
+		start = count - visible
+	}
+	indices := make([]int, visible)
+	for i := range indices {
+		indices[i] = start + i
+	}
+	return indices
+}
+
 // renderCustomProviderForm draws the "+ add custom" form — a plain
 // multi-field prompt in the same spirit as the single-field key-paste
-// editor above it, just with more than one input.
+// editor above it, just with more than one input. While
+// customFormPickingModel is true, the fetched-models list (see
+// fetchCustomModelsCmd) replaces the field list entirely rather than
+// overlaying it — the picker's own up/down/enter/esc own the keyboard at
+// that point (see handleCustomProviderFormKey), so showing both at once
+// would suggest more is interactive than actually is.
 func (m Model) renderCustomProviderForm() string {
 	var b strings.Builder
+	if m.customFormPickingModel {
+		b.WriteString(styleMeta.Render(fmt.Sprintf("modelos encontrados (%d):", len(m.customFormModelOptions))) + "\n\n")
+		indices := visibleModelIndices(m.customFormModelCursor, len(m.customFormModelOptions))
+		for _, i := range indices {
+			model := m.customFormModelOptions[i]
+			if i == m.customFormModelCursor {
+				b.WriteString(styleYouTag.Render("▸ ") + styleBody.Render(model) + "\n")
+			} else {
+				b.WriteString("  " + styleHint.Render(model) + "\n")
+			}
+		}
+		b.WriteString("\n" + styleHint.Render("↑↓ escolher · enter usar · esc cancelar (volta a digitar manualmente)"))
+		return b.String()
+	}
+
 	b.WriteString(styleMeta.Render("novo provedor customizado:") + "\n\n")
 	for i, label := range customFormLabels {
 		marker := "  "
@@ -288,10 +338,17 @@ func (m Model) renderCustomProviderForm() string {
 		}
 		b.WriteString(fmt.Sprintf("%s%-20s %s\n", marker, label, m.customFormInputs[i].View()))
 	}
+	if m.customFormFetchingModels {
+		b.WriteString("\n" + styleHint.Render("buscando modelos…"))
+	}
 	if m.accountsStatus != "" {
 		b.WriteString("\n" + styleHint.Render(m.accountsStatus))
 	}
-	b.WriteString("\n\n" + styleHint.Render("tab avança · shift+tab volta · enter salva · esc cancela"))
+	hint := "tab avança · shift+tab volta · enter salva · esc cancela"
+	if m.customFormCursor == 3 {
+		hint = "ctrl+l buscar modelos · " + hint
+	}
+	b.WriteString("\n\n" + styleHint.Render(hint))
 	return b.String()
 }
 
@@ -603,13 +660,57 @@ func parseSupportsToolsInput(s string) bool {
 // move focus, esc cancels, enter validates and submits regardless of
 // which field currently has focus (the same "enter always finishes"
 // convention every other single-field prompt in this screen already
-// uses), anything else is forwarded to the focused input.
+// uses), anything else is forwarded to the focused input. While
+// customFormPickingModel is true, keys instead drive the fetched-models
+// picker (see fetchCustomModelsCmd) rather than the form itself.
 func (m Model) handleCustomProviderFormKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.customFormPickingModel {
+		switch msg.String() {
+		case "esc":
+			m.customFormPickingModel = false
+			return m, nil
+		case "up":
+			if m.customFormModelCursor > 0 {
+				m.customFormModelCursor--
+			}
+			return m, nil
+		case "down":
+			if m.customFormModelCursor < len(m.customFormModelOptions)-1 {
+				m.customFormModelCursor++
+			}
+			return m, nil
+		case "enter":
+			if m.customFormModelCursor < len(m.customFormModelOptions) {
+				m.customFormInputs[3].SetValue(m.customFormModelOptions[m.customFormModelCursor])
+			}
+			m.customFormPickingModel = false
+			return m, nil
+		}
+		return m, nil
+	}
+
 	switch msg.String() {
 	case "esc":
 		m.accountsAddingCustom = false
 		m.accountsStatus = ""
 		return m, nil
+	case "ctrl+l":
+		// Only meaningful on the "modelo" field (index 3) — matches the
+		// hint renderCustomProviderForm shows only there, rather than
+		// silently doing nothing on every other key press from an
+		// unrelated field.
+		if m.customFormCursor != 3 {
+			return m, nil
+		}
+		url := strings.TrimSpace(m.customFormInputs[1].Value())
+		if url == "" {
+			m.accountsStatus = "informe a url antes de buscar modelos."
+			return m, nil
+		}
+		key := strings.TrimSpace(m.customFormInputs[2].Value())
+		m.customFormFetchingModels = true
+		m.accountsStatus = ""
+		return m, fetchCustomModelsCmd(url, key)
 	case "tab":
 		m.customFormInputs[m.customFormCursor].Blur()
 		m.customFormCursor = (m.customFormCursor + 1) % len(m.customFormInputs)
