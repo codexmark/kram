@@ -39,6 +39,7 @@ func runMain(ctx context.Context, args []string, output io.Writer) error {
 	model := fs.String("model", "default", "gateway combo/model used for new messages")
 	workspace := fs.String("workspace", ".", "project root the agent's tools (read/write/grep/bash) operate within")
 	maxTurns := fs.Int("max-turns", 50, "model calls per automatic continuation segment (4 segments maximum)")
+	stream := fs.Bool("stream", true, "prefer the streaming gateway path (see daemon.Config.PreferStreaming's doc comment for the tradeoff); disable for a slow local model whose server sends nothing during prompt prefill, which can trip the streaming peek's idle timeout")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
@@ -46,12 +47,13 @@ func runMain(ctx context.Context, args []string, output io.Writer) error {
 		return err
 	}
 	logger := slog.New(slog.NewTextHandler(output, nil))
-	return daemonRun(ctx, daemonConfig(*host, *port, *dbPath, *gatewayURL, *model, *workspace, *maxTurns), logger)
+	return daemonRun(ctx, daemonConfig(*host, *port, *dbPath, *gatewayURL, *model, *workspace, *maxTurns, *stream), logger)
 }
 
-func daemonConfig(host string, port int, dbPath, gatewayURL, model, workspace string, maxTurns int) daemon.Config {
+func daemonConfig(host string, port int, dbPath, gatewayURL, model, workspace string, maxTurns int, stream bool) daemon.Config {
 	return daemon.Config{
 		Host: host, Port: port, DBPath: dbPath, GatewayURL: gatewayURL,
 		Model: model, Workspace: workspace, MaxTurns: maxTurns,
+		PreferStreaming: stream,
 	}
 }

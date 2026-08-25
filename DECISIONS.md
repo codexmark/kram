@@ -4414,3 +4414,62 @@ constructed a bare `Model{width: N}` without ever syncing
 via `syncViewportSize`, but a raw struct literal in a test doesn't) —
 updated each one to set both, matching the real invariant rather than
 loosening the fix to satisfy an unrealistic test setup.
+
+---
+
+## Exposing PreferStreaming: the default-on choice broke a real deployment
+
+The streaming-by-default change (a few entries up) traded some
+resilience for the live indicator's reasoning excerpt actually working —
+documented as a deliberate, accepted tradeoff at the time. A user hit
+the failure mode in practice within the same session: every turn failed
+outright with `"no meaningful content within the peek window"` against a
+single locally-hosted reasoning model (LM Studio, 27B).
+
+Traced to `router.BoundedPeek`'s `streamPeekIdleTimeout` (5s, unchanged —
+see below for why): reasoning fragments reset that idle timer just like
+real content does, so a model that's *slowly streaming* reasoning is
+fine no matter how long it takes in total (that's the whole reason the
+5-second window is an *idle* timeout, not an overall ceiling — see its
+own doc comment, which already names a similar incident with a 120B
+OpenRouter reasoning model). What actually happened here is different in
+kind: the model's inference server sends **nothing at all** — not
+content, not a reasoning fragment, not even a keepalive — during prompt
+*prefill*, before generation of any kind has started. Kram's system
+prompt (nine base sections, the generated tools overview, etc.) is
+large; prefilling it on a local/LAN GPU for a 27B model routinely takes
+longer than 5 seconds of complete silence, and with only one provider
+configured (no fallback candidate), that one rejection fails the whole
+turn.
+
+**Deliberately did not touch `streamPeekIdleTimeout`** to fix this.
+Loosening a carefully-tuned, already-incident-informed failover timer
+globally, based on one local-model deployment's prefill characteristics,
+would trade away *every* deployment's fast dead-provider detection to
+fix a problem that's actually specific to this one setup. The right fix
+is scoped to where the actual variance lives — does streaming work well
+for *this* deployment — not a global timer retune.
+
+`daemon.Config` gains `PreferStreaming bool` (this struct's own zero
+value: false/buffered, matching `agent.Config`'s own field) — `Run`'s
+`agent.Config{...}` construction now reads `cfg.PreferStreaming` instead
+of the hardcoded `true` from before. Both entrypoints gain a `-stream`
+flag (`cmd/kram`, `cmd/daemon`), defaulting `true` so the improvement
+still applies out of the box everywhere it already worked — `-stream=false`
+is the real, durable escape hatch this exact failure mode needed, not a
+one-off local patch. This is precisely the deferred scope item the
+original PreferStreaming DECISIONS entry already named: "exposing
+PreferStreaming as an actual CLI/config toggle — a real, separate piece
+of work this issue's plumbing now sits ready for" — now genuinely
+motivated by a real deployment hitting the gap, not speculative.
+
+`TestRunThreadsPreferStreamingToGateway` (`internal/daemon/daemon_test.go`,
+replacing the old streaming-defaults-true-only test now that the choice
+is caller-controlled) is table-driven over both directions, asserting
+the real gateway request's `Stream` field matches `Config.PreferStreaming`
+exactly. `TestRunMainStreamFlagDisablesPreferStreaming`
+(`cmd/daemon/main_test.go`) and `TestRunThreadsStreamOptionIntoDaemonConfig`
+(`cmd/kram/main_test.go`) pin the same contract one layer up, at each
+binary's own flag-parsing boundary — the regression tests for the
+concrete failure mode itself: `-stream=false` must actually reach
+`daemon.Config.PreferStreaming`, not just parse without error.

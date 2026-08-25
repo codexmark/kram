@@ -33,6 +33,19 @@ type Config struct {
 	Model      string // gateway combo used for new messages
 	Workspace  string // project root the agent's tools operate within
 	MaxTurns   int    // model calls per automatic continuation segment
+	// PreferStreaming threads through to agent.Config.PreferStreaming —
+	// see that field's own doc comment for the real tradeoff it accepts.
+	// This struct's own zero value (false) is buffered, matching
+	// agent.Config's own field; cmd/kram's -stream flag defaults to true
+	// at that call site so the live indicator's reasoning excerpt works
+	// out of the box, but can be turned off per deployment. The concrete
+	// reason an opt-out turned out to be necessary, not just
+	// theoretical: a large local model whose inference server sends
+	// nothing at all (not even a reasoning fragment) during prompt
+	// prefill trips router.BoundedPeek's fixed idle timeout well before
+	// the first token streams, failing every turn outright — buffered
+	// mode has no such window and works fine for the exact same setup.
+	PreferStreaming bool
 }
 
 // Run opens the store, builds the agent loop, and serves the daemon's
@@ -84,19 +97,10 @@ func Run(ctx context.Context, cfg Config, logger *slog.Logger) error {
 
 	agentSvc, err := agent.New(st, gw, toolRegistry, agent.Config{
 		Model: cfg.Model, MaxTurns: cfg.MaxTurns, Workspace: absWorkspace,
-		// The real daemon defaults to the streaming gateway path so the
-		// live activity indicator's reasoning excerpt (see EventReasoning)
-		// actually has something to show for reasoning-capable models —
-		// PreferStreaming's own doc comment stays the honest, narrower
-		// "opt-in escape hatch" description of what the field itself does;
-		// this is the one place that makes the opposite choice for the
-		// real, deployed daemon. Accepted tradeoff: streaming commits to
-		// the first candidate router.BoundedPeek sees a meaningful signal
-		// from, so a candidate that fails mid-stream fails the whole turn
-		// with it — no further gateway-side fallback once headers are
-		// sent, unlike the buffered path's try-every-candidate-first
-		// behavior.
-		PreferStreaming: true,
+		// See this file's own Config.PreferStreaming doc comment for why
+		// this is caller-controlled rather than hardcoded, and
+		// agent.Config.PreferStreaming's for the tradeoff it accepts.
+		PreferStreaming: cfg.PreferStreaming,
 	})
 	if err != nil {
 		return fmt.Errorf("building agent service: %w", err)

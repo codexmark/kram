@@ -264,12 +264,20 @@ func TestRunMainParsesFlagsVersionAndWorkspaceExplicit(t *testing.T) {
 	if !errors.Is(err, wantErr) || !got.workspaceExplicit || got.workspace != "/w" || got.maxTurns != 7 || got.gatewayPort != 8 || got.daemonPort != 9 || !got.setup {
 		t.Fatalf("runMain opts=%+v err=%v", got, err)
 	}
+	if !got.stream {
+		t.Fatalf("runMain opts.stream = false, want the -stream flag's default of true when not passed: %+v", got)
+	}
 
 	runKram = func(opts runOptions) error { got = opts; return nil }
 	if err := runMain(nil, &stdout, &stderr); err != nil || got.workspaceExplicit {
 		t.Fatalf("default args opts=%+v err=%v", got, err)
 	}
 	stdout.Reset()
+
+	runKram = func(opts runOptions) error { got = opts; return nil }
+	if err := runMain([]string{"-stream=false"}, &stdout, &stderr); err != nil || got.stream {
+		t.Fatalf("runMain -stream=false opts=%+v err=%v", got, err)
+	}
 	if err := runMain([]string{"-version"}, &stdout, &stderr); err != nil || !strings.Contains(stdout.String(), version) {
 		t.Fatalf("version output=%q err=%v", stdout.String(), err)
 	}
@@ -343,6 +351,43 @@ func TestMainExitDoesNotLogHelpAsAnError(t *testing.T) {
 	}
 	if got := stderr.String(); !strings.Contains(got, "kram: flag provided but not defined") {
 		t.Fatalf("invalid flag did not get an error log: %q", got)
+	}
+}
+
+// TestRunThreadsStreamOptionIntoDaemonConfig confirms run() actually
+// passes runOptions.stream through to daemon.Config.PreferStreaming —
+// the regression test for the concrete bug that motivated exposing this
+// flag at all: a deployment stuck with a slow local model whose server
+// sends nothing during prompt prefill needs -stream=false to genuinely
+// reach the daemon, not just parse without error.
+func TestRunThreadsStreamOptionIntoDaemonConfig(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	workspace := t.TempDir()
+	path := filepath.Join(t.TempDir(), "gateway.yaml")
+	if err := config.Save(minimalConfig(), path); err != nil {
+		t.Fatal(err)
+	}
+	originalGateway, originalDaemon := kramGatewayRun, kramDaemonRun
+	t.Cleanup(func() { kramGatewayRun, kramDaemonRun = originalGateway, originalDaemon })
+
+	var got daemon.Config
+	kramGatewayRun = func(ctx context.Context, _ *config.Config, _ *slog.Logger, _ *credentials.Store) error {
+		<-ctx.Done()
+		return nil
+	}
+	kramDaemonRun = func(_ context.Context, cfg daemon.Config, _ *slog.Logger) error {
+		got = cfg
+		return errors.New("stop here")
+	}
+
+	_ = run(runOptions{workspace: workspace, gatewayConfigPath: path, gatewayPort: 23101, daemonPort: 23102, stream: false})
+	if got.PreferStreaming {
+		t.Fatalf("run(stream: false) produced daemon.Config.PreferStreaming = true: %+v", got)
+	}
+
+	_ = run(runOptions{workspace: workspace, gatewayConfigPath: path, gatewayPort: 23103, daemonPort: 23104, stream: true})
+	if !got.PreferStreaming {
+		t.Fatalf("run(stream: true) produced daemon.Config.PreferStreaming = false: %+v", got)
 	}
 }
 

@@ -86,6 +86,7 @@ func runMain(args []string, stdout, stderr io.Writer) error {
 	daemonPort := fs.Int("daemon-port", 0, "daemon port (0 = pick a free port)")
 	showVersion := fs.Bool("version", false, "print the version and exit")
 	setup := fs.Bool("setup", false, "re-run the first-run setup wizard even if it already completed")
+	stream := fs.Bool("stream", true, "prefer the streaming gateway path (see daemon.Config.PreferStreaming's doc comment for the tradeoff); disable for a slow local model whose server sends nothing during prompt prefill, which can trip the streaming peek's idle timeout and fail every turn")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
@@ -105,7 +106,7 @@ func runMain(args []string, stdout, stderr io.Writer) error {
 	return runKram(runOptions{
 		workspace: *workspace, workspaceExplicit: workspaceExplicit, gatewayConfigPath: *gatewayConfigPath, combo: *combo,
 		sessionID: *sessionID, title: *title, maxTurns: *maxTurns,
-		gatewayPort: *gatewayPort, daemonPort: *daemonPort, strategy: *strategy, setup: *setup,
+		gatewayPort: *gatewayPort, daemonPort: *daemonPort, strategy: *strategy, setup: *setup, stream: *stream,
 	})
 }
 
@@ -121,6 +122,7 @@ type runOptions struct {
 	daemonPort        int
 	strategy          string
 	setup             bool
+	stream            bool
 }
 
 func run(opts runOptions) error {
@@ -268,6 +270,7 @@ func run(opts runOptions) error {
 		DBPath:     filepath.Join(stateDir, "kram-daemon.db"),
 		GatewayURL: fmt.Sprintf("http://127.0.0.1:%d", gwCfg.Port),
 		Model:      opts.combo, Workspace: absWorkspace, MaxTurns: opts.maxTurns,
+		PreferStreaming: opts.stream,
 	}
 	daemonRun := kramDaemonRun
 	go func() { errCh <- daemonRun(ctx, daemonCfg, logger) }()
