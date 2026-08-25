@@ -48,7 +48,7 @@ func Build(cfg config.ProviderConfig, resolve func(context.Context) (string, err
 		if cfg.BaseURL == "" {
 			return nil, fmt.Errorf("provider %q: base_url is required for kind openai-compat", cfg.ID)
 		}
-		return NewOpenAICompatible(cfg.ID, cfg.BaseURL, apiKey, cfg.Model, caps), nil
+		return NewOpenAICompatible(cfg.ID, cfg.BaseURL, apiKey, cfg.Model, cfg.Temperature, caps), nil
 	default:
 		return nil, fmt.Errorf("provider %q: unknown kind %q", cfg.ID, cfg.Kind)
 	}
