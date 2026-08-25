@@ -4473,3 +4473,54 @@ exactly. `TestRunMainStreamFlagDisablesPreferStreaming`
 binary's own flag-parsing boundary — the regression tests for the
 concrete failure mode itself: `-stream=false` must actually reach
 `daemon.Config.PreferStreaming`, not just parse without error.
+
+---
+
+## Auto-detecting a custom provider's real models instead of typing one blind
+
+Finding `custom-lab-bonsai`'s exact model ID for the config work above
+required a manual `curl .../v1/models` outside Kram entirely — the
+"modelo" field of the custom-provider form (`renderCustomProviderForm`,
+`internal/cli/app/accounts.go`) only ever accepted free-typed text, no
+visibility into what a server actually serves. A typo or stale name
+would only surface later as an upstream 400/404 the first time a real
+turn ran, not at the point the mistake was actually made.
+
+`internal/providerping` — already the sanctioned "CLI talks directly to
+the third-party server for a quick check, no daemon round-trip" carve-out
+(see its own package doc: a `Ping` against the same `/models` endpoint
+nearly every OpenAI-compatible server exposes, used today purely as a
+connectivity/auth probe with the response body discarded) — gains
+`ListModels(ctx, baseURL, apiKey) ([]string, error)`: identical request
+shape to `Ping`'s `"openai-compat"` branch, but actually parses
+`data[].id` out of the body instead of throwing it away. Verified live
+against the real LM Studio server this session's earlier config work
+already found (`http://192.168.0.4:1234/v1`, `CUSTOM_LMSTUDIO_API_KEY`):
+returned `[google/gemma-4-e4b openai/gpt-oss-20b prism-ml/bonsai-27b
+qwen3-coder-30b-a3b-instruct qwen3.5-9b text-embedding-nomic-embed-
+text-v1.5]`, sorted, matching what a direct `curl` against the same
+endpoint returns.
+
+CLI side follows `pingAccountsCmd`'s own established async pattern
+exactly: `fetchCustomModelsCmd` (`commands.go`) returns a `tea.Cmd`
+producing `customModelListMsg`. Triggered by `ctrl+l` while focused on
+the "modelo" field specifically (`handleCustomProviderFormKey`,
+`accounts.go`) — not automatically on every tab-into, since an automatic
+fetch on focus would surprise someone who already knows the exact model
+name and just wants to type it, and would fire a real network request
+before the URL field is even necessarily finished being edited. Requires
+a non-empty URL first; a clear status message otherwise rather than a
+silent no-op.
+
+A successful fetch enters `customFormPickingModel` — the field-list
+render is replaced entirely (not overlaid) by a windowed, scrollable
+list (`visibleModelIndices`, mirroring `processpanel.go`'s
+`visibleProcessIndices` exactly — a real self-hosted router seen this
+session advertised 200+ models, so windowing around the cursor isn't
+optional polish). `enter` fills the "modelo" field with the selected ID
+and returns to normal form editing; `esc` cancels back to whatever was
+already typed there, untouched — manual entry was never actually removed
+as a path, just given a faster alternative. A failed or empty fetch
+(`customModelListMsg.err` set, or zero models) shows a status message
+and leaves the form in its normal typing state — the fallback path stays
+real, not just a comment claiming one exists.
