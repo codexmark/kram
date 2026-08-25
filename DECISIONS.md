@@ -4524,3 +4524,46 @@ as a path, just given a faster alternative. A failed or empty fetch
 (`customModelListMsg.err` set, or zero models) shows a status message
 and leaves the form in its normal typing state — the fallback path stays
 real, not just a comment claiming one exists.
+
+---
+
+## Per-provider temperature override
+
+Asked to make a specific local model ("afiado" — sharp/precise, the
+opposite of creative/random output) as deterministic as possible for
+coding work. Checked the actual code path before adding anything:
+`openai.ChatCompletionRequest.Temperature` exists on the wire type, but
+nothing anywhere in Kram ever populates it — every request already goes
+out with it unset, deferring entirely to whatever default the upstream
+server happens to apply. There was no way to pin it from Kram's own
+config at all, for any provider.
+
+`config.ProviderConfig` gains `Temperature *float64` — a pointer, so
+"never configured" (the overwhelming common case, and the only state
+every existing config file is in) is distinguishable from "explicitly
+pinned to `0.0`", a real, valid, maximally-deterministic value someone
+might genuinely want, not the same as leaving the field alone.
+`provider.OpenAICompatible` gains a `temperature *float64` field threaded
+through `NewOpenAICompatible`'s constructor, mirroring the exact shape
+its own `model string // optional: overrides req.Model when set` field
+already established — same override mechanics, same nil-means-
+passthrough contract, in `ChatCompletion` right next to where `Model` is
+already overridden a few lines up. `internal/provider/factory.go`'s
+`Build` (the one real construction site every adapter goes through)
+threads `cfg.Temperature` into the openai-compat case.
+
+**Deliberately scoped to `openai-compat` only**, not all four adapter
+kinds (anthropic, gemini, openai-responses, openai-compat) — the
+concrete need driving this is one local LM Studio server; extending the
+same pattern to the other three kinds is genuinely straightforward
+follow-up work (same `model`-override shape already exists on all four
+constructors) whenever a real need for it shows up on one of them, not
+something worth guessing at speculatively now.
+
+`TestOpenAICompatOverridesTemperatureWhenPinned`/
+`TestOpenAICompatLeavesTemperatureUnsetByDefault`
+(`internal/provider/openai_compat_test.go`) cover both directions at the
+adapter level; `TestBuildThreadsTemperatureForOpenAICompat`
+(`internal/provider/factory_test.go`) is the end-to-end proof through
+`Build` itself — the config field reaching a real outgoing request, not
+just parsing without error.

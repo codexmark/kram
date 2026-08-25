@@ -36,21 +36,23 @@ func parseRetryAfter(header string) time.Duration {
 // pinned model differ between them.
 type OpenAICompatible struct {
 	capabilities
-	id      string
-	baseURL string
-	apiKey  string
-	model   string // optional: overrides req.Model when set
-	client  *http.Client
+	id          string
+	baseURL     string
+	apiKey      string
+	model       string   // optional: overrides req.Model when set
+	temperature *float64 // optional: overrides req.Temperature when set — see config.ProviderConfig.Temperature
+	client      *http.Client
 }
 
 // NewOpenAICompatible constructs an adapter for an OpenAI-shaped backend.
-func NewOpenAICompatible(id, baseURL, apiKey, model string, caps capabilities) *OpenAICompatible {
+func NewOpenAICompatible(id, baseURL, apiKey, model string, temperature *float64, caps capabilities) *OpenAICompatible {
 	return &OpenAICompatible{
 		capabilities: caps,
 		id:           id,
 		baseURL:      baseURL,
 		apiKey:       apiKey,
 		model:        model,
+		temperature:  temperature,
 		client:       &http.Client{Timeout: 120 * time.Second},
 	}
 }
@@ -143,6 +145,9 @@ func (p *OpenAICompatible) ChatCompletion(ctx context.Context, req openai.ChatCo
 	}
 	body := req
 	body.Model = model
+	if p.temperature != nil {
+		body.Temperature = p.temperature
+	}
 	body.Stream = true
 	body.Messages = normalizeOpenAICompatMessages(sanitizeToolHistory(body.Messages))
 

@@ -2,9 +2,14 @@ package provider
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/codexmark/kram/internal/config"
+	"github.com/codexmark/kram/internal/openai"
 )
 
 func TestBuildStaticAuthByKind(t *testing.T) {
@@ -61,6 +66,40 @@ func TestBuildPropagatesCapabilities(t *testing.T) {
 	}
 	if !p.SupportsImages() || !p.SupportsTools() {
 		t.Errorf("SupportsImages()=%v SupportsTools()=%v, want both true", p.SupportsImages(), p.SupportsTools())
+	}
+}
+
+// TestBuildThreadsTemperatureForOpenAICompat confirms
+// config.ProviderConfig.Temperature actually reaches the built
+// provider's outgoing requests — Build is the one real construction
+// site (internal/gateway wires providers via it), so this is the
+// end-to-end proof the config field does something, not just that it
+// parses.
+func TestBuildThreadsTemperatureForOpenAICompat(t *testing.T) {
+	var received openai.ChatCompletionRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&received)
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer srv.Close()
+	t.Setenv("FACTORY_TEST_KEY", "sk-test")
+
+	pinned := 0.2
+	cfg := config.ProviderConfig{ID: "p", Kind: "openai-compat", BaseURL: srv.URL, APIKeyEnv: "FACTORY_TEST_KEY", Temperature: &pinned}
+	p, err := Build(cfg, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, err := p.ChatCompletion(context.Background(), openai.ChatCompletionRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range events {
+	}
+
+	if received.Temperature == nil || *received.Temperature != 0.2 {
+		t.Fatalf("request Temperature = %v, want a pointer to 0.2", received.Temperature)
 	}
 }
 

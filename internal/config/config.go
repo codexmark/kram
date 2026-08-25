@@ -49,6 +49,19 @@ type ProviderConfig struct {
 	// Model is the upstream model ID to request, if it should be pinned
 	// regardless of what the client asked for. Empty means passthrough.
 	Model string `yaml:"model,omitempty"`
+	// Temperature pins a fixed sampling temperature for this provider,
+	// overriding whatever the client's request carries (today, that's
+	// always nothing — openai.ChatCompletionRequest.Temperature exists on
+	// the wire type but nothing in Kram ever populates it, so every
+	// request defers entirely to the upstream server's own default
+	// unless this is set). A pointer so "never set" (the common case) is
+	// distinguishable from "explicitly pinned to 0.0" — a real,
+	// maximally-deterministic value someone might genuinely want, not
+	// the same as leaving it alone. Currently only honored by the
+	// openai-compat adapter (internal/provider/openai_compat.go) — see
+	// its own doc comment for why the other three kinds aren't wired up
+	// yet.
+	Temperature *float64 `yaml:"temperature,omitempty"`
 	// SupportsImages declares whether this provider's model accepts image
 	// input. Callers must check this (via /admin/status) before attaching
 	// images — the gateway never guesses.

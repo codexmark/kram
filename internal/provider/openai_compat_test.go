@@ -25,7 +25,7 @@ func TestOpenAICompatMergesSystemMessagesIntoOneLeadingMessage(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	p := NewOpenAICompatible("test", srv.URL, "", "", capabilities{})
+	p := NewOpenAICompatible("test", srv.URL, "", "", nil, capabilities{})
 	events, err := p.ChatCompletion(context.Background(), openai.ChatCompletionRequest{Messages: []openai.ChatMessage{
 		{Role: "system", Content: "base"},
 		{Role: "system", Content: "tools"},
@@ -51,13 +51,64 @@ func TestOpenAICompatMergesSystemMessagesIntoOneLeadingMessage(t *testing.T) {
 	}
 }
 
+// TestOpenAICompatOverridesTemperatureWhenPinned confirms Temperature
+// gets forwarded to the upstream request exactly like Model already is —
+// same override pattern, same "nil/unset means leave the client's value
+// alone" contract.
+func TestOpenAICompatOverridesTemperatureWhenPinned(t *testing.T) {
+	var received openai.ChatCompletionRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&received)
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer srv.Close()
+
+	pinned := 0.2
+	p := NewOpenAICompatible("test", srv.URL, "", "", &pinned, capabilities{})
+	events, err := p.ChatCompletion(context.Background(), openai.ChatCompletionRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = collectEvents(t, events)
+
+	if received.Temperature == nil || *received.Temperature != 0.2 {
+		t.Fatalf("request Temperature = %v, want a pointer to 0.2", received.Temperature)
+	}
+}
+
+// TestOpenAICompatLeavesTemperatureUnsetByDefault confirms the common
+// case (no pinned temperature configured) doesn't invent one — the
+// upstream server's own default still applies, matching the behavior
+// before this field existed.
+func TestOpenAICompatLeavesTemperatureUnsetByDefault(t *testing.T) {
+	var received openai.ChatCompletionRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&received)
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer srv.Close()
+
+	p := NewOpenAICompatible("test", srv.URL, "", "", nil, capabilities{})
+	events, err := p.ChatCompletion(context.Background(), openai.ChatCompletionRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = collectEvents(t, events)
+
+	if received.Temperature != nil {
+		t.Fatalf("request Temperature = %v, want nil (no override configured)", *received.Temperature)
+	}
+}
+
 func TestOpenAICompatSurfacesSSEErrorEnvelope(t *testing.T) {
 	srv := sseServer(t, []string{
 		`{"error":{"message":"System message must be at the beginning"}}`,
 	})
 	defer srv.Close()
 
-	p := NewOpenAICompatible("lmstudio", srv.URL, "", "", capabilities{})
+	p := NewOpenAICompatible("lmstudio", srv.URL, "", "", nil, capabilities{})
 	events, err := p.ChatCompletion(context.Background(), openai.ChatCompletionRequest{})
 	if err != nil {
 		t.Fatal(err)
@@ -104,7 +155,7 @@ func TestOpenAICompatCapturesOpenRouterReasoningField(t *testing.T) {
 	})
 	defer srv.Close()
 
-	p := NewOpenAICompatible("test", srv.URL, "", "", capabilities{})
+	p := NewOpenAICompatible("test", srv.URL, "", "", nil, capabilities{})
 	events, err := p.ChatCompletion(context.Background(), openai.ChatCompletionRequest{})
 	if err != nil {
 		t.Fatal(err)
@@ -129,7 +180,7 @@ func TestOpenAICompatCapturesReasoningContentField(t *testing.T) {
 	})
 	defer srv.Close()
 
-	p := NewOpenAICompatible("test", srv.URL, "", "", capabilities{})
+	p := NewOpenAICompatible("test", srv.URL, "", "", nil, capabilities{})
 	events, err := p.ChatCompletion(context.Background(), openai.ChatCompletionRequest{})
 	if err != nil {
 		t.Fatal(err)
@@ -154,7 +205,7 @@ func TestOpenAICompatEmitsToolCallProgress(t *testing.T) {
 	})
 	defer srv.Close()
 
-	p := NewOpenAICompatible("test", srv.URL, "", "", capabilities{})
+	p := NewOpenAICompatible("test", srv.URL, "", "", nil, capabilities{})
 	events, err := p.ChatCompletion(context.Background(), openai.ChatCompletionRequest{})
 	if err != nil {
 		t.Fatal(err)
@@ -182,7 +233,7 @@ func TestOpenAICompatParsesRetryAfterHeader(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	p := NewOpenAICompatible("test", srv.URL, "", "", capabilities{})
+	p := NewOpenAICompatible("test", srv.URL, "", "", nil, capabilities{})
 	_, err := p.ChatCompletion(context.Background(), openai.ChatCompletionRequest{})
 
 	var httpErr *HTTPError
@@ -203,7 +254,7 @@ func TestOpenAICompatMissingRetryAfterIsZero(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	p := NewOpenAICompatible("test", srv.URL, "", "", capabilities{})
+	p := NewOpenAICompatible("test", srv.URL, "", "", nil, capabilities{})
 	_, err := p.ChatCompletion(context.Background(), openai.ChatCompletionRequest{})
 
 	var httpErr *HTTPError
