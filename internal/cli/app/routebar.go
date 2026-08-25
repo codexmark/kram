@@ -88,14 +88,14 @@ func (m Model) renderRoutingActivity() string {
 		nodes = 5
 	}
 
-	active := positiveModulo(m.animFrame/2, nodes)
+	active := positiveModulo(m.animFrame/activeStepFrames, nodes)
 	parts := make([]string, nodes)
 	for i := range parts {
 		if i != active {
 			parts[i] = styleHint.Render("○")
 			continue
 		}
-		phase := float64(m.animFrame)*0.35 + float64(i)*math.Pi/2
+		phase := float64(m.animFrame)*shimmerPhasePerFrame + float64(i)*math.Pi/2
 		blend := (math.Sin(phase) + 1) / 2
 		color := shimmerFrom.BlendLuv(shimmerTo, blend)
 		parts[i] = lipgloss.NewStyle().Foreground(lipgloss.Color(color.Hex())).Bold(true).Render("◉")

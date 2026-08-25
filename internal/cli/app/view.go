@@ -67,8 +67,16 @@ func (m *Model) refreshTranscript() {
 				// parsed against an incomplete string (an unclosed code
 				// fence, a stray "**") would flicker through broken
 				// formatting every frame — the full render happens once,
-				// below, when the message is complete.
-				b.WriteString(styleKramTag.Render("kram") + "  " + styleBody.Render(msg.Content) + "\n" + m.thinkingLine())
+				// below, when the message is complete. Explicitly
+				// word-wrapped to the viewport's actual current width
+				// (narrower once the Ctrl+B process pane tiles it) —
+				// unlike renderMarkdown's glamour output, plain
+				// styleBody.Render never wrapped on its own, so a long
+				// streaming line used to just get clipped by bubbles'
+				// own viewport instead of wrapping.
+				kramTag := styleKramTag.Render("kram") + "  "
+				wrapWidth := maxInt(1, m.viewport.Width-lipgloss.Width(kramTag))
+				b.WriteString(kramTag + styleBody.Width(wrapWidth).Render(msg.Content) + "\n" + m.thinkingLine())
 			case msg.Content != "":
 				b.WriteString(styleKramTag.Render("kram") + "  " + renderMarkdown(m.mdRenderer, msg.Content))
 			}
@@ -174,7 +182,7 @@ func (m Model) activityLabel() string {
 
 func (m Model) renderActivityRail(stalled bool) string {
 	const nodes = 7
-	active := positiveModulo(m.animFrame/2, nodes)
+	active := positiveModulo(m.animFrame/activeStepFrames, nodes)
 	var b strings.Builder
 	for i := 0; i < nodes; i++ {
 		glyph := "━"
@@ -322,12 +330,13 @@ func (m Model) contextIcon() string {
 
 // renderToolActivity draws one line per tool call the agent loop made,
 // between the user's message and the final answer — real activity, not a
-// generic "thinking" placeholder.
+// generic "thinking" placeholder. Args truncation is bounded by the
+// *actual current* viewport width (see toolActivityArgsLimit), not a
+// bare fixed constant — a fixed cap wide enough for a full-width terminal
+// still overflows and gets clipped (not wrapped) by bubbles' own
+// viewport once the Ctrl+B process pane narrows the chat column, the
+// concrete bug a user hit in practice.
 func (m Model) renderToolActivity(act daemonclient.ToolActivity) string {
-	args := act.Args
-	if len(args) > 60 {
-		args = args[:60] + "…"
-	}
 	mark := m.spin.View() // still running: real-time spinner, not a guessed outcome
 	if !act.Running {
 		mark = styleBadgeOK.Render("✓")
@@ -335,29 +344,66 @@ func (m Model) renderToolActivity(act daemonclient.ToolActivity) string {
 			mark = styleBadgeBad.Render("✗")
 		}
 	}
+	prefix := "  ↳ "
+	overhead := lipgloss.Width(prefix) + lipgloss.Width(act.Name) + len("()") + 1 + lipgloss.Width(mark)
+	if act.ProcessID != "" {
+		overhead += lipgloss.Width(act.ProcessID) + 1
+	}
+	args := truncateToWidth(act.Args, toolActivityArgsLimit(m.viewport.Width, overhead))
 	label := act.Name + "(" + args + ")"
 	if act.ProcessID != "" {
 		label = styleBadgeAccent.Render(act.ProcessID) + " " + styleMeta.Render(label)
 	} else {
 		label = styleMeta.Render(label)
 	}
-	line := styleHint.Render("  ↳ ") + label + " " + mark
-	if preview := renderToolResultPreview(act); preview != "" {
+	line := styleHint.Render(prefix) + label + " " + mark
+	if preview := m.renderToolResultPreview(act); preview != "" {
 		line += "\n" + preview
 	}
 	return line
 }
 
-// toolResultPreviewMaxLines/Width bound the inline preview to a handful
-// of short lines — the same "a glimpse, not the whole blob" discipline
+// toolActivityArgsLimit caps args at 60 runes on a wide-enough terminal
+// (today's original tuning), narrowing to whatever actually fits
+// alongside the rest of the line once viewportWidth is too small for
+// that — never wider than the viewport, never narrower than 10 runes
+// (a truncated-almost-to-nothing args string is still more informative
+// than none at all on a very narrow pane).
+func toolActivityArgsLimit(viewportWidth, overhead int) int {
+	return minInt(60, maxInt(10, viewportWidth-overhead))
+}
+
+// truncateToWidth is the shared rune-bounded "…"-suffixed truncation
+// renderToolActivity and renderToolResultPreview both need — width is a
+// rune count, an approximation of display columns that's exact for the
+// plain ASCII/Latin tool output and args this project's own tools
+// produce, matching the same approximation renderFilesTouched and
+// boundedReasoningPreview already make elsewhere in this package.
+func truncateToWidth(s string, width int) string {
+	runes := []rune(s)
+	if len(runes) <= width {
+		return s
+	}
+	if width < 1 {
+		return "…"
+	}
+	return string(runes[:width]) + "…"
+}
+
+// toolResultPreviewMaxLines bounds the inline preview to a handful of
+// short lines — the same "a glimpse, not the whole blob" discipline
 // renderNotice/boundedReasoningPreview already apply elsewhere in this
 // file — not the full raw output, which can already be arbitrarily large
 // (see processpanel.go's own processLocalLogMax cap on that separate,
-// dedicated observer).
-const (
-	toolResultPreviewMaxLines = 4
-	toolResultPreviewMaxWidth = 100
-)
+// dedicated observer). Line *width* is bounded dynamically against the
+// actual viewport (see renderToolResultPreview), not a fixed constant —
+// same reasoning as toolActivityArgsLimit.
+const toolResultPreviewMaxLines = 4
+
+// toolResultPreviewIndent is the fixed left margin every preview line
+// gets, subtracted from the viewport width before truncating so an
+// indented line still fits within it exactly.
+const toolResultPreviewIndent = "      "
 
 // renderToolResultPreview shows a bounded excerpt of what a finished
 // tool call actually printed — right under its name(args) ✓/✗ line,
@@ -369,10 +415,11 @@ const (
 // process already has its own dedicated live observer (Ctrl+B,
 // processpanel.go) that's a strictly better place to watch its output
 // than a static excerpt frozen at start time would be.
-func renderToolResultPreview(act daemonclient.ToolActivity) string {
+func (m Model) renderToolResultPreview(act daemonclient.ToolActivity) string {
 	if act.Running || act.ProcessID != "" || strings.TrimSpace(act.Result) == "" {
 		return ""
 	}
+	width := minInt(100, maxInt(20, m.viewport.Width-len(toolResultPreviewIndent)))
 	clean := strings.ReplaceAll(ansi.Strip(act.Result), "\r\n", "\n")
 	clean = strings.TrimRight(clean, "\n")
 	lines := strings.Split(clean, "\n")
@@ -384,19 +431,14 @@ func renderToolResultPreview(act daemonclient.ToolActivity) string {
 	}
 	var b strings.Builder
 	for i, line := range shown {
-		runes := []rune(strings.TrimRight(line, " \t"))
-		if len(runes) > toolResultPreviewMaxWidth {
-			line = string(runes[:toolResultPreviewMaxWidth]) + "…"
-		} else {
-			line = string(runes)
-		}
+		line = truncateToWidth(strings.TrimRight(line, " \t"), width)
 		if i > 0 {
 			b.WriteString("\n")
 		}
-		b.WriteString(styleHint.Render("      " + line))
+		b.WriteString(styleHint.Render(toolResultPreviewIndent + line))
 	}
 	if overflow > 0 {
-		b.WriteString("\n" + styleHint.Render(fmt.Sprintf("      … +%d linhas", overflow)))
+		b.WriteString("\n" + styleHint.Render(fmt.Sprintf("%s… +%d linhas", toolResultPreviewIndent, overflow)))
 	}
 	return b.String()
 }

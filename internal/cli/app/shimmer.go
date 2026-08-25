@@ -2,12 +2,34 @@ package app
 
 import (
 	"math"
+	"time"
 	"unicode"
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/lucasb-eyer/go-colorful"
 	"github.com/muesli/termenv"
 )
+
+// shimmerPhasePerFrame is how far every sweeping-gradient animation's
+// phase advances each animFrame tick (see commands.go's animTickCmd).
+// Derived from animTickInterval rather than hardcoded, so the sweep's
+// real-time speed (originally tuned as 0.35 radians per 120ms tick,
+// ~2.9 rad/s) stays the same when the tick rate changes for smoothness —
+// a faster tick alone would otherwise silently speed the whole animation
+// up instead of just sampling it more often. Used by shimmerText,
+// renderThinkingK, and routebar.go's own pulse dot.
+var shimmerPhasePerFrame = 0.35 * animTickInterval.Seconds() / (120 * time.Millisecond).Seconds()
+
+// activeStepFrames is how many animFrame ticks a cycling indicator's
+// "active" node/letter (renderThinkingK, renderActivityRail, the route
+// bar's own dot) dwells before advancing to the next one — same
+// tick-rate-independent derivation as shimmerPhasePerFrame, keeping the
+// original ~240ms-per-step cadence (2 frames at the 120ms baseline)
+// instead of letting a faster tick rate speed up how often the "active"
+// spot actually jumps, which is the part a faster tick alone can't smooth
+// out (a letter is either uppercase or it isn't) — only the color sweep
+// between jumps benefits from more frequent sampling.
+var activeStepFrames = maxInt(1, int(240*time.Millisecond/animTickInterval))
 
 // shimmerFrom/To are the gradient endpoints for the "working" shimmer —
 // a genuine per-character color interpolation (via go-colorful) rather
@@ -67,9 +89,9 @@ func shimmerText(text string, frame int) string {
 	}
 	var out string
 	for i, r := range runes {
-		// One full sine cycle sweeps across the text roughly every 2s at
-		// the 120ms tick rate (animFrame increments once per tick).
-		phase := float64(i)/float64(len(runes))*2*math.Pi + float64(frame)*0.35
+		// One full sine cycle sweeps across the text roughly every 2s,
+		// regardless of animTickInterval — see shimmerPhasePerFrame.
+		phase := float64(i)/float64(len(runes))*2*math.Pi + float64(frame)*shimmerPhasePerFrame
 		blend := (math.Sin(phase) + 1) / 2 // 0..1
 		c := shimmerFrom.BlendLuv(shimmerTo, blend)
 		out += lipgloss.NewStyle().Foreground(lipgloss.Color(c.Hex())).Bold(true).Render(string(r))
@@ -120,7 +142,7 @@ func renderThinkingK(frame int, stalled bool) string {
 		return styleBadgeWarn.Bold(true).Render(string(letters))
 	}
 
-	active := positiveModulo(frame/2, len(letters))
+	active := positiveModulo(frame/activeStepFrames, len(letters))
 	smooth := supportsSmoothGradient()
 	result := ""
 	for i, r := range letters {
@@ -134,7 +156,7 @@ func renderThinkingK(frame int, stalled bool) string {
 			// not the old 2-point glyph's harder i*math.Pi alternation —
 			// four letters read as a genuine moving gradient this way
 			// instead of a hard two-color checkerboard.
-			phase := float64(i)/float64(len(letters))*2*math.Pi + float64(frame)*0.35
+			phase := float64(i)/float64(len(letters))*2*math.Pi + float64(frame)*shimmerPhasePerFrame
 			blend := (math.Sin(phase) + 1) / 2
 			color = shimmerFrom.BlendLuv(shimmerTo, blend)
 		} else {
