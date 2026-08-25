@@ -1,13 +1,22 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/codexmark/kram/internal/openai"
 )
 
 func freePort(t *testing.T) int {
@@ -36,5 +45,86 @@ func TestRunReportsStoreOpenFailure(t *testing.T) {
 	err := Run(context.Background(), Config{DBPath: t.TempDir(), Workspace: t.TempDir()}, nil)
 	if err == nil {
 		t.Fatal("Run with directory DB path succeeded")
+	}
+}
+
+func waitForDaemon(t *testing.T, baseURL string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		resp, err := http.Get(baseURL + "/health")
+		if err == nil {
+			resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				return
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("daemon never became healthy")
+}
+
+// TestRunDefaultsToStreamingGatewayPath confirms the real daemon
+// construction site (this file's own Run) actually sets
+// agent.Config.PreferStreaming — the escape-hatch field itself defaults
+// false, so a deployed daemon only gets the streaming path (and
+// everything that depends on it, like the live indicator's reasoning
+// excerpt — see agent.EventReasoning) because this one call site chooses
+// it, not because of the field's own zero value.
+func TestRunDefaultsToStreamingGatewayPath(t *testing.T) {
+	var mu sync.Mutex
+	var sawStream bool
+	gwSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req openai.ChatCompletionRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		mu.Lock()
+		sawStream = req.Stream
+		mu.Unlock()
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}]}\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer gwSrv.Close()
+
+	port := freePort(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- Run(ctx, Config{
+			Host: "127.0.0.1", Port: port, DBPath: filepath.Join(t.TempDir(), "daemon.db"),
+			GatewayURL: gwSrv.URL, Workspace: t.TempDir(), MaxTurns: 1,
+		}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	}()
+
+	baseURL := fmt.Sprintf("http://127.0.0.1:%d", port)
+	waitForDaemon(t, baseURL)
+
+	createResp, err := http.Post(baseURL+"/sessions", "application/json", strings.NewReader(`{"title":"x"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var created struct {
+		ID string `json:"id"`
+	}
+	_ = json.NewDecoder(createResp.Body).Decode(&created)
+	createResp.Body.Close()
+
+	msgResp, err := http.Post(baseURL+"/sessions/"+created.ID+"/messages", "application/json", bytes.NewReader([]byte(`{"content":"oi"}`)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.Copy(io.Discard, msgResp.Body)
+	msgResp.Body.Close()
+
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if !sawStream {
+		t.Error("gateway request had Stream=false, want the daemon to default to the streaming path")
 	}
 }

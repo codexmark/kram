@@ -4167,3 +4167,78 @@ substring matching, since a differently-cased letter breaks a literal
 lowercases, and asserts the result equals `"kram"` with exactly one
 uppercase rune, across the same `frame := -1; frame < 12` sweep the old
 test used — same coverage shape, correct assertions for the new content.
+
+---
+
+## Making the streaming path (and its reasoning indicator) actually reachable
+
+#28's reasoning-indicator work was real and tested but dormant: it only
+fires on `streamCall`, reached only when `Config.PreferStreaming` is
+true, and nothing in the deployed daemon ever set that. Confirmed by a
+user actually running the built binary and reporting no "pensando: ..."
+text ever appeared — the premise-check note in #28's own DECISIONS entry
+predicted exactly this.
+
+`internal/daemon/daemon.go`'s `Run` — the one real `agent.Config{...}`
+construction site both `cmd/daemon` and `cmd/kram`'s in-process daemon
+go through — now sets `PreferStreaming: true`. `PreferStreaming`'s own
+doc comment on the field itself is deliberately left unchanged: it still
+honestly describes the field as an opt-in escape hatch, "False (buffered)
+is what almost every caller wants." That's still true of the *field*;
+this is the one call site that makes the different choice for the real,
+deployed daemon, and the comment at that call site is where the
+tradeoff being accepted lives — not a rewrite of what the field means in
+general.
+
+The tradeoff is real and worth restating plainly: streaming commits to
+the first candidate `router.BoundedPeek` sees a meaningful signal from —
+if that candidate then fails mid-stream, the whole turn fails with it,
+since HTTP headers are already sent and kram-gateway has no further
+fallback available. The buffered path doesn't have that problem (every
+ranked candidate is tried to completion before anything is written back).
+Turning streaming on by default trades some of that resilience for the
+reasoning indicator (and generally snappier perceived latency, since
+content now arrives token-by-token instead of only once the whole
+buffered call finishes) actually working. Accepted deliberately, at the
+user's explicit request, not a default anyone should assume is risk-free.
+
+`TestRunDefaultsToStreamingGatewayPath` (`internal/daemon/daemon_test.go`)
+is the regression test: a real `Run()` against a real SSE-capable fake
+gateway, asserting the captured request actually carried `Stream: true`
+— proving the real deployment wiring makes this choice, not just that
+the field can be set in principle (that half was already covered by
+#28's own `buffered_test.go` tests).
+
+---
+
+## Inline preview of a finished tool call's output
+
+`renderToolActivity` showed only `name(args) ✓/✗` — the actual result
+content (`daemonclient.ToolActivity.Result`, already fetched from
+`EventToolResult` and stored on the model) was discarded from the CLI's
+perspective. A user watching a turn run had no way to see what a
+`bash`/`grep`/`read_file` call actually printed without asking the model
+to repeat it — flagged directly by a user comparing against Codex CLI's
+own inline output preview.
+
+`renderToolResultPreview` (`internal/cli/app/view.go`) shows up to
+`toolResultPreviewMaxLines` (4) lines of a finished call's `Result`,
+ANSI-stripped (`ansi.Strip`, ripping out any raw color/control codes a
+shell command's own output might carry) and each line capped to
+`toolResultPreviewMaxWidth` (100) runes — a "+N linhas" suffix when
+truncated, the same overflow-suffix convention `renderFilesTouched`
+already established. Gated on `!act.Running && act.ProcessID == ""`:
+a still-running call has no result yet to preview (see the honest
+limitation below), and a `run_background` process already has its own
+dedicated live observer (Ctrl+B) that's a strictly better place to watch
+its output than a static excerpt frozen at start time would be.
+
+**A real, explicitly-named limitation, not silently punted**: this is a
+preview of a *finished* call's output, not a live-growing one. Kram's
+tool execution doesn't stream partial stdout/stderr mid-call today —
+adding that would mean a new daemon-side event kind carrying incremental
+output chunks per (non-background) tool call, real new plumbing on the
+execution side of every tool, not a CLI-only rendering change. Told to
+the user directly rather than half-implementing something that looks
+live but isn't: what shipped here is the achievable half of "like Codex"
+with current data, not the whole thing.
