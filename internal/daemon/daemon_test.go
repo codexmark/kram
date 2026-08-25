@@ -64,67 +64,82 @@ func waitForDaemon(t *testing.T, baseURL string) {
 	t.Fatal("daemon never became healthy")
 }
 
-// TestRunDefaultsToStreamingGatewayPath confirms the real daemon
-// construction site (this file's own Run) actually sets
-// agent.Config.PreferStreaming — the escape-hatch field itself defaults
-// false, so a deployed daemon only gets the streaming path (and
-// everything that depends on it, like the live indicator's reasoning
-// excerpt — see agent.EventReasoning) because this one call site chooses
-// it, not because of the field's own zero value.
-func TestRunDefaultsToStreamingGatewayPath(t *testing.T) {
-	var mu sync.Mutex
-	var sawStream bool
-	gwSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var req openai.ChatCompletionRequest
-		_ = json.NewDecoder(r.Body).Decode(&req)
-		mu.Lock()
-		sawStream = req.Stream
-		mu.Unlock()
-		w.Header().Set("Content-Type", "text/event-stream")
-		fmt.Fprint(w, "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}]}\n\n")
-		fmt.Fprint(w, "data: [DONE]\n\n")
-	}))
-	defer gwSrv.Close()
+// TestRunThreadsPreferStreamingToGateway confirms the real daemon
+// construction site (this file's own Run) actually passes
+// Config.PreferStreaming through to agent.Config.PreferStreaming, in
+// both directions — the caller (cmd/kram's -stream flag, cmd/daemon's
+// own) decides, not a value hardcoded inside Run. The opt-out direction
+// exists specifically because a deployment can get stuck otherwise: a
+// slow local model whose inference server sends nothing at all during
+// prompt prefill trips router.BoundedPeek's fixed idle timeout on the
+// streaming path well before the first token streams, failing every
+// turn outright — see Config.PreferStreaming's own doc comment.
+func TestRunThreadsPreferStreamingToGateway(t *testing.T) {
+	for _, preferStreaming := range []bool{true, false} {
+		t.Run(fmt.Sprintf("PreferStreaming=%v", preferStreaming), func(t *testing.T) {
+			var mu sync.Mutex
+			var sawStream bool
+			gwSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var req openai.ChatCompletionRequest
+				_ = json.NewDecoder(r.Body).Decode(&req)
+				mu.Lock()
+				sawStream = req.Stream
+				mu.Unlock()
+				if req.Stream {
+					w.Header().Set("Content-Type", "text/event-stream")
+					fmt.Fprint(w, "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}]}\n\n")
+					fmt.Fprint(w, "data: [DONE]\n\n")
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(openai.ChatCompletionResponse{
+					Choices: []openai.ChatCompletionChoice{{Message: openai.ChatMessage{Role: "assistant", Content: "hi"}}},
+				})
+			}))
+			defer gwSrv.Close()
 
-	port := freePort(t)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	done := make(chan error, 1)
-	go func() {
-		done <- Run(ctx, Config{
-			Host: "127.0.0.1", Port: port, DBPath: filepath.Join(t.TempDir(), "daemon.db"),
-			GatewayURL: gwSrv.URL, Workspace: t.TempDir(), MaxTurns: 1,
-		}, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	}()
+			port := freePort(t)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			done := make(chan error, 1)
+			go func() {
+				done <- Run(ctx, Config{
+					Host: "127.0.0.1", Port: port, DBPath: filepath.Join(t.TempDir(), "daemon.db"),
+					GatewayURL: gwSrv.URL, Workspace: t.TempDir(), MaxTurns: 1,
+					PreferStreaming: preferStreaming,
+				}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+			}()
 
-	baseURL := fmt.Sprintf("http://127.0.0.1:%d", port)
-	waitForDaemon(t, baseURL)
+			baseURL := fmt.Sprintf("http://127.0.0.1:%d", port)
+			waitForDaemon(t, baseURL)
 
-	createResp, err := http.Post(baseURL+"/sessions", "application/json", strings.NewReader(`{"title":"x"}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var created struct {
-		ID string `json:"id"`
-	}
-	_ = json.NewDecoder(createResp.Body).Decode(&created)
-	createResp.Body.Close()
+			createResp, err := http.Post(baseURL+"/sessions", "application/json", strings.NewReader(`{"title":"x"}`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var created struct {
+				ID string `json:"id"`
+			}
+			_ = json.NewDecoder(createResp.Body).Decode(&created)
+			createResp.Body.Close()
 
-	msgResp, err := http.Post(baseURL+"/sessions/"+created.ID+"/messages", "application/json", bytes.NewReader([]byte(`{"content":"oi"}`)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, _ = io.Copy(io.Discard, msgResp.Body)
-	msgResp.Body.Close()
+			msgResp, err := http.Post(baseURL+"/sessions/"+created.ID+"/messages", "application/json", bytes.NewReader([]byte(`{"content":"oi"}`)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, _ = io.Copy(io.Discard, msgResp.Body)
+			msgResp.Body.Close()
 
-	cancel()
-	if err := <-done; err != nil {
-		t.Fatalf("Run: %v", err)
-	}
+			cancel()
+			if err := <-done; err != nil {
+				t.Fatalf("Run: %v", err)
+			}
 
-	mu.Lock()
-	defer mu.Unlock()
-	if !sawStream {
-		t.Error("gateway request had Stream=false, want the daemon to default to the streaming path")
+			mu.Lock()
+			defer mu.Unlock()
+			if sawStream != preferStreaming {
+				t.Errorf("gateway request had Stream=%v, want %v to match Config.PreferStreaming", sawStream, preferStreaming)
+			}
+		})
 	}
 }

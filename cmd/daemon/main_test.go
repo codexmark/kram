@@ -11,8 +11,8 @@ import (
 )
 
 func TestDaemonConfigPreservesEntrypointFlags(t *testing.T) {
-	cfg := daemonConfig("0.0.0.0", 42, "state.db", "http://gateway", "combo", "/workspace", 7)
-	if cfg.Host != "0.0.0.0" || cfg.Port != 42 || cfg.DBPath != "state.db" || cfg.GatewayURL != "http://gateway" || cfg.Model != "combo" || cfg.Workspace != "/workspace" || cfg.MaxTurns != 7 {
+	cfg := daemonConfig("0.0.0.0", 42, "state.db", "http://gateway", "combo", "/workspace", 7, false)
+	if cfg.Host != "0.0.0.0" || cfg.Port != 42 || cfg.DBPath != "state.db" || cfg.GatewayURL != "http://gateway" || cfg.Model != "combo" || cfg.Workspace != "/workspace" || cfg.MaxTurns != 7 || cfg.PreferStreaming {
 		t.Fatalf("daemonConfig lost a flag value: %+v", cfg)
 	}
 }
@@ -27,8 +27,30 @@ func TestRunMainParsesFlagsAndDelegates(t *testing.T) {
 	if !errors.Is(err, wantErr) || got.Port != 42 || got.MaxTurns != 9 || got.Workspace != "/w" {
 		t.Fatalf("runMain cfg=%+v err=%v", got, err)
 	}
+	if !got.PreferStreaming {
+		t.Fatalf("runMain cfg.PreferStreaming = false, want the -stream flag's default of true when not passed: %+v", got)
+	}
 	if err := runMain(context.Background(), []string{"-port", "bad"}, &bytes.Buffer{}); err == nil {
 		t.Fatal("invalid flag unexpectedly accepted")
+	}
+}
+
+// TestRunMainStreamFlagDisablesPreferStreaming is the regression test
+// for the concrete failure that motivated this flag: a local model
+// whose server sends nothing at all during prompt prefill trips
+// router.BoundedPeek's idle timeout on the streaming path, failing every
+// turn — -stream=false must reach daemon.Config.PreferStreaming so a
+// deployment stuck in that situation has a real way out.
+func TestRunMainStreamFlagDisablesPreferStreaming(t *testing.T) {
+	original := daemonRun
+	t.Cleanup(func() { daemonRun = original })
+	var got daemon.Config
+	daemonRun = func(_ context.Context, cfg daemon.Config, _ *slog.Logger) error { got = cfg; return nil }
+	if err := runMain(context.Background(), []string{"-stream=false"}, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	if got.PreferStreaming {
+		t.Fatalf("runMain with -stream=false left cfg.PreferStreaming = true: %+v", got)
 	}
 }
 
