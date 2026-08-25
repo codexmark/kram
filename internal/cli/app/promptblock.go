@@ -35,7 +35,12 @@ const (
 // instead of its content's, see DECISIONS.md). Alignment here is done by
 // hand against each line's actual rendered width instead.
 func (m Model) renderPromptBlock(content string) string {
-	width := m.width
+	// The chat viewport's width, not the terminal's: once the Ctrl+B
+	// process observer tiles the screen, the transcript column is much
+	// narrower than m.width, and a block laid out against the full
+	// terminal gets clipped (not wrapped) by the viewport — a real bug a
+	// user hit, with user prompts visibly cut off mid-word.
+	width := m.viewport.Width
 	if width <= 0 {
 		width = 80
 	}

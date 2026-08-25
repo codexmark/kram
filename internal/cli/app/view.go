@@ -15,12 +15,25 @@ import (
 // following new output only while the viewport is already at the bottom; a
 // user who deliberately scrolled up must not be snapped back down by the
 // thinking animation or a streaming delta.
+//
+// Only the tail message can contain anything animFrame-dependent (the
+// thinking line, or a running tool call's live spinner glyph — both only
+// ever appear on the one message still streaming, since every earlier
+// message's turn already finished and never changes again). So the
+// static messages before it are rendered once here and cached in
+// m.transcriptBody; refreshLiveIndicator (animTickMsg's own path, see
+// its doc comment) re-renders only the small tail block on every
+// animation frame instead of re-running this whole function — glamour
+// re-rendering every past message, tool-activity re-rendering, etc. —
+// which measured at ~16ms on an 80-message session, a third of the
+// 50ms tick budget and the direct cause of a user-reported "travada"/
+// slow-motion feel once the tick rate was raised for smoothness
+// (issue #53) rather than the fix that was meant to be.
 func (m *Model) refreshTranscript() {
 	followBottom := m.viewport.AtBottom()
 	previousOffset := m.viewport.YOffset
-	var b strings.Builder
-	m.processLinkRows = make(map[int]string)
 	if len(m.messages) == 0 && m.wizardWelcomeSession {
+		m.transcriptLiveIndicatorActive = false
 		m.viewport.SetContent(m.renderWizardWelcomeBanner())
 		if followBottom {
 			m.viewport.GotoBottom()
@@ -29,76 +42,153 @@ func (m *Model) refreshTranscript() {
 		}
 		return
 	}
-	for i, msg := range m.messages {
+
+	n := len(m.messages)
+	tailLive := n > 0 && m.messages[n-1].Role != "user" && m.messages[n-1].streaming
+	staticCount := n
+	if tailLive {
+		staticCount = n - 1
+	}
+
+	var b strings.Builder
+	linkRows := make(map[int]string)
+	for i := 0; i < staticCount; i++ {
 		if i > 0 {
 			b.WriteString("\n\n")
 		}
-		switch msg.Role {
-		case "user":
-			// User text is never run through the markdown renderer — it's
-			// what was typed, not a formatted reply, and echoing it back
-			// reformatted would be surprising. Right-aligned prompt block,
-			// not a chat bubble — see promptblock.go and DECISIONS.md.
-			b.WriteString(m.renderPromptBlock(msg.Content))
-		default:
-			for _, act := range msg.ToolActivity {
-				row := strings.Count(b.String(), "\n")
-				if act.ProcessID != "" {
-					m.processLinkRows[row] = act.ProcessID
-				}
-				b.WriteString(m.renderToolActivity(act) + "\n")
+		text, rows := m.renderMessageBlock(m.messages[i])
+		base := strings.Count(b.String(), "\n")
+		for r, pid := range rows {
+			linkRows[base+r] = pid
+		}
+		b.WriteString(text)
+	}
+	m.transcriptBody = b.String()
+	m.transcriptBodyLinkRows = linkRows
+	m.transcriptLiveIndicatorActive = tailLive
+	m.applyTranscriptContent(followBottom, previousOffset)
+}
+
+// renderMessageBlock renders one message — a user prompt block, or the
+// tool-activity/content/notices block for an assistant/tool-role message
+// — in isolation. The single place this logic lives, built from by both
+// refreshTranscript's static-prefix loop and applyTranscriptContent's
+// tail re-render, so the two paths can never drift into rendering a
+// message differently depending on which one happens to touch it.
+// localLinkRows keys are row numbers relative to this block's own first
+// line (0-based); the caller offsets them by however many lines came
+// before the block in the full transcript.
+func (m Model) renderMessageBlock(msg chatMessage) (text string, localLinkRows map[int]string) {
+	var b strings.Builder
+	localLinkRows = make(map[int]string)
+	switch msg.Role {
+	case "user":
+		// User text is never run through the markdown renderer — it's
+		// what was typed, not a formatted reply, and echoing it back
+		// reformatted would be surprising. Right-aligned prompt block,
+		// not a chat bubble — see promptblock.go and DECISIONS.md.
+		b.WriteString(m.renderPromptBlock(msg.Content))
+	default:
+		for _, act := range msg.ToolActivity {
+			row := strings.Count(b.String(), "\n")
+			if act.ProcessID != "" {
+				localLinkRows[row] = act.ProcessID
 			}
-			// While a turn is live, durable notices belong above the activity
-			// surface. Rendering them below it makes the K stop being the visual
-			// tail of the run (the segment-notice bug caught this live). Once the
-			// turn is complete, the conventional answer-then-notices order is fine.
-			if msg.streaming {
-				for _, n := range msg.Notices {
-					b.WriteString(renderNotice(n) + "\n")
-				}
+			b.WriteString(m.renderToolActivity(act) + "\n")
+		}
+		// While a turn is live, durable notices belong above the activity
+		// surface. Rendering them below it makes the K stop being the visual
+		// tail of the run (the segment-notice bug caught this live). Once the
+		// turn is complete, the conventional answer-then-notices order is fine.
+		if msg.streaming {
+			for _, n := range msg.Notices {
+				b.WriteString(renderNotice(n) + "\n")
 			}
-			switch {
-			case msg.streaming && msg.Content == "":
-				// Nothing generated yet this turn (still deciding, or
-				// mid-tool-call) — the breathing placeholder.
-				b.WriteString(m.thinkingLine())
-			case msg.streaming:
-				// Content is arriving live: plain text only. Markdown
-				// parsed against an incomplete string (an unclosed code
-				// fence, a stray "**") would flicker through broken
-				// formatting every frame — the full render happens once,
-				// below, when the message is complete. Explicitly
-				// word-wrapped to the viewport's actual current width
-				// (narrower once the Ctrl+B process pane tiles it) —
-				// unlike renderMarkdown's glamour output, plain
-				// styleBody.Render never wrapped on its own, so a long
-				// streaming line used to just get clipped by bubbles'
-				// own viewport instead of wrapping.
-				kramTag := styleKramTag.Render("kram") + "  "
-				wrapWidth := maxInt(1, m.viewport.Width-lipgloss.Width(kramTag))
-				b.WriteString(kramTag + styleBody.Width(wrapWidth).Render(msg.Content) + "\n" + m.thinkingLine())
-			case msg.Content != "":
-				b.WriteString(styleKramTag.Render("kram") + "  " + renderMarkdown(m.mdRenderer, msg.Content))
+		}
+		switch {
+		case msg.streaming && msg.Content == "":
+			// Nothing generated yet this turn (still deciding, or
+			// mid-tool-call) — the breathing placeholder.
+			b.WriteString(m.thinkingLine())
+		case msg.streaming:
+			// Content is arriving live: plain text only. Markdown
+			// parsed against an incomplete string (an unclosed code
+			// fence, a stray "**") would flicker through broken
+			// formatting every frame — the full render happens once,
+			// below, when the message is complete. Explicitly
+			// word-wrapped to the viewport's actual current width
+			// (narrower once the Ctrl+B process pane tiles it) —
+			// unlike renderMarkdown's glamour output, plain
+			// styleBody.Render never wrapped on its own, so a long
+			// streaming line used to just get clipped by bubbles'
+			// own viewport instead of wrapping.
+			kramTag := styleKramTag.Render("kram") + "  "
+			wrapWidth := maxInt(1, m.viewport.Width-lipgloss.Width(kramTag))
+			b.WriteString(kramTag + styleBody.Width(wrapWidth).Render(msg.Content) + "\n" + m.thinkingLine())
+		case msg.Content != "":
+			b.WriteString(styleKramTag.Render("kram") + "  " + renderMarkdown(m.mdRenderer, msg.Content))
+		}
+		if !msg.streaming {
+			for _, n := range msg.Notices {
+				b.WriteString("\n" + renderNotice(n))
 			}
-			if !msg.streaming {
-				for _, n := range msg.Notices {
-					b.WriteString("\n" + renderNotice(n))
-				}
-				if row := renderFilesTouched(touchedFiles(msg.ToolActivity)); row != "" {
-					b.WriteString("\n" + row)
-				}
+			if row := renderFilesTouched(touchedFiles(msg.ToolActivity)); row != "" {
+				b.WriteString("\n" + row)
 			}
 		}
 	}
-	if m.err != nil {
-		b.WriteString("\n\n" + styleErrBadge.Render("erro: "+m.err.Error()))
+	return b.String(), localLinkRows
+}
+
+// applyTranscriptContent composes m.transcriptBody with a freshly
+// re-rendered tail block (when m.transcriptLiveIndicatorActive) and sets
+// the result as the viewport's content — the one place that actually
+// calls SetContent for the transcript, shared by refreshTranscript's
+// full rebuild and refreshLiveIndicator's cheap per-tick path.
+func (m *Model) applyTranscriptContent(followBottom bool, previousOffset int) {
+	content := m.transcriptBody
+	linkRows := make(map[int]string, len(m.transcriptBodyLinkRows)+1)
+	for row, pid := range m.transcriptBodyLinkRows {
+		linkRows[row] = pid
 	}
-	m.viewport.SetContent(b.String())
+	if m.transcriptLiveIndicatorActive {
+		n := len(m.messages)
+		separator := ""
+		if n > 1 {
+			separator = "\n\n"
+		}
+		text, rows := m.renderMessageBlock(m.messages[n-1])
+		base := strings.Count(content, "\n") + strings.Count(separator, "\n")
+		for row, pid := range rows {
+			linkRows[base+row] = pid
+		}
+		content += separator + text
+	}
+	if m.err != nil {
+		content += "\n\n" + styleErrBadge.Render("erro: "+m.err.Error())
+	}
+	m.processLinkRows = linkRows
+	m.viewport.SetContent(content)
 	if followBottom {
 		m.viewport.GotoBottom()
 	} else {
 		m.viewport.SetYOffset(previousOffset)
 	}
+}
+
+// refreshLiveIndicator is animTickMsg's own cheap path (see model.go and
+// refreshTranscript's own doc comment): re-renders only the tail
+// message's block — thinking line, and any running tool call's live
+// spinner glyph, the only animFrame-dependent content that can exist —
+// instead of every past message. A no-op when there's nothing live to
+// animate.
+func (m *Model) refreshLiveIndicator() {
+	if !m.transcriptLiveIndicatorActive {
+		return
+	}
+	followBottom := m.viewport.AtBottom()
+	previousOffset := m.viewport.YOffset
+	m.applyTranscriptContent(followBottom, previousOffset)
 }
 
 // stallThreshold is how long without any event (delta, tool_start,

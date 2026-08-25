@@ -4324,3 +4324,93 @@ shared, derived values — one source of truth for "how fast does
 animation actually move," decoupled from "how often is it sampled,"
 instead of four independently-tuned magic numbers that would drift out
 of sync the next time either changes.
+
+---
+
+## The real cause of the "camera lenta" feeling: refreshTranscript on every tick
+
+The tick-rate/rescale fix above didn't actually fix what the user was
+seeing — a second report came back: still choppy, and user prompts were
+now *also* getting clipped in the tiled view (a second instance of the
+class of bug the previous entry fixed elsewhere). Both turned out to be
+real, and neither was where the first pass looked.
+
+**Root cause #1, the actual performance bug**: `animTickMsg`'s handler
+called `m.refreshTranscript()` — the *entire* transcript rebuild — on
+every single animation frame. `BenchmarkRefreshTranscriptLongSession`
+(new, `internal/cli/app/transcript_perf_test.go`) measured this at
+~16-18ms on an 80-message session with markdown and tool activity, on a
+machine slower than the one that actually produced the bug report (a
+242k-token real session, far larger than the benchmark's 40-turn
+fixture). At the 50ms tick interval the previous entry had just
+introduced *for smoothness*, that's over a third of the entire frame
+budget spent re-parsing glamour markdown and re-rendering tool-activity
+rows for messages that hadn't changed at all since the last frame — the
+raised tick rate didn't make the animation smoother, it made the
+existing per-frame cost happen 2.4x more often, which reads as exactly
+the "slow motion / travada" feeling reported. Bumping tick rate without
+first checking what runs on each tick was the mistake here, the same
+category of "one hop changes, a downstream assumption doesn't
+automatically follow" already named a few entries up regarding
+`PreferStreaming`.
+
+The fix rests on one structural fact: **only the tail message can
+contain anything animFrame-dependent** — the thinking line, or a running
+tool call's live spinner glyph. Every earlier message's turn already
+finished and never changes again. So `refreshTranscript` now splits at
+that boundary: static messages (`m.messages[:n-1]` when the tail is
+still streaming) are rendered once into a cached `m.transcriptBody`;
+`renderMessageBlock` (new) is the one place a single message's own
+rendering logic lives — user prompt block, or tool-activity/content/
+notices for an assistant message — called both by `refreshTranscript`'s
+static-prefix loop and by `applyTranscriptContent`'s tail re-render, so
+the two paths can never drift into rendering the same message
+differently. `refreshLiveIndicator` (new, `animTickMsg`'s actual handler
+now) calls `applyTranscriptContent` directly, skipping the static loop
+entirely — measured at ~0.65ms per tick on the same session shape via
+`BenchmarkRefreshLiveIndicatorLongSession`, a ~28x reduction, from ~37%
+of the tick budget down to ~1.3%.
+
+`processLinkRows` (the `bgN` → process-ID map `handleMouse` reads to open
+the process panel on click) needed the same treatment: it's built
+per-message with row numbers *local* to that message's own block, then
+offset by however many lines came before it — `m.transcriptBodyLinkRows`
+caches the static prefix's rows, and `applyTranscriptContent` merges in
+the tail block's own (freshly computed each call, correctly offset)
+rows every time, so a `run_background` link in a still-running turn
+stays clickable through every animation frame, not just the ones a full
+refresh happened to land on.
+
+**A real mistake caught before it shipped, not after**: the first draft
+of this split cached everything *except* the trailing thinking-line
+suffix specifically — which would have frozen a still-running tool
+call's spinner glyph, since `renderToolActivity`'s `m.spin.View()` call
+is embedded *inside* the tail message's own block (via its tool-activity
+rows), not just in the trailing suffix after it. Traced by checking what
+`spinner.TickMsg`'s own handler (`model.go`) actually does to the
+transcript — nothing; it only advances `m.spin`'s internal frame state,
+relying entirely on *something else* re-rendering the transcript
+periodically to actually show the new spinner glyph, which turned out to
+be `animTickMsg`'s own full refresh doing double duty this whole time.
+Caught by tracing that chain before committing to the naive split, not
+by a test catching it after. `TestRefreshLiveIndicatorAnimatesRunningTool
+Spinner` pins it directly: eight animation frames with a running tool
+call must produce at least two visibly different renders, not a frozen
+one. `TestRefreshLiveIndicatorDoesNotRebuildStaticBody` pins the other
+half of the contract — `m.transcriptBody` itself must never change
+across repeated `refreshLiveIndicator` calls, only `refreshTranscript`
+is allowed to touch it.
+
+**Root cause #2, the second missed width bug**: `renderPromptBlock`
+(`promptblock.go`) still wrapped user prompt content against `m.width`
+— the full terminal width — rather than `m.viewport.Width`, the actual
+(narrower, once Ctrl+B tiles the screen) chat column. The exact same
+bug class the previous DECISIONS entry fixed for streaming content and
+tool activity, just missed in this one file, since promptblock.go wasn't
+touched by that pass. One-line fix: `width := m.viewport.Width` instead
+of `m.width`. `promptblock_test.go`'s existing width-based tests all
+constructed a bare `Model{width: N}` without ever syncing
+`m.viewport.Width` to match (an invariant real usage always maintains
+via `syncViewportSize`, but a raw struct literal in a test doesn't) —
+updated each one to set both, matching the real invariant rather than
+loosening the fix to satisfy an unrealistic test setup.

@@ -219,6 +219,15 @@ type Model struct {
 	mdRenderer *glamour.TermRenderer
 	mdWidth    int // width the current mdRenderer was built for
 
+	// transcriptBody/transcriptBodyLinkRows/transcriptLiveIndicatorActive
+	// cache refreshTranscript's static-message rendering so
+	// refreshLiveIndicator (animTickMsg's own path) can re-render just the
+	// tail message on every animation frame instead of the whole
+	// transcript — see refreshTranscript's own doc comment.
+	transcriptBody                string
+	transcriptBodyLinkRows        map[int]string
+	transcriptLiveIndicatorActive bool
+
 	phase        phase
 	splashTarget phase // screen revealed after the boot animation completes
 	splashFrame  int
@@ -686,7 +695,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.animFrame++
-		m.refreshTranscript() // keeps the transcript's thinking line in step with the footer
+		m.refreshLiveIndicator() // cheap: only the tail message's live content, not the whole transcript — see its own doc comment
 		return m, animTickCmd()
 
 	case clipboardSequenceClearMsg:

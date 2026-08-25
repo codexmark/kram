@@ -9,6 +9,7 @@ import (
 
 func TestRenderPromptBlockShrinksToShortContent(t *testing.T) {
 	m := Model{width: 100}
+	m.viewport.Width = 100
 	got := m.renderPromptBlock("hi")
 	lines := strings.Split(got, "\n")
 	if len(lines) < 2 {
@@ -29,6 +30,7 @@ func TestRenderPromptBlockShrinksToShortContent(t *testing.T) {
 
 func TestRenderPromptBlockRightAligned(t *testing.T) {
 	m := Model{width: 80}
+	m.viewport.Width = 80
 	got := m.renderPromptBlock("short")
 	lines := strings.Split(got, "\n")
 	contentLine := lines[len(lines)-1]
@@ -41,6 +43,7 @@ func TestRenderPromptBlockRightAligned(t *testing.T) {
 
 func TestRenderPromptBlockWrapsLongContent(t *testing.T) {
 	m := Model{width: 60}
+	m.viewport.Width = 60
 	long := strings.Repeat("palavra ", 30) // way longer than any reasonable wrap width
 	got := m.renderPromptBlock(long)
 	lines := strings.Split(got, "\n")
@@ -59,6 +62,7 @@ func TestRenderPromptBlockPreservesAllContent(t *testing.T) {
 	// Wrapping must never drop characters — every word from the original
 	// message should still appear somewhere in the rendered block.
 	m := Model{width: 50}
+	m.viewport.Width = 50
 	msg := "implemente essa função sem alterar a API pública"
 	got := m.renderPromptBlock(msg)
 	for _, word := range strings.Fields(msg) {
@@ -70,6 +74,7 @@ func TestRenderPromptBlockPreservesAllContent(t *testing.T) {
 
 func TestRenderPromptBlockNarrowTerminalDegradesGracefully(t *testing.T) {
 	m := Model{width: 30}
+	m.viewport.Width = 30
 	got := m.renderPromptBlock("mensagem razoavelmente longa para um terminal estreito")
 	lines := strings.Split(got, "\n")
 	for _, l := range lines {
@@ -81,6 +86,7 @@ func TestRenderPromptBlockNarrowTerminalDegradesGracefully(t *testing.T) {
 
 func TestRenderPromptBlockShowsYouLabel(t *testing.T) {
 	m := Model{width: 80}
+	m.viewport.Width = 80
 	got := m.renderPromptBlock("test")
 	if !strings.Contains(got, "you") {
 		t.Error("expected the block to carry a \"you\" label")
