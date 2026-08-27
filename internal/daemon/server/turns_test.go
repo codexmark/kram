@@ -205,3 +205,84 @@ func TestInterruptCancelsDetachedTurn(t *testing.T) {
 	}
 	t.Fatal("interrupt did not end the turn")
 }
+
+// TestTurnEndpointErrorBranches covers every cheap error path of the new
+// control surface: attach/interrupt/steer without a turn, steer with an
+// empty body, a second send while a turn runs (409), and the rewind pair
+// with no checkpoint / no id.
+func TestTurnEndpointErrorBranches(t *testing.T) {
+	s, _, release := gatedTestServer(t)
+	defer close(release)
+	api := httptest.NewServer(s.Handler())
+	defer api.Close()
+	sessID := createTurnSession(t, api)
+
+	get := func(path string) int {
+		resp, err := http.Get(api.URL + path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+	post := func(path, body string) int {
+		resp, err := http.Post(api.URL+path, "application/json", strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+
+	// No turn running yet.
+	if code := get("/sessions/" + sessID + "/turn"); code != http.StatusNotFound {
+		t.Fatalf("attach without turn = %d", code)
+	}
+	if code := post("/sessions/"+sessID+"/interrupt", ""); code != http.StatusNotFound {
+		t.Fatalf("interrupt without turn = %d", code)
+	}
+	if code := post("/sessions/"+sessID+"/steer", `{"content":"x"}`); code != http.StatusConflict {
+		t.Fatalf("steer without turn = %d", code)
+	}
+	if code := post("/sessions/"+sessID+"/steer", `{"content":""}`); code != http.StatusBadRequest {
+		t.Fatalf("steer empty content = %d", code)
+	}
+	if code := post("/sessions/"+sessID+"/steer", `not json`); code != http.StatusBadRequest {
+		t.Fatalf("steer bad json = %d", code)
+	}
+
+	// Rewind surface with no checkpoint and no id.
+	if code := get("/rewind"); code != http.StatusNotFound && code != http.StatusInternalServerError {
+		t.Fatalf("rewind info without checkpoints = %d", code)
+	}
+	if code := post("/rewind", `{}`); code != http.StatusBadRequest {
+		t.Fatalf("rewind without id = %d", code)
+	}
+	if code := post("/rewind", `not json`); code != http.StatusBadRequest {
+		t.Fatalf("rewind bad json = %d", code)
+	}
+	if code := post("/rewind", `{"id":"doesnotexist"}`); code != http.StatusBadRequest {
+		t.Fatalf("rewind unknown id = %d", code)
+	}
+
+	// With a turn running: second send conflicts, steer succeeds.
+	ctx, cancelReq := context.WithCancel(context.Background())
+	defer cancelReq()
+	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, api.URL+"/sessions/"+sessID+"/messages", strings.NewReader(`{"content":"hi"}`))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	cancelReq()
+
+	if code := post("/sessions/"+sessID+"/messages", `{"content":"again"}`); code != http.StatusConflict {
+		t.Fatalf("second send during a turn = %d, want 409", code)
+	}
+	if code := post("/sessions/"+sessID+"/steer", `{"content":"redirect"}`); code != http.StatusOK {
+		t.Fatalf("steer during turn = %d", code)
+	}
+	if code := post("/sessions/"+sessID+"/interrupt", ""); code != http.StatusOK {
+		t.Fatalf("interrupt during turn = %d", code)
+	}
+}
