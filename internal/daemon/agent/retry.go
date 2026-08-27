@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand"
+	"strings"
 	"time"
 
 	"github.com/codexmark/kram/internal/daemon/gatewayclient"
@@ -63,6 +64,14 @@ func backoffWithJitter(round int, minRetryAfter time.Duration) time.Duration {
 func (s *Service) callModelWithRetry(ctx context.Context, sessionID string, sentEstimate int, model string, messages []openai.ChatMessage, toolDefs []openai.Tool, onEvent EventFunc) (gatewayclient.Result, error) {
 	var lastErr error
 	var failedUsage openai.Usage
+	// salvaged accumulates the partial answer text of every failed
+	// streaming round (see streamCall's error return). Non-empty salvage
+	// changes the retry from "regenerate from zero" to "resume": the next
+	// round sends the partial back as the assistant's own words plus a
+	// continuation directive, and the final result re-attaches the partial
+	// in front of the continuation — so the user's already-streamed text
+	// stays exactly what the persisted answer begins with.
+	var salvaged strings.Builder
 	for round := 0; round < s.cfg.MaxGatewayRounds; round++ {
 		if round > 0 {
 			var ge *gatewayclient.GatewayError
@@ -71,9 +80,13 @@ func (s *Service) callModelWithRetry(ctx context.Context, sessionID string, sent
 				minWait = ge.RetryAfter
 			}
 			wait := backoffWithJitter(round-1, minWait)
-			emit(onEvent, Event{Kind: EventNotice, Notice: fmt.Sprintf(
-				"transient gateway failure, retrying (round %d/%d in %s)", round+1, s.cfg.MaxGatewayRounds, wait.Round(time.Millisecond),
-			)})
+			notice := fmt.Sprintf("transient gateway failure, retrying (round %d/%d in %s)",
+				round+1, s.cfg.MaxGatewayRounds, wait.Round(time.Millisecond))
+			if salvaged.Len() > 0 {
+				notice = fmt.Sprintf("stream dropped mid-answer — resuming where it stopped (round %d/%d in %s)",
+					round+1, s.cfg.MaxGatewayRounds, wait.Round(time.Millisecond))
+			}
+			emit(onEvent, Event{Kind: EventNotice, Notice: notice})
 			select {
 			case <-time.After(wait):
 			case <-ctx.Done():
@@ -81,15 +94,29 @@ func (s *Service) callModelWithRetry(ctx context.Context, sessionID string, sent
 			}
 		}
 
-		result, err := s.callModel(ctx, model, messages, toolDefs, onEvent)
+		callMessages := messages
+		if salvaged.Len() > 0 {
+			callMessages = continuationMessages(messages, salvaged.String())
+		}
+		result, err := s.callModel(ctx, model, callMessages, toolDefs, onEvent)
 		if err == nil {
-			// Calibrate from this successful call's own prompt_tokens, before
-			// folding in any failed rounds' usage below.
-			s.calibrator.observe(sessionID, sentEstimate, result.Usage.PromptTokens)
+			if salvaged.Len() == 0 {
+				// Calibrate from this successful call's own prompt_tokens,
+				// before folding in any failed rounds' usage below. Skipped
+				// after a salvage: the continuation prompt is larger than
+				// what sentEstimate measured, so the pair would miscalibrate.
+				s.calibrator.observe(sessionID, sentEstimate, result.Usage.PromptTokens)
+			}
 			result.Usage = openai.AddUsage(failedUsage, result.Usage)
+			if salvaged.Len() > 0 {
+				result.Content = salvaged.String() + result.Content
+			}
 			return result, nil
 		}
 		lastErr = err
+		if result.Content != "" {
+			salvaged.WriteString(result.Content)
+		}
 
 		var ge *gatewayclient.GatewayError
 		if errors.As(err, &ge) {
@@ -110,4 +137,23 @@ func (s *Service) callModelWithRetry(ctx context.Context, sessionID string, sent
 		}
 	}
 	return gatewayclient.Result{}, lastErr
+}
+
+// continuationNudge tells the model, in its own conversation, exactly how
+// to resume an answer whose stream was cut off. A user-role message rather
+// than system: mid-conversation user directives are the shape every
+// provider follows most reliably.
+const continuationNudge = "[Kram stream recovery: your previous answer above was cut off mid-stream by a transport failure. Continue EXACTLY from where it stopped — do not repeat any part of it, do not apologize, do not restart.]"
+
+// continuationMessages appends the salvaged partial as the assistant's own
+// message plus the continuation directive. Built fresh (never mutating the
+// caller's slice) and used only for the retried call itself — the partial
+// is re-attached to the final result's Content instead (see
+// callModelWithRetry), so nothing here is ever persisted to the session.
+func continuationMessages(messages []openai.ChatMessage, partial string) []openai.ChatMessage {
+	out := make([]openai.ChatMessage, 0, len(messages)+2)
+	out = append(out, messages...)
+	out = append(out, openai.ChatMessage{Role: "assistant", Content: partial})
+	out = append(out, openai.ChatMessage{Role: "user", Content: continuationNudge})
+	return out
 }

@@ -32,6 +32,27 @@ type GatewayError struct {
 
 func (e *GatewayError) Error() string { return e.Message }
 
+// gatewayErrorFromBody builds the typed GatewayError from kram-gateway's
+// structured all-candidates-failed error body, or nil when the body isn't
+// one. Combo is non-empty only for kram-gateway's own response (see
+// internal/server/chat.go's writeGatewayError) — any other
+// OpenAI-compatible server's plain error body returns nil so callers keep
+// working against a non-Kram endpoint too. Shared by the buffered and
+// streaming paths so both feed the agent's Gateway Round retry the same
+// typed signal.
+func gatewayErrorFromBody(errResp openai.ErrorResponse) *GatewayError {
+	if errResp.Error.Combo == "" || errResp.Error.Message == "" {
+		return nil
+	}
+	return &GatewayError{
+		Combo: errResp.Error.Combo, Retryable: errResp.Error.Retryable,
+		RetryAfter: time.Duration(errResp.Error.RetryAfterMS) * time.Millisecond,
+		Cause:      errResp.Error.Cause, Attempts: errResp.Error.Attempts,
+		Usage:   errResp.Error.Usage,
+		Message: fmt.Sprintf("gateway error: %s", errResp.Error.Message),
+	}
+}
+
 // Client calls a kram-gateway instance's OpenAI-compatible API.
 type Client struct {
 	baseURL string
@@ -160,19 +181,8 @@ func (c *Client) ChatCompletion(ctx context.Context, model string, messages []op
 	if resp.StatusCode >= 400 {
 		var errResp openai.ErrorResponse
 		if json.NewDecoder(resp.Body).Decode(&errResp) == nil && errResp.Error.Message != "" {
-			// Combo is non-empty only for kram-gateway's own all-failed
-			// response (see internal/server/chat.go's writeGatewayError) —
-			// any other OpenAI-compatible server's plain error body falls
-			// through to the flat error below, so ChatCompletion keeps
-			// working against a non-Kram endpoint too.
-			if errResp.Error.Combo != "" {
-				return Result{}, &GatewayError{
-					Combo: errResp.Error.Combo, Retryable: errResp.Error.Retryable,
-					RetryAfter: time.Duration(errResp.Error.RetryAfterMS) * time.Millisecond,
-					Cause:      errResp.Error.Cause, Attempts: errResp.Error.Attempts,
-					Usage:   errResp.Error.Usage,
-					Message: fmt.Sprintf("gateway error: %s", errResp.Error.Message),
-				}
+			if ge := gatewayErrorFromBody(errResp); ge != nil {
+				return Result{}, ge
 			}
 			return Result{}, fmt.Errorf("gateway error: %s", errResp.Error.Message)
 		}
