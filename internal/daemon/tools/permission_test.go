@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -289,5 +290,32 @@ func TestPolicySubjectExtractsCommandAndPath(t *testing.T) {
 		if got != c.want {
 			t.Errorf("policySubject(%q, %q) = %q, want %q", c.name, c.args, got, c.want)
 		}
+	}
+}
+
+// panickingTool is a fake Tool whose Execute panics — used to prove
+// Registry.Execute's recover turns a tool panic into a normal error
+// string instead of unwinding the agent loop and corrupting session
+// history (see the orphaned-tool-call brick this guards against).
+type panickingTool struct{}
+
+func (t *panickingTool) Name() string            { return "boom" }
+func (t *panickingTool) Description() string     { return "a tool that panics" }
+func (t *panickingTool) Schema() json.RawMessage { return json.RawMessage(`{"type":"object"}`) }
+func (t *panickingTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+	panic("kaboom")
+}
+
+func TestExecuteRecoversFromToolPanic(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	r := NewRegistry(t.TempDir(), nil, nil)
+	r.byName["boom"] = &panickingTool{}
+
+	result, err := r.Execute(context.Background(), "boom", json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatalf("Execute returned err = %v, want nil (panic converted to a tool-error string)", err)
+	}
+	if !strings.Contains(result, "panicked") {
+		t.Errorf("result = %q, want it to report the panic", result)
 	}
 }

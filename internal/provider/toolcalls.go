@@ -100,6 +100,24 @@ func sanitizeToolHistory(messages []openai.ChatMessage) []openai.ChatMessage {
 		}
 	}
 
+	// Which tool_call IDs actually have a matching tool response anywhere
+	// in the history? Anything left unanswered is an orphaned call — a
+	// crash or panic persisted the assistant's tool-call message but never
+	// its results (see agent.runLoop: the assistant message is appended
+	// before the tools run). Every OpenAI-compatible API rejects a
+	// tool_call with no following tool message as a 400
+	// (ClassInvalidRequest, non-retryable), which would brick the session
+	// on every subsequent turn — so we synthesize a placeholder result to
+	// keep the conversation usable.
+	answered := make(map[string]struct{})
+	for _, message := range messages {
+		if message.Role == "tool" {
+			if _, ok := validIDs[message.ToolCallID]; ok {
+				answered[message.ToolCallID] = struct{}{}
+			}
+		}
+	}
+
 	out := make([]openai.ChatMessage, 0, len(messages))
 	for i, message := range messages {
 		switch message.Role {
@@ -108,6 +126,22 @@ func sanitizeToolHistory(messages []openai.ChatMessage) []openai.ChatMessage {
 			if message.Content == "" && len(message.ToolCalls) == 0 && len(message.ProviderItems) == 0 {
 				continue
 			}
+			out = append(out, message)
+			// Repair orphaned calls inline, right after the assistant
+			// message that made them, so ordering stays valid (each
+			// tool_call immediately followed by its result).
+			for _, tc := range message.ToolCalls {
+				if _, ok := answered[tc.ID]; ok {
+					continue
+				}
+				out = append(out, openai.ChatMessage{
+					Role:       "tool",
+					ToolCallID: tc.ID,
+					Content:    "[interrupted: this tool result was not recorded — the session was resumed after an interruption]",
+				})
+				answered[tc.ID] = struct{}{} // guard against a duplicate call id recurring
+			}
+			continue
 		case "tool":
 			if _, ok := validIDs[message.ToolCallID]; !ok {
 				continue

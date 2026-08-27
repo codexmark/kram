@@ -260,7 +260,20 @@ func (r *Registry) Definitions() []openai.Tool {
 // funnels through this one method, which is what makes them all subject to
 // the same permission policy without each tool implementation needing to
 // know policy exists.
-func (r *Registry) Execute(ctx context.Context, name string, args json.RawMessage) (string, error) {
+func (r *Registry) Execute(ctx context.Context, name string, args json.RawMessage) (result string, err error) {
+	// A panic inside a tool — a malformed MCP response, a nil-deref in a
+	// custom tool, whatever — must not unwind past here: it would crash
+	// the daemon's agent loop mid-turn and, worse, leave the just-persisted
+	// assistant tool-call message with no result (see sanitizeToolHistory's
+	// orphaned-call repair for why that's so damaging). Turn a panic into a
+	// normal tool-error string so the loop records a result and carries on.
+	defer func() {
+		if rec := recover(); rec != nil {
+			result = fmt.Sprintf("error: tool %q panicked: %v", name, rec)
+			err = nil
+		}
+	}()
+
 	r.disabledMu.RLock()
 	disabled := r.disabled[name]
 	r.disabledMu.RUnlock()
