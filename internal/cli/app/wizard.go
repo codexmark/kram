@@ -434,7 +434,67 @@ var wizardMinimalSafeTools = map[string]bool{
 	"artifact_read": true, "web_fetch": true,
 }
 
+// wizardSkillsOptions are the starter-pack offer's two choices.
+var wizardSkillsOptions = []wizardToolsPresetOption{
+	{label: "Install starter pack", key: "install", desc: wizardSkillsInstallDesc},
+	{label: "Skip", key: "skip", desc: wizardSkillsSkipDesc},
+}
+
+// renderWizardSkillsOffer is step 6's second half (#135): with the tool
+// preset applied, offer the curated starter skills before System Check.
+func (m Model) renderWizardSkillsOffer() string {
+	var b strings.Builder
+	b.WriteString(styleMeta.Render(wizardSkillsIntro) + "\n\n")
+	labels := make([]string, len(wizardSkillsOptions))
+	descs := make([]string, len(wizardSkillsOptions))
+	for i, opt := range wizardSkillsOptions {
+		labels[i], descs[i] = opt.label, opt.desc
+	}
+	b.WriteString(renderWizardOptions(labels, descs, m.wizardSkillsCursor))
+	if m.wizardSkillsInstalling {
+		b.WriteString("\n" + styleBadgeWarn.Render(wizardSkillsInstalling))
+	} else if m.toolsStatus != "" {
+		b.WriteString("\n" + styleErrBadge.Render(m.toolsStatus))
+	}
+	return m.renderWizardFrame(6, wizardTitleTools, b.String(), wizardKeysChoose, 0)
+}
+
+func (m Model) handleWizardSkillsOfferKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.wizardSkillsInstalling {
+		return m, nil
+	}
+	switch msg.String() {
+	case "up":
+		if m.wizardSkillsCursor > 0 {
+			m.wizardSkillsCursor--
+		}
+	case "down":
+		if m.wizardSkillsCursor < len(wizardSkillsOptions)-1 {
+			m.wizardSkillsCursor++
+		}
+	case "esc":
+		// Skip is always safe — skills install later via skill_install.
+		m.wizardSkillsOffer = false
+		m.phase = phaseWizardSystemCheck
+		m.wizardStep = 7
+	case "enter":
+		if wizardSkillsOptions[m.wizardSkillsCursor].key == "skip" {
+			m.wizardSkillsOffer = false
+			m.phase = phaseWizardSystemCheck
+			m.wizardStep = 7
+			return m, nil
+		}
+		m.wizardSkillsInstalling = true
+		m.toolsStatus = ""
+		return m, installSkillPackCmd()
+	}
+	return m, nil
+}
+
 func (m Model) renderWizardToolsPreset() string {
+	if m.wizardSkillsOffer {
+		return m.renderWizardSkillsOffer()
+	}
 	if m.toolsLoading {
 		return m.renderWizardFrame(6, wizardTitleTools,
 			styleMeta.Render(m.spin.View()+wizardToolsLoading), nil, 0)
@@ -455,6 +515,9 @@ func (m Model) renderWizardToolsPreset() string {
 }
 
 func (m Model) handleWizardToolsPresetKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.wizardSkillsOffer {
+		return m.handleWizardSkillsOfferKey(msg)
+	}
 	if m.toolsLoading {
 		return m, nil
 	}

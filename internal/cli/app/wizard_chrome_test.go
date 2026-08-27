@@ -1,6 +1,7 @@
 package app
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -118,5 +119,46 @@ func TestAccountsWizardFooterMakesContinueExplicit(t *testing.T) {
 	}
 	if !strings.Contains(got, "re-check") || !strings.Contains(got, "back") {
 		t.Fatalf("key bar lost its context actions: %q", got)
+	}
+}
+
+// TestWizardSkillPackOfferFlow (#135): the tools-preset ack opens the
+// offer; installing fires the command and success advances; skip (and
+// esc) advance immediately; a failure stays on the offer with the error.
+func TestWizardSkillPackOfferFlow(t *testing.T) {
+	m := testModel(t)
+	m.phase = phaseWizardToolsPreset
+	m.wizardStep = 6
+	m.wizardToolSettingsPending = true
+	next, _ := m.Update(toolSettingsUpdatedMsg{})
+	m = next.(Model)
+	if !m.wizardSkillsOffer {
+		t.Fatal("ack must open the skill-pack offer")
+	}
+	if got := m.renderWizardToolsPreset(); !strings.Contains(got, "Install starter pack") || !strings.Contains(got, "kram-skills") {
+		t.Fatalf("offer render = %q", got)
+	}
+
+	// Install path: enter on the first option fires the command.
+	nextM, cmd := modelResult(m.handleWizardToolsPresetKey(keyMsg("enter")))
+	if !nextM.wizardSkillsInstalling || cmd == nil {
+		t.Fatalf("install: installing=%v cmd=%v", nextM.wizardSkillsInstalling, cmd != nil)
+	}
+	// Failure keeps the user on the offer with the error shown.
+	failed, _ := modelResult(nextM.Update(skillPackInstalledMsg{err: errors.New("boom")}))
+	if !failed.wizardSkillsOffer || failed.wizardSkillsInstalling || !strings.Contains(failed.renderWizardToolsPreset(), "boom") {
+		t.Fatalf("failure state: offer=%v installing=%v", failed.wizardSkillsOffer, failed.wizardSkillsInstalling)
+	}
+	// Success advances to System Check.
+	done, _ := modelResult(nextM.Update(skillPackInstalledMsg{names: []string{"a"}}))
+	if done.wizardSkillsOffer || done.phase != phaseWizardSystemCheck || done.wizardStep != 7 {
+		t.Fatalf("success state: %+v step %d", done.phase, done.wizardStep)
+	}
+
+	// Skip path.
+	m.wizardSkillsCursor = 1
+	skipped, cmd := modelResult(m.handleWizardToolsPresetKey(keyMsg("enter")))
+	if skipped.wizardSkillsOffer || skipped.phase != phaseWizardSystemCheck || cmd != nil {
+		t.Fatalf("skip state: offer=%v phase=%v", skipped.wizardSkillsOffer, skipped.phase)
 	}
 }

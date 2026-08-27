@@ -52,6 +52,13 @@ const (
 	wizardToolsApplying        = "applying to the current daemon…"
 	wizardErrToolsStorage      = "tools storage unavailable"
 
+	// Step 6b: starter skill pack offer (#135)
+	wizardSkillsIntro       = "Skills are installable playbooks (debugging, reviews, TDD...) the agent checks before specialized work."
+	wizardSkillsInstallDesc = "14 curated playbooks from github.com/codexmark/kram-skills"
+	wizardSkillsSkipDesc    = "start bare — install anytime by asking kram to use skill_install"
+	wizardSkillsInstalling  = "cloning and installing…"
+	wizardSkillsErrPrefix   = "install failed (skip is safe): "
+
 	// Step 7: System Check
 	wizardCheckOptional     = "optional"
 	wizardCheckProvidersFmt = "%d configured"

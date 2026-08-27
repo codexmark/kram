@@ -369,8 +369,12 @@ type Model struct {
 	// successful Stage-1 wizard run.
 	wizardToolsPresetCursor   int
 	wizardToolSettingsPending bool
-	wizardCompletionErr       error
-	wizardChosenToolsPreset   string // "recommended", "minimal", "custom"
+	// Starter skill pack offer (#135) — a sub-stage of wizard step 6.
+	wizardSkillsOffer       bool
+	wizardSkillsCursor      int
+	wizardSkillsInstalling  bool
+	wizardCompletionErr     error
+	wizardChosenToolsPreset string // "recommended", "minimal", "custom"
 	// wizardWelcomeSession is set right before creating the wizard's
 	// final session, so the very first (empty) transcript render can show
 	// a one-time, client-side-only welcome banner — never persisted as a
@@ -822,9 +826,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.toolsStatus = toolsAppliedDaemon
 		if m.wizardToolSettingsPending {
 			m.wizardToolSettingsPending = false
-			m.phase = phaseWizardSystemCheck
-			m.wizardStep = 7
+			// Before System Check, offer the starter skill pack (#135) —
+			// still step 6: skills are this step's other half.
+			m.wizardSkillsOffer = true
+			m.toolsStatus = ""
 		}
+		return m, nil
+
+	case skillPackInstalledMsg:
+		m.wizardSkillsInstalling = false
+		if msg.err != nil {
+			// Never block onboarding on a network/git hiccup: report and
+			// leave the user on the offer so they can retry or skip.
+			m.toolsStatus = wizardSkillsErrPrefix + msg.err.Error()
+			return m, nil
+		}
+		m.wizardSkillsOffer = false
+		m.phase = phaseWizardSystemCheck
+		m.wizardStep = 7
 		return m, nil
 
 	case answerSentMsg:
