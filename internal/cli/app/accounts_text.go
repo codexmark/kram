@@ -36,19 +36,26 @@ const (
 )
 
 const (
-	// Dynamic footer-hint fragments (assembled in renderAccounts). A leading
-	// " · " separator is part of the fragment where present.
-	accountsHintPasteKey       = "enter pastes api key"
-	accountsHintOAuth          = "o connects via oauth"
-	accountsHintRemoveSavedKey = " · d removes saved key"
-	accountsHintSetUpdateKey   = "enter sets/updates the key"
-	accountsHintRemove         = " · d removes"
-	accountsHintAddCustom      = "enter adds custom provider"
-	accountsHintRecheck        = " · r re-checks"
-	accountsHintContinue       = " · n continues"
-	accountsHintContinueAnyway = " · c continues anyway"
-	accountsHintEscCancel      = " · esc cancels"
-	accountsHintEscBack        = " · esc back"
+	// Footer key-bar actions (assembled in renderAccounts as wizardKey
+	// pairs and rendered via renderWizardKeybar — accent key, muted label).
+	accountsActionPasteKey    = "paste API key"
+	accountsActionOAuth       = "browser login"
+	accountsActionRemoveSaved = "remove saved key"
+	accountsActionSetUpdate   = "set/update key"
+	accountsActionRemove      = "remove"
+	accountsActionAddCustom   = "add custom provider"
+	accountsActionRecheck     = "re-check"
+	accountsActionEscCancel   = "cancel setup"
+	accountsActionEscBack     = "back"
+
+	// The wizard's explicit continue line, rendered above the key bar so
+	// the way forward is a visible call to action rather than a fragment
+	// buried mid-sentence ("· n continues").
+	accountsContinueKey         = "n"
+	accountsContinueLabel       = "continue to Routing →"
+	accountsContinueAnywayKey   = "c"
+	accountsContinueAnywayLabel = "continue anyway — provider not responding"
+	accountsContinueLockedNote  = "connect a provider to unlock continue"
 )
 
 const (

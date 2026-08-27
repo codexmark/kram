@@ -959,11 +959,11 @@ func TestAccountsRenderingAndKeyBoundaryMatrix(t *testing.T) {
 		cp.EnvVar:                          {Status: providerping.StatusDown},
 	}
 	m.wizardProviderOverrideVisible = true
-	if got := m.renderAccounts(); !strings.Contains(got, "c continues") {
+	if got := m.renderAccounts(); !strings.Contains(got, "continue anyway") {
 		t.Fatalf("override hints = %q", got)
 	}
 	m.wizardWorkspaceLocked = true
-	if got := m.renderAccounts(); !strings.Contains(got, "esc cancels") {
+	if got := m.renderAccounts(); !strings.Contains(got, "cancel setup") {
 		t.Fatalf("locked wizard hints = %q", got)
 	}
 
