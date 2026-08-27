@@ -807,9 +807,9 @@ func (s *Service) runLoop(ctx context.Context, sessionID, model string, depth in
 		// see enforceTurnOutputBudget's doc comment.
 		turnOutputChars := 0
 		turnOutputBudget := policy.ToolOutputBudgetChars(compaction.EstimateTokens(effective), maxTurnToolOutputChars)
-		for _, tc := range callResult.ToolCalls {
-			emit(onEvent, Event{Kind: EventToolStart, ToolName: tc.Function.Name, ToolArgs: tc.Function.Arguments})
-			activity, toolMsg := s.runTool(ctx, tc, onEvent)
+		outcomes := s.runToolBatch(ctx, callResult.ToolCalls, onEvent)
+		for tcIdx, tc := range callResult.ToolCalls {
+			activity, toolMsg := outcomes[tcIdx].activity, outcomes[tcIdx].msg
 			repeatedFailure := stagnation.observe(activity)
 			if repeatedFailure >= 3 {
 				guard := fmt.Sprintf(
@@ -971,29 +971,45 @@ func (s *Service) streamCall(ctx context.Context, model string, messages []opena
 // cadence the model-call paths use — otherwise the CLI's stall detector
 // reads a healthy 30s `go test` exactly like a hung connection.
 func (s *Service) runTool(ctx context.Context, tc openai.ToolCall, onEvent EventFunc) (ToolActivity, store.Message) {
-	type outcome struct {
-		text string
-		err  error
-	}
-	done := make(chan outcome, 1)
-	go func() {
-		text, err := s.tools.Execute(ctx, tc.Function.Name, []byte(tc.Function.Arguments))
-		done <- outcome{text, err}
-	}()
+	var out toolOutcome
+	s.heartbeatWhile(onEvent, func() {
+		out = s.execTool(ctx, tc)
+	})
+	return out.activity, out.msg
+}
 
+// heartbeatWhile runs fn on its own goroutine and emits EventHeartbeat
+// from this one until it returns — the single emitter, so concurrent
+// work under fn never races on onEvent.
+func (s *Service) heartbeatWhile(onEvent EventFunc, fn func()) {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		fn()
+	}()
 	ticker := time.NewTicker(s.heartbeatInterval)
 	defer ticker.Stop()
-	var resultText string
-	var err error
-	for waiting := true; waiting; {
+	for {
 		select {
-		case out := <-done:
-			resultText, err = out.text, out.err
-			waiting = false
+		case <-done:
+			return
 		case <-ticker.C:
 			emit(onEvent, Event{Kind: EventHeartbeat})
 		}
 	}
+}
+
+// toolOutcome pairs what one executed tool call produced.
+type toolOutcome struct {
+	activity ToolActivity
+	msg      store.Message
+}
+
+// execTool is runTool's synchronous core: execute one call, shape the
+// activity and the persistable message. Emits nothing — safe to run
+// concurrently (see runToolBatch).
+func (s *Service) execTool(ctx context.Context, tc openai.ToolCall) toolOutcome {
+	resultText, err := s.tools.Execute(ctx, tc.Function.Name, []byte(tc.Function.Arguments))
 	ok := err == nil
 	if err != nil {
 		resultText = fmt.Sprintf("error: %v", err)
@@ -1009,7 +1025,60 @@ func (s *Service) runTool(ctx context.Context, tc openai.ToolCall, onEvent Event
 		ProcessID: tools.StartedBackgroundProcessID(resultText),
 	}
 	toolMsg := store.Message{Role: "tool", Content: resultText, ToolCallID: tc.ID, Name: tc.Function.Name}
-	return activity, toolMsg
+	return toolOutcome{activity: activity, msg: toolMsg}
+}
+
+// maxParallelReadOnlyTools bounds how many read-only calls of one batch
+// run at once — enough to collapse the common "read three files, grep
+// two patterns" round-trip, small enough to stay gentle on disk and CPU.
+const maxParallelReadOnlyTools = 4
+
+// runToolBatch executes one model turn's tool calls, preserving request
+// order in the returned outcomes. Contiguous stretches of read-only
+// calls (tools.IsReadOnly) run concurrently under one central heartbeat;
+// anything else runs strictly sequentially, ordered relative to
+// everything — a write between two reads keeps its exact position.
+// EventToolStart is emitted in request order (a parallel group's starts
+// all fire before the group runs, which is also the honest display: they
+// really are in flight together).
+func (s *Service) runToolBatch(ctx context.Context, calls []openai.ToolCall, onEvent EventFunc) []toolOutcome {
+	outcomes := make([]toolOutcome, len(calls))
+	i := 0
+	for i < len(calls) {
+		if !tools.IsReadOnly(calls[i].Function.Name) {
+			tc := calls[i]
+			emit(onEvent, Event{Kind: EventToolStart, ToolName: tc.Function.Name, ToolArgs: tc.Function.Arguments})
+			activity, msg := s.runTool(ctx, tc, onEvent)
+			outcomes[i] = toolOutcome{activity: activity, msg: msg}
+			i++
+			continue
+		}
+		j := i
+		for j < len(calls) && tools.IsReadOnly(calls[j].Function.Name) {
+			j++
+		}
+		group := calls[i:j]
+		for _, tc := range group {
+			emit(onEvent, Event{Kind: EventToolStart, ToolName: tc.Function.Name, ToolArgs: tc.Function.Arguments})
+		}
+		groupOut := outcomes[i:j]
+		s.heartbeatWhile(onEvent, func() {
+			sem := make(chan struct{}, maxParallelReadOnlyTools)
+			var wg sync.WaitGroup
+			for idx := range group {
+				wg.Add(1)
+				sem <- struct{}{}
+				go func(idx int) {
+					defer wg.Done()
+					defer func() { <-sem }()
+					groupOut[idx] = s.execTool(ctx, group[idx])
+				}(idx)
+			}
+			wg.Wait()
+		})
+		i = j
+	}
+	return outcomes
 }
 
 // recentMemoryLimit bounds the automatic injection — small and cheap on

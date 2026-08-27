@@ -5704,3 +5704,23 @@ limit hit — it asked to wait 30s and 3 retries weren't enough; wait a
 moment and resend" / "provider rejected the credential — reconnect the
 account" — with the typed original still wrapped for errors.As callers.
 Everything else passes through untouched.
+
+---
+
+## Read-only tool calls of one batch run in parallel
+
+The loop ran every tool call strictly sequentially — reading three files
+was three waits. Contiguous stretches of read-only calls in one batch now
+run concurrently (bounded at 4), under one central heartbeat emitter so
+concurrent workers never race on the event sink; anything not on the
+explicit allowlist (tools.IsReadOnly) runs exactly where it always did —
+a write between two reads keeps its position, which the read-after-write
+test pins down. Outcomes land at their call's original index, so
+stagnation detection, the output budget, persisted messages and the
+transcript stay byte-for-byte deterministic. Deliberate exclusions from
+the allowlist: everything that writes or executes, ask_question (waits on
+a human), delegate_task, lsp_* (the language-server manager's concurrency
+is unproven — revisit deliberately), and all mcp__* tools (a remote
+server's semantics aren't Kram's to vouch for). runTool's heartbeat logic
+was extracted into heartbeatWhile + execTool so the parallel group and
+the single-call path share one implementation.
