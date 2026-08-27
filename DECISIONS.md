@@ -5631,3 +5631,32 @@ deferring to the provider layer's byte-level watchdog as the real liveness
 authority once fallback is off the table. The stale comment claiming the
 transport backstop was a whole-request http.Client.Timeout — replaced by
 the phase watchdog — was updated in passing.
+
+---
+
+## Mid-stream failures retry and resume instead of failing the turn
+
+A committed stream that died mid-answer failed the whole turn and threw the
+partial away — the raw "stream ended in error" landing in the transcript
+while Codex/Claude Code users get a transparent retry. Root cause was a
+typing gap, not a missing mechanism: callModelWithRetry's Gateway Rounds
+(backoff + jitter + Retry-After floor) already existed, but only engaged on
+*GatewayError, and the streaming path never produced one — neither
+pre-commit (the ≥400 body was flattened to a string, silently disabling
+retries for every streaming session) nor post-commit (the terminal
+finish_reason:"error" chunk became a plain fmt.Errorf even though it carries
+the full attempt trail).
+
+Both paths now produce the same typed error the buffered path always did
+(shared gatewayErrorFromBody; the terminal chunk derives Retryable from its
+attempts' classes). And the retry learned to *resume*: streamCall returns
+whatever partial answer already streamed alongside the error;
+callModelWithRetry accumulates it and retries with the partial re-sent as
+the assistant's own message plus a continuation directive, re-attaching it
+in front of the continuation on success — so the text the user already
+watched stream is exactly what the persisted answer begins with, nothing is
+regenerated or displayed twice, and the salvage messages themselves are
+never persisted. Calibration is skipped on salvaged rounds (the
+continuation prompt is bigger than what sentEstimate measured). Transport
+errors where the gateway itself is unreachable stay non-retryable, as
+before.

@@ -939,7 +939,12 @@ func (s *Service) streamCall(ctx context.Context, model string, messages []opena
 				return result, nil
 			}
 			if d.Err != nil {
-				return gatewayclient.Result{}, d.Err
+				// Return whatever partial answer already streamed alongside
+				// the error — callModelWithRetry uses it to *resume* the
+				// answer on the next Gateway Round instead of regenerating
+				// (and re-displaying) everything from zero. Callers that
+				// don't salvage just see the error as before.
+				return gatewayclient.Result{Content: content.String()}, d.Err
 			}
 			if d.Content != "" {
 				content.WriteString(d.Content)

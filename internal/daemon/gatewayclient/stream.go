@@ -96,6 +96,13 @@ func (c *Client) ChatCompletionStream(ctx context.Context, model string, message
 		defer resp.Body.Close()
 		var errResp openai.ErrorResponse
 		if json.NewDecoder(resp.Body).Decode(&errResp) == nil && errResp.Error.Message != "" {
+			// Typed like the buffered path: an all-candidates-failed round
+			// must reach the agent's Gateway Round retry as a GatewayError
+			// (Retryable, RetryAfter) — a flat string here silently disabled
+			// retries for every streaming session.
+			if ge := gatewayErrorFromBody(errResp); ge != nil {
+				return nil, ge
+			}
 			return nil, fmt.Errorf("gateway error: %s", errResp.Error.Message)
 		}
 		return nil, fmt.Errorf("gateway returned %s", resp.Status)
@@ -156,7 +163,27 @@ func (c *Client) ChatCompletionStream(ctx context.Context, model string, message
 					delta.Usage = *chunk.Usage
 				}
 				if *choice.FinishReason == "error" {
-					delta.Err = fmt.Errorf("%s: stream ended in error", chunk.Provider)
+					// A committed stream that died mid-answer. The terminal
+					// chunk carries the real attempt trail, so build the same
+					// typed GatewayError the pre-commit paths produce — this
+					// is what lets the agent's retry rounds resume a dropped
+					// answer instead of failing the whole turn.
+					retryable := false
+					var cause openai.FailureClass
+					for _, a := range chunk.Attempts {
+						if a.Class.Retryable() {
+							retryable = true
+						}
+						cause = a.Class
+					}
+					ge := &GatewayError{
+						Retryable: retryable, Cause: cause, Attempts: chunk.Attempts,
+						Message: fmt.Sprintf("%s: stream ended in error", chunk.Provider),
+					}
+					if chunk.Usage != nil {
+						ge.Usage = *chunk.Usage
+					}
+					delta.Err = ge
 				}
 				select {
 				case out <- delta:
