@@ -5752,3 +5752,29 @@ two jobs at once: the rewind itself becomes undoable, and files the turn
 Restore (deliberately — see its doc) would leave them behind as orphans.
 The snapshot store's semantics are untouched; the layering is the
 caller's.
+
+---
+
+## A failed compaction summary no longer kills the turn
+
+Investigating #114 corrected its own premise: Kram's compaction was never
+pure structural pruning — contextpolicy already escalates from cheap
+pruning to a model-written summary (compaction.Compact, with fold-forward
+of the previous summary). The real gap was the failure path: the
+summarizer is itself a model call, the model being unreachable is
+precisely when compaction tends to be needed, and a summary failure
+returned an error for the whole turn — a transient summarizer hiccup
+became a dead session.
+
+Compact failure now falls back to compaction.EmergencyPrune: keep the
+newest whole user-turns that fit the budget (plus the leading summary
+marker), cutting only at user-message boundaries so assistant tool_calls
+never separate from their tool results — a split pair is a protocol error
+several providers hard-reject. Never returns less than the newest turn
+even over budget (an oversized last turn at least lets the provider say
+so; sending nothing guarantees failure). Nothing is persisted: only this
+call's context shrinks, the session keeps its full history, the user sees
+"summary model unavailable — oldest turns left out of this call's
+context", and the next healthy compaction summarizes as usual. If
+emergency pruning can't drop anything (single huge turn), the original
+error still surfaces — there was nothing to fall back to.

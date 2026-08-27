@@ -125,6 +125,58 @@ func PruneForModel(effective []store.Message) []store.Message {
 	return out
 }
 
+// EmergencyPrune is the fallback for when Compact's own summary call
+// fails — the model being unreachable is precisely when compaction tends
+// to be needed most, and failing the whole turn over it turned a
+// transient summarizer error into a dead session. It keeps the newest
+// whole user-turns that fit within maxTokens (plus the leading
+// compaction-summary marker when present), dropping older turns
+// entirely. Cutting only at user-message boundaries keeps every
+// assistant tool_calls message next to its tool results — a split pair
+// is a protocol error several providers hard-reject. Never returns fewer
+// messages than the most recent user turn, even if that alone still
+// exceeds the budget: sending an oversized last turn at least lets the
+// provider say so, where sending nothing guarantees failure.
+func EmergencyPrune(effective []store.Message, maxTokens int) []store.Message {
+	if len(effective) == 0 {
+		return effective
+	}
+	var lead []store.Message
+	body := effective
+	if effective[0].Role == "system" && effective[0].Name == CompactionMarkerName {
+		lead = effective[:1]
+		body = effective[1:]
+	}
+
+	// User-message indices, oldest first — each is a possible cut point.
+	var cuts []int
+	for i, m := range body {
+		if m.Role == "user" {
+			cuts = append(cuts, i)
+		}
+	}
+	if len(cuts) == 0 {
+		return effective
+	}
+
+	budget := maxTokens - EstimateTokens(lead)
+	// Walk cut points newest-first and take the oldest one whose suffix
+	// still fits.
+	chosen := cuts[len(cuts)-1] // fallback: newest user turn, kept regardless
+	for i := len(cuts) - 1; i >= 0; i-- {
+		if EstimateTokens(body[cuts[i]:]) <= budget {
+			chosen = cuts[i]
+		} else {
+			break
+		}
+	}
+
+	out := make([]store.Message, 0, len(lead)+len(body)-chosen)
+	out = append(out, lead...)
+	out = append(out, body[chosen:]...)
+	return out
+}
+
 const summarySystemPrompt = `You are summarizing a coding-agent conversation so it can continue with less context.
 Write a concise summary covering: Goal, Constraints, Progress so far, Key decisions, and Next steps.
 Be factual and specific (file paths, function names, decisions made) — this replaces the raw history, so anything you omit is lost.
