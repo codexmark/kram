@@ -91,9 +91,9 @@ func renderFilesTouched(paths []string) string {
 	for i, p := range shown {
 		styled[i] = styleBadgeAccent.Render(p)
 	}
-	row := styleHint.Render("arquivos: ") + strings.Join(styled, styleHint.Render(", "))
+	row := styleHint.Render(filesTouchedLabel) + strings.Join(styled, styleHint.Render(", "))
 	if overflow > 0 {
-		row += styleHint.Render(fmt.Sprintf(" +%d mais", overflow))
+		row += styleHint.Render(fmt.Sprintf(filesTouchedOverflowFmt, overflow))
 	}
 	return row
 }

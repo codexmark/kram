@@ -14,10 +14,10 @@ func (m Model) lastAssistantTokens() string {
 		label += fmt.Sprintf(" · cache %d%%", usage.CachedPromptTokens*100/usage.PromptTokens)
 	}
 	if usage.ReasoningTokens > 0 {
-		label += fmt.Sprintf(" · raciocínio %d", usage.ReasoningTokens)
+		label += fmt.Sprintf(footerReasoningFmt, usage.ReasoningTokens)
 	}
 	if usage.EstimatedCostMicros > 0 {
-		label += fmt.Sprintf(" · ≈US$ %.4f", float64(usage.EstimatedCostMicros)/1_000_000)
+		label += fmt.Sprintf(footerCostFmt, float64(usage.EstimatedCostMicros)/1_000_000)
 	}
 	return label
 }

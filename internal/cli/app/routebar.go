@@ -39,7 +39,7 @@ func (m Model) renderRouteBar() string {
 		trail = m.renderRouteAttempts(m.routeCall.Attempts)
 	}
 
-	strategyBlock := styleHint.Render("estratégia:") + " " + styleBadgeAccent.Render(strings.ToUpper(strategy)) + styleHint.Render(" ▾")
+	strategyBlock := styleHint.Render(routeStrategyPrefix) + " " + styleBadgeAccent.Render(strings.ToUpper(strategy)) + styleHint.Render(" ▾")
 	left := joinNonEmpty("   ", strategyBlock, trail)
 
 	right := ""
@@ -69,7 +69,7 @@ func (m Model) routeBarStrategyWidth() int {
 	if strategy == "" {
 		return 0
 	}
-	block := styleHint.Render("estratégia:") + " " + styleBadgeAccent.Render(strings.ToUpper(strategy)) + styleHint.Render(" ▾")
+	block := styleHint.Render(routeStrategyPrefix) + " " + styleBadgeAccent.Render(strings.ToUpper(strategy)) + styleHint.Render(" ▾")
 	return lipgloss.Width(block)
 }
 
@@ -104,9 +104,9 @@ func (m Model) renderRoutingActivity() string {
 
 	switch {
 	case m.width >= routeBarWideMin && candidates > 0:
-		return rail + " " + styleMeta.Render(fmt.Sprintf("avaliando %d upstreams", candidates))
+		return rail + " " + styleMeta.Render(fmt.Sprintf(routeEvaluatingFmt, candidates))
 	case m.width >= routeBarMediumMin && candidates > 0:
-		return rail + " " + styleMeta.Render(fmt.Sprintf("%d rotas", candidates))
+		return rail + " " + styleMeta.Render(fmt.Sprintf(routeRoutesFmt, candidates))
 	default:
 		return rail
 	}
@@ -185,9 +185,9 @@ func renderRouteAttemptsMedium(attempts []openai.AttemptInfo) string {
 		parts = append(parts, outcomeStyle(a.Outcome).Render(a.Provider+" "+outcomeGlyph(a.Outcome)))
 	}
 	trail := strings.Join(parts, styleHint.Render(" ── "))
-	word := "tentativa"
+	word := routeAttemptSingular
 	if len(attempts) != 1 {
-		word = "tentativas"
+		word = routeAttemptsPlural
 	}
 	return trail + "   " + styleHint.Render(fmt.Sprintf("%d %s", len(attempts), word))
 }

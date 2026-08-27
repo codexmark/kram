@@ -73,8 +73,8 @@ func TestRenderToolResultPreviewTruncatesLongOutputWithLineCount(t *testing.T) {
 	}
 	act := daemonclient.ToolActivity{Name: "bash", Result: strings.Join(lines, "\n")}
 	got := m.renderToolResultPreview(act)
-	if !strings.Contains(got, "+3 linhas") {
-		t.Errorf("preview = %q, want a \"+3 linhas\" overflow suffix", got)
+	if !strings.Contains(got, "+3 lines") {
+		t.Errorf("preview = %q, want a \"+3 lines\" overflow suffix", got)
 	}
 	if strings.Count(got, "output line") != toolResultPreviewMaxLines {
 		t.Errorf("preview shown lines = %d, want exactly %d", strings.Count(got, "output line"), toolResultPreviewMaxLines)

@@ -18,13 +18,13 @@ func (m Model) renderStrategyPanel() string {
 	var lines []string
 
 	if m.strategyErr != nil {
-		lines = append(lines, styleErrBadge.Render("não consegui falar com o gateway: "+m.strategyErr.Error()))
+		lines = append(lines, styleErrBadge.Render(strategyGatewayErrPrefix+m.strategyErr.Error()))
 		return padLines(lines, h, m.width)
 	}
 
 	combo := m.currentCombo()
 	if combo == nil {
-		lines = append(lines, styleMeta.Render("nenhum combo configurado no gateway"))
+		lines = append(lines, styleMeta.Render(strategyNoCombo))
 		return padLines(lines, h, m.width)
 	}
 
@@ -33,7 +33,7 @@ func (m Model) renderStrategyPanel() string {
 		statsByID[p.ID] = p
 	}
 
-	lines = append(lines, styleMeta.Render(fmt.Sprintf("combo %s · estratégia %s", combo.ID, combo.Strategy)))
+	lines = append(lines, styleMeta.Render(fmt.Sprintf(strategyComboLine, combo.ID, combo.Strategy)))
 	lines = append(lines, "")
 
 	focus := m.strategyFocus
@@ -56,7 +56,7 @@ func (m Model) renderStrategyPanel() string {
 			lines = append(lines, "")
 			lines = append(lines, otherScores(m.routeCall.Ranking, info.Provider)...)
 			lines = append(lines, "")
-			lines = append(lines, styleHint.Render("↑↓ trocar candidato"))
+			lines = append(lines, styleHint.Render(strategySwitchCandidate))
 			return padLines(lines, h, m.width)
 		}
 	}
@@ -148,7 +148,7 @@ func renderScoreBreakdown(info openai.RankedProviderInfo) []string {
 
 func badgeForProvider(p statusclient.Provider, id string) string {
 	if p.ID == "" {
-		return styleBadgeIdle.Render("sem dados ainda")
+		return styleBadgeIdle.Render(providerNoData)
 	}
 	state := "closed"
 	style := styleBadgeOK
@@ -156,7 +156,7 @@ func badgeForProvider(p statusclient.Provider, id string) string {
 		state = "open"
 		style = styleBadgeBad
 	} else if p.Stats.Requests > 0 && p.Stats.SuccessRate < 1 {
-		state = "instável"
+		state = providerUnstable
 		style = styleBadgeWarn
 	}
 
@@ -165,7 +165,7 @@ func badgeForProvider(p statusclient.Provider, id string) string {
 		parts = append(parts, styleMeta.Render(fmt.Sprintf("%dms", p.Stats.AvgLatencyMS)))
 	}
 	if p.Stats.Requests > 0 {
-		parts = append(parts, styleMeta.Render(fmt.Sprintf("%.0f%% sucesso", p.Stats.SuccessRate*100)))
+		parts = append(parts, styleMeta.Render(fmt.Sprintf(providerSuccess, p.Stats.SuccessRate*100)))
 	}
 	return strings.Join(parts, " · ")
 }
@@ -177,20 +177,20 @@ func explainProvider(combo *statusclient.Combo, statsByID map[string]statusclien
 	pid := combo.Providers[focus]
 	p := statsByID[pid]
 
-	position := "entra na rotação"
+	position := explainEntersRotation
 	if focus == 0 {
-		position = "primeiro da ordem de fallback"
+		position = explainFirstFallback
 	} else {
-		position = fmt.Sprintf("assume se os %d anterior(es) falharem ou estiverem com circuito aberto", focus)
+		position = fmt.Sprintf(explainTakesOver, focus)
 	}
 
 	if p.BreakerOpen {
-		return fmt.Sprintf("▸ %s: circuito aberto agora — está sendo pulado até o próximo teste automático. %s.", pid, position)
+		return fmt.Sprintf(explainCircuitOpen, pid, position)
 	}
 	if p.Stats.Requests == 0 {
-		return fmt.Sprintf("▸ %s: %s. Ainda sem requisições nesta sessão do gateway.", pid, position)
+		return fmt.Sprintf(explainNoRequests, pid, position)
 	}
-	return fmt.Sprintf("▸ %s: %s. %d requisições, %.0f%% de sucesso, %dms de latência média.",
+	return fmt.Sprintf(explainStats,
 		pid, position, p.Stats.Requests, p.Stats.SuccessRate*100, p.Stats.AvgLatencyMS)
 }
 

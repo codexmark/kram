@@ -44,19 +44,19 @@ func (m *Model) toolToggleItems() []toolToggleItem {
 
 func (m Model) renderToolsToggle() string {
 	var b strings.Builder
-	b.WriteString(styleBody.Render("ferramentas e skills") + "\n\n")
+	b.WriteString(styleBody.Render(toolsToggleTitle) + "\n\n")
 
 	if m.toolsErr != nil {
-		b.WriteString(styleErrBadge.Render("erro: "+m.toolsErr.Error()) + "\n\n")
+		b.WriteString(styleErrBadge.Render(toolsErrPrefix+m.toolsErr.Error()) + "\n\n")
 	}
 	if m.toolsLoading {
-		b.WriteString(styleMeta.Render(m.spin.View()+" carregando…") + "\n\n")
+		b.WriteString(styleMeta.Render(m.spin.View()+toolsLoading) + "\n\n")
 		return b.String()
 	}
 
 	items := m.toolToggleItems()
 	if len(items) == 0 {
-		b.WriteString(styleHint.Render("(nada registrado)") + "\n")
+		b.WriteString(styleHint.Render(toolsEmpty) + "\n")
 	}
 
 	kind := ""
@@ -90,7 +90,7 @@ func (m Model) renderToolsToggle() string {
 	if m.toolsStatus != "" {
 		b.WriteString(styleHint.Render(m.toolsStatus) + "\n\n")
 	}
-	b.WriteString(styleHint.Render("↑↓ escolher · espaço/enter liga/desliga · a liga tudo · d desliga tudo · esc volta"))
+	b.WriteString(styleHint.Render(toolsFooterHint))
 	return b.String()
 }
 
@@ -101,7 +101,7 @@ func (m Model) handleToolsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			// Reconcile once more before leaving Custom. This prevents a quick
 			// final toggle+Esc (or a transient earlier sync failure) from letting
 			// the first session start with startup-time daemon settings.
-			m.toolsStatus = "aplicando ao daemon atual…"
+			m.toolsStatus = toolsApplyingDaemon
 			m.wizardToolSettingsPending = true
 			return m, syncToolSettingsCmd(m.daemon, m.toolSettings)
 		}
@@ -124,11 +124,11 @@ func (m Model) handleToolsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		it := items[m.toolsCursor]
 		nowDisabled := !m.toolSettings.IsDisabled(it.name)
 		if err := m.toolSettings.SetDisabled(it.name, nowDisabled); err != nil {
-			m.toolsStatus = "erro ao salvar: " + err.Error()
+			m.toolsStatus = toolsSaveErrPrefix + err.Error()
 		} else if nowDisabled {
-			m.toolsStatus = it.name + ": desligado."
+			m.toolsStatus = it.name + toolsItemDisabled
 		} else {
-			m.toolsStatus = it.name + ": ligado."
+			m.toolsStatus = it.name + toolsItemEnabled
 		}
 		return m, syncToolSettingsCmd(m.daemon, m.toolSettings)
 	case "a", "d":
@@ -138,11 +138,11 @@ func (m Model) handleToolsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		names := toolToggleNames(m.toolToggleItems())
 		disable := msg.String() == "d"
 		if err := m.toolSettings.SetAllDisabled(names, disable); err != nil {
-			m.toolsStatus = "erro ao salvar: " + err.Error()
+			m.toolsStatus = toolsSaveErrPrefix + err.Error()
 		} else if disable {
-			m.toolsStatus = fmt.Sprintf("%d desligados.", len(names))
+			m.toolsStatus = fmt.Sprintf(toolsBulkDisabled, len(names))
 		} else {
-			m.toolsStatus = fmt.Sprintf("%d ligados.", len(names))
+			m.toolsStatus = fmt.Sprintf(toolsBulkEnabled, len(names))
 		}
 		return m, syncToolSettingsCmd(m.daemon, m.toolSettings)
 	}

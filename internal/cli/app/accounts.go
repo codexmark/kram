@@ -140,26 +140,26 @@ func (m Model) renderAccounts() string {
 	var b strings.Builder
 	if m.wizardMode {
 		b.WriteString(renderWizardHeader(3, "Providers") + "\n\n")
-		b.WriteString(styleHint.Render("configure pelo menos um provedor para usar o gateway e os combos.") + "\n")
-		b.WriteString(styleHint.Render("mais rápido: escolha OpenRouter e pressione \"o\" — autoriza no navegador, sem cartão, grátis.") + "\n\n")
+		b.WriteString(styleHint.Render(accountsWizardIntro) + "\n")
+		b.WriteString(styleHint.Render(accountsWizardFastest) + "\n\n")
 	} else {
-		b.WriteString(styleBody.Render("contas") + "\n\n")
+		b.WriteString(styleBody.Render(accountsTitle) + "\n\n")
 	}
 
 	staticCount, _, addRow, _ := m.accountsRowCounts()
 	rows := m.accountRows()
 	for i, a := range providercatalog.Accounts {
-		status := styleHint.Render("— não configurado")
+		status := styleHint.Render(accountsRowNotConfigured)
 		switch {
 		case rows[i].envSet:
-			status = styleBadgeOK.Render("✓ definido (ambiente)")
+			status = styleBadgeOK.Render(accountsBadgeEnv)
 		case rows[i].storedSet:
-			status = styleBadgeOK.Render("✓ definido (salvo)")
+			status = styleBadgeOK.Render(accountsBadgeSaved)
 		}
 		dot := pingDot(m, a.EnvVar, rows[i].envSet || rows[i].storedSet)
 		line := fmt.Sprintf("%s %-30s %s", dot, a.Label, status)
 		if a.SupportsOAuth {
-			line += "  " + styleHint.Render("(o: autorizar no navegador)")
+			line += "  " + styleHint.Render(accountsOAuthAffordance)
 		}
 		if detail := pingDetail(m, a.EnvVar); detail != "" {
 			line += "  " + styleHint.Render(detail)
@@ -173,15 +173,15 @@ func (m Model) renderAccounts() string {
 
 	for i, cp := range m.customProviders {
 		hasKey := m.credStore != nil && m.credStore.Get(cp.EnvVar) != ""
-		status := styleBadgeOK.Render("✓ registrado (sem key)")
+		status := styleBadgeOK.Render(accountsBadgeRegisteredNoKey)
 		if hasKey {
-			status = styleBadgeOK.Render("✓ definido (salvo)")
+			status = styleBadgeOK.Render(accountsBadgeSaved)
 		}
 		dot := pingDot(m, cp.EnvVar, true) // existence alone means "configured" for a custom entry
 		line := fmt.Sprintf("%s %-30s %s", dot, cp.Name, status)
 		line += "  " + styleHint.Render(cp.BaseURL)
 		if cp.Model != "" {
-			line += "  " + styleHint.Render("modelo: "+cp.Model)
+			line += "  " + styleHint.Render(accountsModelPrefix+cp.Model)
 		}
 		if detail := pingDetail(m, cp.EnvVar); detail != "" {
 			line += "  " + styleHint.Render(detail)
@@ -194,7 +194,7 @@ func (m Model) renderAccounts() string {
 		}
 	}
 
-	addLine := styleHint.Render("+ adicionar provedor customizado (URL + key opcional — servidor local/rede)")
+	addLine := styleHint.Render(accountsAddCustomRow)
 	if addRow == m.accountsCursor {
 		b.WriteString(styleYouTag.Render("▸ ") + addLine + "\n")
 	} else {
@@ -211,16 +211,16 @@ func (m Model) renderAccounts() string {
 	}
 
 	if m.accountsEditing {
-		b.WriteString(styleMeta.Render("cole a API key:") + "\n")
+		b.WriteString(styleMeta.Render(accountsPasteKeyPrompt) + "\n")
 		b.WriteString(m.accountsKeyInput.View() + "\n\n")
-		b.WriteString(styleHint.Render("enter salva · esc cancela"))
+		b.WriteString(styleHint.Render(accountsKeyEntryHint))
 		return b.String()
 	}
 
 	if m.accountsOAuthPending {
-		b.WriteString(styleMeta.Render("autorize no navegador que abriu — se não abriu, cole este link:") + "\n")
+		b.WriteString(styleMeta.Render(accountsOAuthPendingPrompt) + "\n")
 		b.WriteString(styleHint.Render(m.accountsOAuthURL) + "\n\n")
-		b.WriteString(styleHint.Render("aguardando autorização… · esc cancela"))
+		b.WriteString(styleHint.Render(accountsOAuthPendingHint))
 		return b.String()
 	}
 
@@ -233,39 +233,39 @@ func (m Model) renderAccounts() string {
 	case m.accountsCursor < staticCount:
 		cur := providercatalog.Accounts[m.accountsCursor]
 		if !cur.OAuthOnly {
-			hint = "enter cola api key"
+			hint = accountsHintPasteKey
 		}
 		if cur.SupportsOAuth {
 			if hint != "" {
 				hint += " · "
 			}
-			hint += "o conecta via oauth"
+			hint += accountsHintOAuth
 		}
 		if !m.wizardMode {
-			hint += " · d remove chave salva"
+			hint += accountsHintRemoveSavedKey
 		}
 	case m.accountsCursor < addRow:
-		hint = "enter define/atualiza a key"
+		hint = accountsHintSetUpdateKey
 		if !m.wizardMode {
-			hint += " · d remove"
+			hint += accountsHintRemove
 		}
 	case m.accountsCursor == addRow:
-		hint = "enter adiciona provedor customizado"
+		hint = accountsHintAddCustom
 	}
 	if m.wizardMode {
-		hint += " · r verifica de novo"
+		hint += accountsHintRecheck
 		if m.wizardHasOperationalProvider() {
-			hint += " · n continua"
+			hint += accountsHintContinue
 		} else if m.wizardProviderOverrideVisible && !m.accountsPinging {
-			hint += " · c continua mesmo assim"
+			hint += accountsHintContinueAnyway
 		}
 		if m.wizardWorkspaceLocked {
-			hint += " · esc cancela"
+			hint += accountsHintEscCancel
 		} else {
-			hint += " · esc volta"
+			hint += accountsHintEscBack
 		}
 	} else {
-		hint += " · r verifica de novo · esc volta"
+		hint += accountsHintRecheck + accountsHintEscBack
 	}
 	b.WriteString(styleHint.Render(hint))
 	return b.String()
@@ -273,7 +273,7 @@ func (m Model) renderAccounts() string {
 
 // customFormLabels are the fields of the "add custom provider" form, in
 // cursor order.
-var customFormLabels = []string{"nome", "url", "api key (opcional)", "modelo", "aceita tool calling? (s/n)"}
+var customFormLabels = []string{customFormLabelName, customFormLabelURL, customFormLabelAPIKey, customFormLabelModel, customFormLabelTools}
 
 // customFormModelListMaxRows bounds how many fetched model options render
 // at once — a LAN router can advertise hundreds (real example seen this
@@ -316,7 +316,7 @@ func visibleModelIndices(cursor, count int) []int {
 func (m Model) renderCustomProviderForm() string {
 	var b strings.Builder
 	if m.customFormPickingModel {
-		b.WriteString(styleMeta.Render(fmt.Sprintf("modelos encontrados (%d):", len(m.customFormModelOptions))) + "\n\n")
+		b.WriteString(styleMeta.Render(fmt.Sprintf(customFormModelsFoundFmt, len(m.customFormModelOptions))) + "\n\n")
 		indices := visibleModelIndices(m.customFormModelCursor, len(m.customFormModelOptions))
 		for _, i := range indices {
 			model := m.customFormModelOptions[i]
@@ -326,11 +326,11 @@ func (m Model) renderCustomProviderForm() string {
 				b.WriteString("  " + styleHint.Render(model) + "\n")
 			}
 		}
-		b.WriteString("\n" + styleHint.Render("↑↓ escolher · enter usar · esc cancelar (volta a digitar manualmente)"))
+		b.WriteString("\n" + styleHint.Render(customFormPickerHint))
 		return b.String()
 	}
 
-	b.WriteString(styleMeta.Render("novo provedor customizado:") + "\n\n")
+	b.WriteString(styleMeta.Render(customFormHeader) + "\n\n")
 	for i, label := range customFormLabels {
 		marker := "  "
 		if i == m.customFormCursor {
@@ -339,14 +339,14 @@ func (m Model) renderCustomProviderForm() string {
 		b.WriteString(fmt.Sprintf("%s%-20s %s\n", marker, label, m.customFormInputs[i].View()))
 	}
 	if m.customFormFetchingModels {
-		b.WriteString("\n" + styleHint.Render("buscando modelos…"))
+		b.WriteString("\n" + styleHint.Render(customFormFetchingMsg))
 	}
 	if m.accountsStatus != "" {
 		b.WriteString("\n" + styleHint.Render(m.accountsStatus))
 	}
-	hint := "tab avança · shift+tab volta · enter salva · esc cancela"
+	hint := customFormHintBase
 	if m.customFormCursor == 3 {
-		hint = "ctrl+l buscar modelos · " + hint
+		hint = customFormHintFetchPrefix + hint
 	}
 	b.WriteString("\n\n" + styleHint.Render(hint))
 	return b.String()
@@ -366,11 +366,11 @@ func wizardGatewayModeLine(rows []accountStatus, customCount int) string {
 	}
 	switch {
 	case n == 0:
-		return styleHint.Render("Gateway mode: —  (nenhum provedor configurado ainda)")
+		return styleHint.Render(accountsGatewayModeNone)
 	case n == 1:
-		return styleBadgeWarn.Render("Gateway mode: BASIC") + styleHint.Render("  · 1 upstream configurado — fallback multi-provider fica limitado")
+		return styleBadgeWarn.Render("Gateway mode: BASIC") + styleHint.Render(accountsGatewayModeBasicTail)
 	default:
-		return styleBadgeOK.Render("Gateway mode: RESILIENT") + styleHint.Render(fmt.Sprintf("  · %d upstreams independentes", n))
+		return styleBadgeOK.Render("Gateway mode: RESILIENT") + styleHint.Render(fmt.Sprintf(accountsGatewayModeResilientTailFmt, n))
 	}
 }
 
@@ -443,10 +443,10 @@ func (m Model) handleAccountsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			if err := m.credStore.Set(envVar, key); err != nil {
-				m.accountsStatus = "erro ao salvar: " + err.Error()
+				m.accountsStatus = accountsStatusSaveErrorPrefix + err.Error()
 				return m, nil
 			}
-			m.accountsStatus = label + ": chave salva — reinicie o kram pra usar."
+			m.accountsStatus = label + accountsStatusKeySaved
 			if m.wizardMode {
 				// Validate immediately rather than waiting for a manual
 				// "r" — the wizard's whole point is real feedback as the
@@ -533,7 +533,7 @@ func (m Model) handleAccountsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if m.credStore != nil {
 				_ = m.credStore.Delete(acct.EnvVar)
 				_ = m.credStore.DeleteOAuth(acct.EnvVar)
-				m.accountsStatus = acct.Label + ": credencial removida."
+				m.accountsStatus = acct.Label + accountsStatusCredentialRemoved
 			}
 		case m.accountsCursor < addRow:
 			// Unlike catalog credentials, a custom provider can be deleted
@@ -549,7 +549,7 @@ func (m Model) handleAccountsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				if _, _, newAddRow, _ := m.accountsRowCounts(); m.accountsCursor > newAddRow {
 					m.accountsCursor = newAddRow
 				}
-				m.accountsStatus = name + ": provedor removido."
+				m.accountsStatus = name + accountsStatusProviderRemoved
 			}
 		}
 	case "o":
@@ -573,16 +573,16 @@ func (m Model) handleAccountsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if m.wizardMode && !m.wizardHasProvider() {
-			m.accountsStatus = "configure ao menos um provedor antes de continuar."
+			m.accountsStatus = accountsStatusNeedProvider
 		} else if m.wizardMode && m.accountsPinging {
-			m.accountsStatus = "aguarde a verificação terminar ou pressione r para tentar novamente."
+			m.accountsStatus = accountsStatusWaitCheck
 		} else if m.wizardMode {
 			m.wizardProviderOverrideVisible = true
-			m.accountsStatus = "nenhum provedor operacional — pressione r para tentar novamente ou c para continuar mesmo assim."
+			m.accountsStatus = accountsStatusNoOperational
 		}
 	case "c":
 		if m.wizardMode && m.wizardProviderOverrideVisible && m.wizardHasProvider() && !m.accountsPinging && !m.wizardHasOperationalProvider() {
-			m.accountsStatus = "continuando por escolha explícita, apesar da falha de validação."
+			m.accountsStatus = accountsStatusForceContinue
 			m.phase = phaseWizardRouting
 			m.wizardStep = 4
 		}
@@ -614,7 +614,7 @@ func (m Model) currentCredentialTarget() (envVar, label string, ok bool) {
 // provider" form, in the same order as customFormLabels.
 func newCustomProviderFormInputs() []textinput.Model {
 	name := textinput.New()
-	name.Placeholder = "Meu Servidor"
+	name.Placeholder = customFormNamePlaceholder
 	name.CharLimit = 80
 	name.Prompt = "› "
 
@@ -635,7 +635,7 @@ func newCustomProviderFormInputs() []textinput.Model {
 	// this field starts pre-filled "s" (sim) rather than empty — a user
 	// who wants the common case just tabs past it.
 	tools := textinput.New()
-	tools.SetValue("s")
+	tools.SetValue(customFormToolsDefault)
 	tools.CharLimit = 3
 	tools.Prompt = "› "
 
@@ -704,7 +704,7 @@ func (m Model) handleCustomProviderFormKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) 
 		}
 		url := strings.TrimSpace(m.customFormInputs[1].Value())
 		if url == "" {
-			m.accountsStatus = "informe a url antes de buscar modelos."
+			m.accountsStatus = customFormStatusNeedURL
 			return m, nil
 		}
 		key := strings.TrimSpace(m.customFormInputs[2].Value())
@@ -729,7 +729,7 @@ func (m Model) handleCustomProviderFormKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) 
 		supportsTools := parseSupportsToolsInput(m.customFormInputs[4].Value())
 
 		if m.customStore == nil {
-			m.accountsStatus = "erro: armazenamento local indisponível."
+			m.accountsStatus = customFormStatusNoStore
 			return m, nil
 		}
 		cp, err := m.customStore.Add(name, url, model, supportsTools)
@@ -739,7 +739,7 @@ func (m Model) handleCustomProviderFormKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) 
 		}
 		if key != "" && m.credStore != nil {
 			if err := m.credStore.Set(cp.EnvVar, key); err != nil {
-				m.accountsStatus = "provedor salvo, mas erro ao salvar a key: " + err.Error()
+				m.accountsStatus = customFormStatusKeySaveError + err.Error()
 			}
 		}
 		m.accountsAddingCustom = false
@@ -747,7 +747,7 @@ func (m Model) handleCustomProviderFormKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) 
 		_, customCount, _, _ := m.accountsRowCounts()
 		staticCount := len(providercatalog.Accounts)
 		m.accountsCursor = staticCount + customCount - 1 // land on the row just added
-		m.accountsStatus = cp.Name + ": provedor adicionado — reinicie o kram pra usar."
+		m.accountsStatus = cp.Name + accountsStatusProviderAdded
 		if m.wizardMode {
 			m.accountsPinging = true
 			return m, pingAccountsCmd(m.credStore, m.customProviders)
@@ -848,7 +848,7 @@ func saveOAuthResult(credStore *credentials.Store, msg oauthResultMsg) (status s
 			return "", err
 		}
 	}
-	return acct.Label + ": conectado — reinicie o kram pra usar.", nil
+	return acct.Label + accountsStatusConnected, nil
 }
 
 // openBrowser is best-effort — the authorization URL is always shown on

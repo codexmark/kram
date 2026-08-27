@@ -3,12 +3,43 @@ package main
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+// freePort reserves and immediately releases a loopback TCP port, returning
+// its number. Tests use it instead of the gateway's compiled-in default
+// (20128) so a stray local process holding that port can't make the gateway
+// fail to bind — see the port collision fixed in
+// https://github.com/codexmark/kram/issues/89.
+func freePort(t *testing.T) int {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("reserving a free port: %v", err)
+	}
+	defer l.Close()
+	return l.Addr().(*net.TCPAddr).Port
+}
+
+// writeGatewayConfig writes a minimal valid gateway config bound to an
+// ephemeral free port and returns its path. A non-zero port is written
+// deliberately: config.Load rewrites port 0 to the default 20128, which is
+// exactly the collision these tests must avoid.
+func writeGatewayConfig(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	data := []byte(fmt.Sprintf("host: 127.0.0.1\nport: %d\nproviders:\n  - id: local\n    kind: openai-compat\n    base_url: http://127.0.0.1:1\n    key_optional: true\ncombos:\n  - id: default\n    providers: [local]\ndefault_combo: default\n", freePort(t)))
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
 
 func TestRunReportsConfigLoadFailureBeforeStartingGateway(t *testing.T) {
 	err := run(context.Background(), t.TempDir()+"/missing.yaml", slog.New(slog.DiscardHandler))
@@ -18,11 +49,7 @@ func TestRunReportsConfigLoadFailureBeforeStartingGateway(t *testing.T) {
 }
 
 func TestRunLoadsValidConfigAndHonorsCancellation(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "config.yaml")
-	data := []byte("host: 127.0.0.1\nport: 0\nproviders:\n  - id: local\n    kind: openai-compat\n    base_url: http://127.0.0.1:1\n    key_optional: true\ncombos:\n  - id: default\n    providers: [local]\ndefault_combo: default\n")
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		t.Fatal(err)
-	}
+	path := writeGatewayConfig(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	if err := run(ctx, path, slog.New(slog.DiscardHandler)); err != nil {
@@ -31,11 +58,7 @@ func TestRunLoadsValidConfigAndHonorsCancellation(t *testing.T) {
 }
 
 func TestRunMainParsesConfigFlag(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "config.yaml")
-	data := []byte("host: 127.0.0.1\nport: 0\nproviders:\n  - id: local\n    kind: openai-compat\n    base_url: http://127.0.0.1:1\n    key_optional: true\ncombos:\n  - id: default\n    providers: [local]\ndefault_combo: default\n")
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		t.Fatal(err)
-	}
+	path := writeGatewayConfig(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	if err := runMain(ctx, []string{"-config", path}, &bytes.Buffer{}); err != nil {

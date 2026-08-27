@@ -92,7 +92,7 @@ func TestProcessPanelCursorAppendResetAndLateResponse(t *testing.T) {
 		output: &daemonclient.BackgroundProcessOutput{ID: "bg1", Output: "tail", Cursor: 20, Reset: true, Truncated: true},
 	})
 	m = next.(Model)
-	if m.processLogs["bg1"] != "tail" || !m.processLogTruncated["bg1"] || !strings.Contains(ansi.Strip(m.processViewport.View()), "histórico anterior") {
+	if m.processLogs["bg1"] != "tail" || !m.processLogTruncated["bg1"] || !strings.Contains(ansi.Strip(m.processViewport.View()), "earlier history") {
 		t.Fatalf("reset did not replace the local log: %q", m.processLogs["bg1"])
 	}
 
@@ -119,7 +119,7 @@ func TestProcessPanelResponsiveTileTabAndSanitizedOutput(t *testing.T) {
 		t.Fatalf("wide layout did not reserve a side tile: viewport=%d total=%d", m.viewport.Width, m.width)
 	}
 	wide := ansi.Strip(m.View())
-	if !strings.Contains(wide, "PROCESSOS") || !strings.Contains(wide, "red") || !strings.Contains(wide, "progress") || strings.Contains(wide, "\x1b[31m") {
+	if !strings.Contains(wide, "PROCESSES") || !strings.Contains(wide, "red") || !strings.Contains(wide, "progress") || strings.Contains(wide, "\x1b[31m") {
 		t.Fatalf("wide panel output was not rendered/sanitized: %q", wide)
 	}
 
@@ -128,7 +128,7 @@ func TestProcessPanelResponsiveTileTabAndSanitizedOutput(t *testing.T) {
 	if m.processUsesTile() || m.processPaneWidth() != 80 || m.viewport.Width != 80 {
 		t.Fatalf("narrow layout did not become a full-width tab: pane=%d viewport=%d", m.processPaneWidth(), m.viewport.Width)
 	}
-	if !strings.Contains(ansi.Strip(m.View()), "PROCESSOS") {
+	if !strings.Contains(ansi.Strip(m.View()), "PROCESSES") {
 		t.Fatal("narrow process tab disappeared")
 	}
 }
@@ -189,13 +189,13 @@ func TestProcessPanelEmptyErrorExitedAndTruncatedStatesAreExplicit(t *testing.T)
 
 	next, _ := m.applyProcessSnapshot(processSnapshotMsg{generation: 1, listed: true, processes: []daemonclient.BackgroundProcess{}})
 	m = next.(Model)
-	if len(m.processes) != 0 || m.processSelected != "" || !strings.Contains(ansi.Strip(m.renderProcessPane(20, 50)), "nenhum processo") {
+	if len(m.processes) != 0 || m.processSelected != "" || !strings.Contains(ansi.Strip(m.renderProcessPane(20, 50)), "no process") {
 		t.Fatalf("valid empty list state: processes=%v selected=%q pane=%q", m.processes, m.processSelected, ansi.Strip(m.renderProcessPane(20, 50)))
 	}
 
 	next, _ = m.applyProcessSnapshot(processSnapshotMsg{generation: 1, err: &testProcessError{"offline"}})
 	m = next.(Model)
-	if !strings.Contains(ansi.Strip(m.renderProcessPane(20, 50)), "daemon indisponível") {
+	if !strings.Contains(ansi.Strip(m.renderProcessPane(20, 50)), "daemon unavailable") {
 		t.Fatal("list failure was rendered like a valid empty daemon")
 	}
 
@@ -212,7 +212,7 @@ func TestProcessPanelEmptyErrorExitedAndTruncatedStatesAreExplicit(t *testing.T)
 	m.syncProcessViewport()
 	m.refreshProcessViewportContent()
 	pane := ansi.Strip(m.renderProcessPane(20, 50))
-	if !strings.Contains(pane, "encerrado 2") || !strings.Contains(pane, "exit sta") || !strings.Contains(pane, "histórico anterior") || !strings.Contains(pane, "last line") {
+	if !strings.Contains(pane, "exited 2") || !strings.Contains(pane, "exit sta") || !strings.Contains(pane, "earlier history") || !strings.Contains(pane, "last line") {
 		t.Fatalf("failed/truncated process pane = %q", pane)
 	}
 }
@@ -285,12 +285,12 @@ func TestActivityLabelsCoverEveryObservableState(t *testing.T) {
 		tool  string
 		want  string
 	}{
-		{workPreparing, "", "PREPARANDO ROTA"},
-		{workModelActive, "", "MODELO ATIVO"},
-		{workToolActive, "bash", "EXECUTANDO · bash"},
-		{workToolActive, "", "EXECUTANDO TOOL"},
-		{workAnalyzingResult, "", "ANALISANDO RESULTADO"},
-		{workWriting, "", "ESCREVENDO"},
+		{workPreparing, "", "PREPARING ROUTE"},
+		{workModelActive, "", "MODEL ACTIVE"},
+		{workToolActive, "bash", "RUNNING · bash"},
+		{workToolActive, "", "RUNNING TOOL"},
+		{workAnalyzingResult, "", "ANALYZING RESULT"},
+		{workWriting, "", "WRITING"},
 	}
 	for _, tc := range cases {
 		m := Model{workState: tc.state, activeTool: tc.tool}

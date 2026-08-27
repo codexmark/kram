@@ -21,7 +21,7 @@ func (m Model) renderRoutePanel() string {
 	var lines []string
 
 	if len(m.routeTrace.Calls) == 0 {
-		lines = append(lines, styleMeta.Render("nenhuma chamada roteada ainda nesta sessão"))
+		lines = append(lines, styleMeta.Render(routeNoCalls))
 		return padLines(lines, h, m.width)
 	}
 
@@ -62,11 +62,11 @@ func (m Model) renderRoutePanel() string {
 		ruleWidth = 50
 	}
 	lines = append(lines, styleHint.Render(strings.Repeat("─", ruleWidth)))
-	lines = append(lines, styleMeta.Render(fmt.Sprintf("%d %s de modelo", len(m.routeTrace.Calls), pluralPT(len(m.routeTrace.Calls), "chamada", "chamadas"))))
-	lines = append(lines, styleMeta.Render(fmt.Sprintf("%d %s ao upstream", totalAttempts, pluralPT(totalAttempts, "tentativa", "tentativas"))))
+	lines = append(lines, styleMeta.Render(fmt.Sprintf(routeModelCallsLine, len(m.routeTrace.Calls), pluralPT(len(m.routeTrace.Calls), routeCallSingular, routeCallPlural))))
+	lines = append(lines, styleMeta.Render(fmt.Sprintf(routeUpstreamLine, totalAttempts, pluralPT(totalAttempts, routeAttemptSingular, routeAttemptPlural))))
 	lines = append(lines, styleMeta.Render(fmt.Sprintf("%d fallback%s", fallbacks, pluralSuffix(fallbacks))))
 	lines = append(lines, styleMeta.Render(fmt.Sprintf("%d provider%s", len(providers), pluralSuffix(len(providers)))))
-	lines = append(lines, styleMeta.Render(formatLatency(providerTimeMS)+" de tempo total de provider"))
+	lines = append(lines, styleMeta.Render(formatLatency(providerTimeMS)+routeProviderTimeSuffix))
 
 	return padLines(lines, h, m.width)
 }
@@ -78,7 +78,7 @@ func (m Model) renderRoutePanel() string {
 func routeAttemptDetail(a openai.AttemptInfo, ranking openai.RankedProviderInfo) string {
 	switch a.Outcome {
 	case openai.OutcomeSuccess:
-		parts := []string{"selecionado"}
+		parts := []string{routeAttemptSelected}
 		if a.Score != nil {
 			parts = append(parts, fmt.Sprintf("score %.2f", *a.Score))
 		}

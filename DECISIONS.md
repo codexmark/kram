@@ -5096,3 +5096,45 @@ resolved credentials through config→Build→adapter: a broad refactor the
 issue's own scope guard forbids ("não reorganizar os pacotes além do
 necessário … não uma refatoração ampla"). Left for a dedicated change. The
 extract's value — testability — is fully realized without it.
+
+---
+
+## TUI language: English, with centralized per-area string tables (post-audit #74)
+
+The TUI mixed Brazilian Portuguese and English hardcoded strings, sometimes
+in the same widget — the approval prompt (where clarity matters most) being
+half-Portuguese read as unfinished for a global public beta. The decision:
+the whole TUI is **English**. This is a UI-language choice only — the system
+prompt (`internal/daemon/agent/systemprompt.go`) still answers in the user's
+language by design and was deliberately not touched.
+
+An inventory found **231 user-facing pt-BR/mixed strings across 16 files**
+(accounts and the setup wizard the heaviest). Every one was translated to
+idiomatic English and **centralized**: each area now has a companion
+`*_text.go` file (`wizard_text.go`, `accounts_text.go`, …) holding its
+strings as named `const`s grouped with explanatory comments, and the source
+files reference those consts instead of scattered literals. This is the
+issue's "um const por área" — the extension point if real i18n is ever
+wanted, and the single place to review copy for consistency. Deliberately
+**not** built: an i18n framework (plurals, locales, ICU) — over-engineering
+for a solo TUI; a string table in one language is what the problem needed.
+
+Format verbs (`%s`/`%d`/`%w`), lipgloss/ANSI markup, glyphs (↑↓ · … — ✓ ●),
+key names, command literals (`rm -rf`, `git push`, `config.yaml`), and the
+leading/trailing spaces callers concatenate onto were all preserved exactly;
+the intentional all-lowercase register of footer/hint lines was kept. Recurring
+hints ("↑↓ choose · enter confirm", "error: ", "esc back") use one canonical
+English wording so screens can't drift apart. Left out of scope: pt-BR code
+comments, and test-fixture strings representing user-typed input (e.g. a
+sample prompt) — neither is a UI string.
+
+Verification took the migration's scale seriously. The translate-and-
+centralize pass and the follow-up updates to the ~13 test files whose golden
+assertions pinned the old pt-BR were each fanned out across disjoint files
+(no shared-file collisions except one duplicate route-attempt const, merged
+by hand). Then an adversarial **semantic-fidelity** pass compared every
+original pt-BR against its applied English for meaning drift, broken
+interpolation, lost glyphs, and inconsistent terms — zero findings. Final
+gate: `go vet` clean (catches any Printf verb/arg mismatch), the full
+`go test ./... -race` green, and a repo-wide sweep confirming no pt-BR
+remains in any user-facing UI string.

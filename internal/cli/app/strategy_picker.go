@@ -9,17 +9,17 @@ import (
 )
 
 var strategyDescriptions = map[string]string{
-	"priority":        "ordem declarada; usa o primeiro provider saudável",
-	"round-robin":     "alterna o primeiro provider entre chamadas",
-	"prefix-affinity": "mantém prefixos semelhantes no mesmo provider",
-	"smart":           "equilibra saúde, qualidade, latência e afinidade",
-	"quality":         "prioriza a estimativa de qualidade",
-	"fast":            "prioriza menor latência observada",
-	"cheap":           "prioriza menor custo configurado",
-	"reliable":        "prioriza histórico de sucesso",
-	"weighted":        "usa os pesos personalizados do combo",
-	"lkgp":            "prefere o último provider que respondeu bem",
-	"p2c":             "compara dois candidatos e escolhe o mais saudável",
+	"priority":        strategyDescPriority,
+	"round-robin":     strategyDescRoundRobin,
+	"prefix-affinity": strategyDescPrefixAffinity,
+	"smart":           strategyDescSmart,
+	"quality":         strategyDescQuality,
+	"fast":            strategyDescFast,
+	"cheap":           strategyDescCheap,
+	"reliable":        strategyDescReliable,
+	"weighted":        strategyDescWeighted,
+	"lkgp":            strategyDescLKGP,
+	"p2c":             strategyDescP2C,
 }
 
 func (m Model) availableStrategies() []string {
@@ -73,13 +73,13 @@ func (m Model) renderStrategyPicker() string {
 	if combo != nil {
 		comboID = combo.ID
 	}
-	lines := []string{styleMeta.Render("trocar estratégia · combo " + comboID), ""}
+	lines := []string{styleMeta.Render(strategyPickerTitlePrefix + comboID), ""}
 
 	strategies := m.availableStrategies()
 	if len(strategies) == 0 {
-		message := "carregando estratégias do gateway…"
+		message := strategyPickerLoading
 		if m.strategyErr != nil {
-			message = "não consegui consultar o gateway: " + m.strategyErr.Error()
+			message = strategyPickerQueryErrPrefix + m.strategyErr.Error()
 		}
 		lines = append(lines, styleHint.Render(message))
 		return padLines(lines, h, m.width)
@@ -96,7 +96,7 @@ func (m Model) renderStrategyPicker() string {
 		}
 		active := ""
 		if combo != nil && normalizeStrategy(combo.Strategy) == name {
-			active = "  " + styleBadgeOK.Render("ATIVA")
+			active = "  " + styleBadgeOK.Render(strategyPickerActiveBadge)
 		}
 		lines = append(lines, marker+style.Render(strings.ToUpper(name))+active)
 	}
@@ -104,15 +104,15 @@ func (m Model) renderStrategyPicker() string {
 	selected := strategies[clampInt(m.strategyPickerFocus, 0, len(strategies)-1)]
 	description := strategyDescriptions[selected]
 	if description == "" {
-		description = "estratégia disponibilizada pelo gateway"
+		description = strategyDescFallback
 	}
 	lines = append(lines, "", styleMeta.Render(description))
 	if m.strategyPickerErr != nil {
-		lines = append(lines, styleErrBadge.Render("falha: "+m.strategyPickerErr.Error()))
+		lines = append(lines, styleErrBadge.Render(strategyPickerFailPrefix+m.strategyPickerErr.Error()))
 	} else if m.strategySwitching {
-		lines = append(lines, styleBadgeWarn.Render("aplicando na próxima chamada…"))
+		lines = append(lines, styleBadgeWarn.Render(strategyPickerApplying))
 	} else {
-		lines = append(lines, styleHint.Render("↑↓ escolher · enter aplicar · esc cancelar · clique aplica"))
+		lines = append(lines, styleHint.Render(strategyPickerHint))
 	}
 	return padLines(lines, h, m.width)
 }
@@ -131,7 +131,7 @@ func (m Model) applyFocusedStrategy() (tea.Model, tea.Cmd) {
 	strategies := m.availableStrategies()
 	combo := m.currentCombo()
 	if combo == nil || len(strategies) == 0 {
-		m.strategyPickerErr = fmt.Errorf("gateway ainda não informou combo e estratégias")
+		m.strategyPickerErr = fmt.Errorf(strategyPickerNoComboErr)
 		return m, nil
 	}
 	index := clampInt(m.strategyPickerFocus, 0, len(strategies)-1)

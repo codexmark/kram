@@ -97,7 +97,7 @@ func TestViewsCoverLoadingErrorsAndEditors(t *testing.T) {
 		t.Fatalf("picker error view = %q", got)
 	}
 	m.pickerBusy, m.titling = false, true
-	if got := m.View(); !strings.Contains(got, "título") {
+	if got := m.View(); !strings.Contains(got, "title") {
 		t.Fatalf("picker title editor missing from %q", got)
 	}
 
@@ -139,7 +139,7 @@ func TestViewsCoverLoadingErrorsAndEditors(t *testing.T) {
 	}
 	m.strategyErr = nil
 	m.strategyData = statusclient.Status{}
-	if got := m.renderStrategyPanel(); !strings.Contains(got, "nenhum combo") {
+	if got := m.renderStrategyPanel(); !strings.Contains(got, "no combo") {
 		t.Fatalf("empty strategy panel = %q", got)
 	}
 	m.contextErr = errors.New("context")
@@ -148,7 +148,7 @@ func TestViewsCoverLoadingErrorsAndEditors(t *testing.T) {
 	}
 	m.contextErr = nil
 	m.haveContext = false
-	if got := m.renderContextPanel(); !strings.Contains(got, "carregando") {
+	if got := m.renderContextPanel(); !strings.Contains(got, "loading") {
 		t.Fatalf("context loading panel = %q", got)
 	}
 }
@@ -355,19 +355,19 @@ func TestPickerAccountsToolsAndWizardKeys(t *testing.T) {
 		}
 		item := m.toolToggleItems()[0].name
 		m, cmd = modelResult(m.handleToolsKey(keyMsg("enter")))
-		if !m.toolSettings.IsDisabled(item) || cmd == nil || !strings.Contains(m.toolsStatus, "desligado") {
+		if !m.toolSettings.IsDisabled(item) || cmd == nil || !strings.Contains(m.toolsStatus, "disabled") {
 			t.Fatalf("tool toggle failed for %q: disabled=%v status=%q cmd=%v", item, m.toolSettings.IsDisabled(item), m.toolsStatus, cmd != nil)
 		}
 		m, cmd = modelResult(m.handleToolsKey(keyMsg(" ")))
-		if m.toolSettings.IsDisabled(item) || cmd == nil || !strings.Contains(m.toolsStatus, "ligado") {
+		if m.toolSettings.IsDisabled(item) || cmd == nil || !strings.Contains(m.toolsStatus, "enabled") {
 			t.Fatalf("second tool toggle failed for %q", item)
 		}
 		m, cmd = modelResult(m.handleToolsKey(keyMsg("d")))
-		if cmd == nil || !strings.Contains(m.toolsStatus, "desligados") {
+		if cmd == nil || !strings.Contains(m.toolsStatus, "disabled") {
 			t.Fatal("disable-all did not persist or schedule daemon sync")
 		}
 		m, cmd = modelResult(m.handleToolsKey(keyMsg("a")))
-		if cmd == nil || !strings.Contains(m.toolsStatus, "ligados") {
+		if cmd == nil || !strings.Contains(m.toolsStatus, "enabled") {
 			t.Fatal("enable-all did not persist or schedule daemon sync")
 		}
 		m, cmd = modelResult(m.handleToolsKey(keyMsg("esc")))
@@ -659,12 +659,12 @@ func TestStreamEventsAndTranscriptBranches(t *testing.T) {
 
 	m.waitStartedAt = time.Now().Add(-10 * time.Second)
 	m.lastEventAt = time.Now().Add(-10 * time.Second)
-	if got := m.thinkingLine(); !strings.Contains(got, "CONEXÃO SEM EVENTOS") {
+	if got := m.thinkingLine(); !strings.Contains(got, "NO STREAM EVENTS") {
 		t.Fatalf("stalled thinking line = %q", got)
 	}
 	m.lastEventAt = time.Now()
 	m.workState = workModelActive
-	if got := m.thinkingLine(); !strings.Contains(got, "MODELO ATIVO") || strings.Contains(got, "CONEXÃO SEM EVENTOS") {
+	if got := m.thinkingLine(); !strings.Contains(got, "MODEL ACTIVE") || strings.Contains(got, "NO STREAM EVENTS") {
 		t.Fatalf("active thinking line = %q", got)
 	}
 }
@@ -946,12 +946,12 @@ func TestAccountsRenderingAndKeyBoundaryMatrix(t *testing.T) {
 	}
 	for cursor := 0; cursor < len(providercatalog.Accounts)+len(m.customProviders)+1; cursor++ {
 		m.accountsCursor = cursor
-		if got := m.renderAccounts(); !strings.Contains(got, "Local") || !strings.Contains(got, "+ adicionar") {
+		if got := m.renderAccounts(); !strings.Contains(got, "Local") || !strings.Contains(got, "+ add") {
 			t.Fatalf("accounts cursor %d omitted registered rows: %q", cursor, got)
 		}
 	}
 	m.wizardMode, m.wizardWorkspaceLocked = true, false
-	if got := m.renderAccounts(); !strings.Contains(got, "esc volta") {
+	if got := m.renderAccounts(); !strings.Contains(got, "esc back") {
 		t.Fatalf("unlocked wizard hints = %q", got)
 	}
 	m.accountsPings = map[string]providerping.Result{
@@ -959,11 +959,11 @@ func TestAccountsRenderingAndKeyBoundaryMatrix(t *testing.T) {
 		cp.EnvVar:                          {Status: providerping.StatusDown},
 	}
 	m.wizardProviderOverrideVisible = true
-	if got := m.renderAccounts(); !strings.Contains(got, "c continua") {
+	if got := m.renderAccounts(); !strings.Contains(got, "c continues") {
 		t.Fatalf("override hints = %q", got)
 	}
 	m.wizardWorkspaceLocked = true
-	if got := m.renderAccounts(); !strings.Contains(got, "esc cancela") {
+	if got := m.renderAccounts(); !strings.Contains(got, "esc cancels") {
 		t.Fatalf("locked wizard hints = %q", got)
 	}
 
@@ -1195,7 +1195,7 @@ func TestCoverageMarginAcrossWizardAndPresentationBranches(t *testing.T) {
 
 	m := testModel(t)
 	m.toolsLoading = true
-	if got := m.renderWizardToolsPreset(); !strings.Contains(got, "carregando") {
+	if got := m.renderWizardToolsPreset(); !strings.Contains(got, "loading") {
 		t.Fatalf("loading preset view = %q", got)
 	}
 	beforePreset := m.wizardChosenToolsPreset
@@ -1211,10 +1211,10 @@ func TestCoverageMarginAcrossWizardAndPresentationBranches(t *testing.T) {
 	m.wizardWelcomeSession = true
 	m.messages = nil
 	m.refreshTranscript()
-	if !strings.Contains(m.viewport.View(), "Kram está pronto") {
+	if !strings.Contains(m.viewport.View(), "Kram is ready") {
 		t.Fatal("wizard welcome was not rendered")
 	}
-	if got := m.renderWizardWelcomeBanner(); !strings.Contains(got, "Kram está pronto") || !strings.Contains(got, "Map this repository") {
+	if got := m.renderWizardWelcomeBanner(); !strings.Contains(got, "Kram is ready") || !strings.Contains(got, "Map this repository") {
 		t.Fatalf("welcome banner = %q", got)
 	}
 
@@ -1241,13 +1241,13 @@ func TestCoverageMarginAcrossWizardAndPresentationBranches(t *testing.T) {
 	if got := explainProvider(combo, map[string]statusclient.Provider{}, -1); got != "" {
 		t.Fatalf("invalid focus explanation = %q", got)
 	}
-	if got := explainProvider(combo, map[string]statusclient.Provider{}, 0); !strings.Contains(got, "sem requisições") {
+	if got := explainProvider(combo, map[string]statusclient.Provider{}, 0); !strings.Contains(got, "No requests") {
 		t.Fatalf("unused provider explanation = %q", got)
 	}
-	if got := explainProvider(combo, map[string]statusclient.Provider{"a": {ID: "a", BreakerOpen: true}}, 0); !strings.Contains(got, "circuito aberto") {
+	if got := explainProvider(combo, map[string]statusclient.Provider{"a": {ID: "a", BreakerOpen: true}}, 0); !strings.Contains(got, "circuit open") {
 		t.Fatalf("open breaker explanation = %q", got)
 	}
-	if got := explainProvider(combo, map[string]statusclient.Provider{"b": {ID: "b", Stats: statusclient.ProviderStats{Requests: 2, SuccessRate: .5, AvgLatencyMS: 20}}}, 1); !strings.Contains(got, "2 requisições") || !strings.Contains(got, "50%") || !strings.Contains(got, "20ms") {
+	if got := explainProvider(combo, map[string]statusclient.Provider{"b": {ID: "b", Stats: statusclient.ProviderStats{Requests: 2, SuccessRate: .5, AvgLatencyMS: 20}}}, 1); !strings.Contains(got, "2 requests") || !strings.Contains(got, "50%") || !strings.Contains(got, "20ms") {
 		t.Fatalf("provider stats explanation = %q", got)
 	}
 

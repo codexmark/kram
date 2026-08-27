@@ -105,13 +105,13 @@ func TestRenderPickerShowsSubagentHintAndModeHeader(t *testing.T) {
 	m.sessionList = pickerFixtureSessions()
 
 	defaultView := m.renderPicker()
-	if !strings.Contains(defaultView, "2") || !strings.Contains(defaultView, "subagente") {
+	if !strings.Contains(defaultView, "2") || !strings.Contains(defaultView, "subagent") {
 		t.Errorf("default picker view missing a hidden-subagent-count hint: %q", defaultView)
 	}
 
 	m.pickerShowSubagents = true
 	subagentView := m.renderPicker()
-	if !strings.Contains(subagentView, "subagentes") {
+	if !strings.Contains(subagentView, "subagent") {
 		t.Errorf("subagent picker view missing its mode header: %q", subagentView)
 	}
 }

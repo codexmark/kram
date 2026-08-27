@@ -34,12 +34,12 @@ func TestEscInterruptsInFlightTurn(t *testing.T) {
 	}
 	found := false
 	for _, n := range m.messages[0].Notices {
-		if strings.Contains(n, "interrompido") {
+		if strings.Contains(n, "interrupted") {
 			found = true
 		}
 	}
 	if !found {
-		t.Errorf("interrupted turn should carry an 'interrompido' notice, got %+v", m.messages[0].Notices)
+		t.Errorf("interrupted turn should carry an 'interrupted' notice, got %+v", m.messages[0].Notices)
 	}
 }
 

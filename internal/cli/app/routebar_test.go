@@ -27,7 +27,7 @@ func TestRenderRouteBarShowsStrategyFromCombo(t *testing.T) {
 	if !strings.Contains(got, "SMART") {
 		t.Errorf("expected the route bar to show the combo's strategy name, got %q", got)
 	}
-	if !strings.Contains(got, "estratégia:") {
+	if !strings.Contains(got, "strategy:") {
 		t.Errorf("expected a discreet strategy label before the name, got %q", got)
 	}
 }
@@ -49,7 +49,7 @@ func TestRenderRouteBarShowsRunningPulse(t *testing.T) {
 		strategyData: statusclient.Status{Combos: []statusclient.Combo{{ID: "default", Strategy: "smart", Providers: []string{"a", "b", "c"}}}},
 	}
 	got := m.renderRouteBar()
-	if !strings.Contains(got, "avaliando 3 upstreams") || !strings.Contains(got, "call 1") {
+	if !strings.Contains(got, "evaluating 3 upstreams") || !strings.Contains(got, "call 1") {
 		t.Errorf("expected a candidate rail while routeRunning is true, got %q", got)
 	}
 	if !strings.Contains(got, "◉") || strings.Count(got, "○") != 2 {
@@ -93,13 +93,13 @@ func TestRoutingActivityCapsRailButReportsRealCountAcrossWidths(t *testing.T) {
 	if nodes := strings.Count(wideText, "○") + strings.Count(wideText, "◉"); nodes != 5 {
 		t.Fatalf("wide rail nodes = %d, want visual cap of 5: %q", nodes, wideText)
 	}
-	if !strings.Contains(wideText, "avaliando 7 upstreams") {
+	if !strings.Contains(wideText, "evaluating 7 upstreams") {
 		t.Fatalf("wide rail lost the real candidate count: %q", wideText)
 	}
 
 	medium := wide
 	medium.width = routeBarMediumMin
-	if got := medium.renderRoutingActivity(); !strings.Contains(got, "7 rotas") {
+	if got := medium.renderRoutingActivity(); !strings.Contains(got, "7 routes") {
 		t.Fatalf("medium rail should use the compact count label, got %q", got)
 	}
 

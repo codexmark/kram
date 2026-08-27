@@ -46,16 +46,16 @@ func renderWizardHeader(step int, title string) string {
 func (m Model) renderWizardEnvironment() string {
 	var b strings.Builder
 	b.WriteString(renderWizardHeader(1, "Environment") + "\n\n")
-	b.WriteString(fmt.Sprintf("%-16s %s\n", "Sistema", styleBody.Render(runtime.GOOS)))
-	b.WriteString(fmt.Sprintf("%-16s %s\n", "Diretório atual", styleBody.Render(m.wizardCWD)))
-	git := styleBadgeIdle.Render("não encontrado")
+	b.WriteString(fmt.Sprintf("%-16s %s\n", wizardEnvSystemLabel, styleBody.Render(runtime.GOOS)))
+	b.WriteString(fmt.Sprintf("%-16s %s\n", wizardEnvCurrentDirLabel, styleBody.Render(m.wizardCWD)))
+	git := styleBadgeIdle.Render(wizardEnvGitNotFound)
 	if m.wizardHasGit {
-		git = styleBadgeOK.Render("encontrado")
+		git = styleBadgeOK.Render(wizardEnvGitFound)
 	}
 	b.WriteString(fmt.Sprintf("%-16s %s\n", "Git", git))
 	b.WriteString(fmt.Sprintf("%-16s %s\n\n", "Home", styleBody.Render(m.wizardHomeDir)))
-	b.WriteString(styleHint.Render("bem-vindo ao kram. vamos configurar o essencial — leva menos de um minuto.") + "\n\n")
-	b.WriteString(styleHint.Render("enter continua · esc/ctrl+c cancela"))
+	b.WriteString(styleHint.Render(wizardEnvWelcome) + "\n\n")
+	b.WriteString(styleHint.Render(wizardEnvFooter))
 	return b.String()
 }
 
@@ -83,14 +83,14 @@ func (m Model) handleWizardEnvironmentKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m Model) renderWizardProjects() string {
 	var b strings.Builder
 	b.WriteString(renderWizardHeader(2, "Projects") + "\n\n")
-	b.WriteString(styleMeta.Render("Projects Root") + styleHint.Render("  (onde você costuma manter seus projetos)") + "\n")
+	b.WriteString(styleMeta.Render("Projects Root") + styleHint.Render(wizardProjectsRootHint) + "\n")
 	b.WriteString(m.wizardProjectsRootInput.View() + "\n\n")
-	b.WriteString(styleMeta.Render("Workspace") + styleHint.Render("  (o projeto desta sessão)") + "\n")
+	b.WriteString(styleMeta.Render("Workspace") + styleHint.Render(wizardProjectsWorkspaceHint) + "\n")
 	b.WriteString(m.wizardWorkspaceInput.View() + "\n\n")
 	if m.wizardWorkspaceErr != nil {
-		b.WriteString(styleErrBadge.Render("erro: "+m.wizardWorkspaceErr.Error()) + "\n\n")
+		b.WriteString(styleErrBadge.Render(wizardErrPrefix+m.wizardWorkspaceErr.Error()) + "\n\n")
 	}
-	b.WriteString(styleHint.Render("tab troca de campo · enter continua · esc volta"))
+	b.WriteString(styleHint.Render(wizardProjectsFooter))
 	return b.String()
 }
 
@@ -122,7 +122,7 @@ func (m Model) handleWizardProjectsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if err := os.MkdirAll(filepath.Join(absWS, ".kram"), 0o755); err != nil {
-			m.wizardWorkspaceErr = fmt.Errorf("não consegui criar %s: %w", absWS, err)
+			m.wizardWorkspaceErr = fmt.Errorf(wizardErrCreateWorkspaceFmt, absWS, err)
 			return m, nil
 		}
 		absRoot, err := filepath.Abs(root)
@@ -153,9 +153,9 @@ type wizardRoutingOption struct {
 }
 
 var wizardRoutingOptions = []wizardRoutingOption{
-	{label: "Auto (recomendado)", strategy: "", desc: "kram escolhe com base nos providers configurados"},
-	{label: "Smart", strategy: "smart", desc: "saúde + confiabilidade + latência + afinidade de cache"},
-	{label: "Round Robin", strategy: "round-robin", desc: "distribui as chamadas entre os providers elegíveis"},
+	{label: wizardRoutingAutoLabel, strategy: "", desc: wizardRoutingAutoDesc},
+	{label: "Smart", strategy: "smart", desc: wizardRoutingSmartDesc},
+	{label: "Round Robin", strategy: "round-robin", desc: wizardRoutingRoundRobinDesc},
 }
 
 func (m Model) renderWizardRouting() string {
@@ -177,8 +177,8 @@ func (m Model) renderWizardRouting() string {
 		}
 		b.WriteString(styleHint.Render("Auto currently resolves to: "+resolved) + "\n\n")
 	}
-	b.WriteString(styleHint.Render("estratégias avançadas, pesos e gates continuam ajustáveis no config.yaml gerado.") + "\n\n")
-	b.WriteString(styleHint.Render("↑↓ escolher · enter continua · esc volta"))
+	b.WriteString(styleHint.Render(wizardRoutingHint) + "\n\n")
+	b.WriteString(styleHint.Render(wizardFooterChooseContinueBack))
 	return b.String()
 }
 
@@ -231,9 +231,9 @@ type wizardPermOption struct {
 }
 
 var wizardPermOptions = []wizardPermOption{
-	{label: "Recommended", key: "recommended", desc: "pergunta antes de rm -rf, git push, apagar/mover arquivo — resto liberado"},
-	{label: "Strict", key: "strict", desc: "pergunta antes de quase tudo, inclusive tools MCP — só leitura e git status liberados"},
-	{label: "Autonomous", key: "autonomous", desc: "poucas confirmações — só bloqueia rm -rf com caminho absoluto"},
+	{label: "Recommended", key: "recommended", desc: wizardPermRecommendedDesc},
+	{label: "Strict", key: "strict", desc: wizardPermStrictDesc},
+	{label: "Autonomous", key: "autonomous", desc: wizardPermAutonomousDesc},
 }
 
 func (m Model) renderWizardPermissions() string {
@@ -247,7 +247,7 @@ func (m Model) renderWizardPermissions() string {
 			b.WriteString("  " + line + "\n")
 		}
 	}
-	b.WriteString("\n" + styleHint.Render("↑↓ escolher · enter continua · esc volta"))
+	b.WriteString("\n" + styleHint.Render(wizardFooterChooseContinueBack))
 	return b.String()
 }
 
@@ -412,9 +412,9 @@ type wizardToolsPresetOption struct {
 }
 
 var wizardToolsPresetOptions = []wizardToolsPresetOption{
-	{label: "Recommended", key: "recommended", desc: "conjunto padrão de desenvolvimento — nada desligado"},
-	{label: "Minimal", key: "minimal", desc: "leitura, busca, navegação e inteligência de código — resto desligado"},
-	{label: "Custom", key: "custom", desc: "escolher individualmente"},
+	{label: "Recommended", key: "recommended", desc: wizardToolsRecommendedDesc},
+	{label: "Minimal", key: "minimal", desc: wizardToolsMinimalDesc},
+	{label: "Custom", key: "custom", desc: wizardToolsCustomDesc},
 }
 
 // wizardMinimalSafeTools is what the "Minimal" preset keeps on — read,
@@ -436,11 +436,11 @@ func (m Model) renderWizardToolsPreset() string {
 	var b strings.Builder
 	b.WriteString(renderWizardHeader(6, "Tools & Skills") + "\n\n")
 	if m.toolsLoading {
-		b.WriteString(styleMeta.Render(m.spin.View()+" carregando…") + "\n\n")
+		b.WriteString(styleMeta.Render(m.spin.View()+wizardToolsLoading) + "\n\n")
 		return b.String()
 	}
 	items := m.toolToggleItems()
-	b.WriteString(styleHint.Render(fmt.Sprintf("%d tools/skills registrados.", len(items))) + "\n\n")
+	b.WriteString(styleHint.Render(fmt.Sprintf(wizardToolsRegisteredFmt, len(items))) + "\n\n")
 	for i, opt := range wizardToolsPresetOptions {
 		line := fmt.Sprintf("%-14s %s", opt.label, styleHint.Render(opt.desc))
 		if i == m.wizardToolsPresetCursor {
@@ -452,7 +452,7 @@ func (m Model) renderWizardToolsPreset() string {
 	if m.toolsStatus != "" {
 		b.WriteString("\n" + styleHint.Render(m.toolsStatus) + "\n")
 	}
-	b.WriteString("\n" + styleHint.Render("↑↓ escolher · enter aplica · Custom abre a tela individual"))
+	b.WriteString("\n" + styleHint.Render(wizardToolsFooter))
 	return b.String()
 }
 
@@ -475,10 +475,10 @@ func (m Model) handleWizardToolsPresetKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		switch opt.key {
 		case "recommended", "minimal":
 			if err := applyWizardToolPreset(m.toolSettings, m.toolToggleItems(), opt.key); err != nil {
-				m.toolsStatus = "erro ao salvar preset: " + err.Error()
+				m.toolsStatus = wizardToolsErrSavePreset + err.Error()
 				return m, nil
 			}
-			m.toolsStatus = "aplicando ao daemon atual…"
+			m.toolsStatus = wizardToolsApplying
 			m.wizardToolSettingsPending = true
 			return m, syncToolSettingsCmd(m.daemon, m.toolSettings)
 		case "custom":
@@ -492,7 +492,7 @@ func (m Model) handleWizardToolsPresetKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func applyWizardToolPreset(settings *toolsettings.Store, items []toolToggleItem, preset string) error {
 	if settings == nil {
-		return fmt.Errorf("armazenamento de tools indisponível")
+		return fmt.Errorf(wizardErrToolsStorage)
 	}
 	var disabled []string
 	if preset == "minimal" {
@@ -553,12 +553,12 @@ func (m Model) renderWizardSystemCheck() string {
 	}
 	b.WriteString(line("Git", r.gitFound, "") + "\n")
 	b.WriteString(line("Go", r.goFound, "") + "\n")
-	b.WriteString(line("gopls", r.goplsFound, "opcional") + "\n")
+	b.WriteString(line("gopls", r.goplsFound, wizardCheckOptional) + "\n")
 	b.WriteString(line("Workspace writable", true, m.workspace) + "\n")
-	b.WriteString(line("Providers", r.providersConfigured > 0, fmt.Sprintf("%d configurado(s)", r.providersConfigured)) + "\n")
-	b.WriteString(line("MCP", true, fmt.Sprintf("%d servidor(es) configurado(s)", r.mcpServers)) + "\n\n")
-	b.WriteString(styleHint.Render("itens opcionais não bloqueiam — só informativo.") + "\n\n")
-	b.WriteString(styleHint.Render("enter continua"))
+	b.WriteString(line("Providers", r.providersConfigured > 0, fmt.Sprintf(wizardCheckProvidersFmt, r.providersConfigured)) + "\n")
+	b.WriteString(line("MCP", true, fmt.Sprintf(wizardCheckMCPFmt, r.mcpServers)) + "\n\n")
+	b.WriteString(styleHint.Render(wizardCheckHint) + "\n\n")
+	b.WriteString(styleHint.Render(wizardCheckFooter))
 	return b.String()
 }
 
@@ -596,10 +596,10 @@ func (m Model) renderWizardSummary() string {
 	b.WriteString(row("Tools/Skills", toolsPreset))
 	b.WriteString(row("Config", cfgPath))
 	if m.wizardCompletionErr != nil {
-		b.WriteString("\n" + styleErrBadge.Render("não foi possível concluir: "+m.wizardCompletionErr.Error()) + "\n")
+		b.WriteString("\n" + styleErrBadge.Render(wizardErrCompletionPrefix+m.wizardCompletionErr.Error()) + "\n")
 	}
 	b.WriteString("\n")
-	b.WriteString(styleHint.Render("enter abre uma sessão e começa a usar o kram · kram --setup reconfigura a qualquer momento"))
+	b.WriteString(styleHint.Render(wizardSummaryFooter))
 	return b.String()
 }
 
@@ -627,7 +627,7 @@ func (m Model) handleWizardSummaryKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m Model) renderWizardWelcomeBanner() string {
 	var b strings.Builder
 	b.WriteString(styleKramTag.Render("kram") + "  " + styleBody.Render(
-		"Kram está pronto. Posso começar mapeando este projeto, revisar uma tarefa ou trabalhar diretamente em uma alteração.") + "\n\n")
-	b.WriteString(styleHint.Render("sugestão: \"Map this repository and explain its architecture\""))
+		wizardWelcomeBody) + "\n\n")
+	b.WriteString(styleHint.Render(wizardWelcomeSuggestion))
 	return b.String()
 }
