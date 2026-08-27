@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/codexmark/kram/internal/kramhome"
+	"github.com/codexmark/kram/internal/localstore"
 )
 
 // Store is a flat env-var-name -> API-key map, persisted as JSON, plus a
@@ -123,7 +124,7 @@ func (s *Store) save() error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(s.path, data, 0o600)
+	return localstore.AtomicWrite(s.path, data, 0o600)
 }
 
 // GetOAuth returns the stored OAuth token for envVar and whether one
@@ -154,7 +155,7 @@ func (s *Store) saveOAuth() error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(s.oauthPath, data, 0o600)
+	return localstore.AtomicWrite(s.oauthPath, data, 0o600)
 }
 
 // refreshSkew is how far ahead of the real expiry Resolve treats a token

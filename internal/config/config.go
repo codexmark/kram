@@ -6,7 +6,8 @@ package config
 import (
 	"fmt"
 	"os"
-	"path/filepath"
+
+	"github.com/codexmark/kram/internal/localstore"
 
 	"gopkg.in/yaml.v3"
 )
@@ -192,35 +193,16 @@ func Load(path string) (*Config, error) {
 	return &cfg, nil
 }
 
-// Save writes cfg as YAML to path, creating parent directories as
-// needed. Writes to a temporary file first and renames it into place —
-// on POSIX this rename is atomic; os.Rename also fails if path already
-// exists on Windows, so the pre-existing file is removed first (there's
-// a brief window where neither the old nor new file exists, but that's
-// strictly better than a reader ever observing a half-written file,
-// which the temp-file-then-rename alone already prevents on POSIX).
+// Save writes cfg as YAML to path (with the generated-file banner
+// prepended), creating parent directories as needed. The write is atomic
+// via localstore.AtomicWrite — a reader, or a crash mid-write, never
+// observes a half-written config.
 func Save(cfg *Config, path string) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return fmt.Errorf("creating %s: %w", filepath.Dir(path), err)
-	}
-
 	data, err := yaml.Marshal(cfg)
 	if err != nil {
 		return fmt.Errorf("encoding config: %w", err)
 	}
-
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, append([]byte(generatedHeader), data...), 0o644); err != nil {
-		return fmt.Errorf("writing %s: %w", tmp, err)
-	}
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		os.Remove(tmp)
-		return fmt.Errorf("removing existing %s: %w", path, err)
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		return fmt.Errorf("renaming %s to %s: %w", tmp, path, err)
-	}
-	return nil
+	return localstore.AtomicWrite(path, append([]byte(generatedHeader), data...), 0o644)
 }
 
 func (c *Config) validate() error {

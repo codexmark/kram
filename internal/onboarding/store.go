@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 
 	"github.com/codexmark/kram/internal/kramhome"
+	"github.com/codexmark/kram/internal/localstore"
 )
 
 // currentVersion is compared against a saved State's Version to decide
@@ -88,5 +89,5 @@ func save(s State) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, data, 0o600)
+	return localstore.AtomicWrite(path, data, 0o600)
 }
