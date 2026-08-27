@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"sync"
 	"time"
@@ -88,12 +89,25 @@ type streamStartMsg struct {
 	err    error
 }
 
-func startSendMessageCmd(c *daemonclient.Client, sessionID, content string) tea.Cmd {
+func startSendMessageCmd(c *daemonclient.Client, sessionID, content string, imagePaths []string) tea.Cmd {
 	return func() tea.Msg {
+		// Decode staged image files to base64 data URLs off the UI thread —
+		// reading and encoding a multi-MB image shouldn't block the Update
+		// loop. A file that can't be read (deleted since /image, or not
+		// actually an image) fails the whole send with a clear error rather
+		// than silently dropping the attachment.
+		var images []string
+		for _, p := range imagePaths {
+			dataURL, err := imageFileToDataURL(p)
+			if err != nil {
+				return streamStartMsg{err: fmt.Errorf("attaching image: %w", err)}
+			}
+			images = append(images, dataURL)
+		}
 		// No fixed timeout here: a multi-tool agent turn can legitimately
 		// run long. The connection is torn down when the program quits or
 		// the stream reports done/error.
-		stream, err := c.SendMessageStream(context.Background(), sessionID, content, nil)
+		stream, err := c.SendMessageStream(context.Background(), sessionID, content, images)
 		return streamStartMsg{stream: stream, err: err}
 	}
 }

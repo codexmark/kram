@@ -88,6 +88,9 @@ func (m Model) renderMessageBlock(msg chatMessage) (text string, localLinkRows m
 		// reformatted would be surprising. Right-aligned prompt block,
 		// not a chat bubble — see promptblock.go and DECISIONS.md.
 		b.WriteString(m.renderPromptBlock(msg.Content))
+		if len(msg.Images) > 0 {
+			b.WriteString("\n" + styleHint.Render(messageImagePrefix+strings.Join(msg.Images, ", ")))
+		}
 	default:
 		for _, act := range msg.ToolActivity {
 			row := strings.Count(b.String(), "\n")
@@ -353,6 +356,9 @@ func (m Model) View() string {
 	case m.approval != nil:
 		b.WriteString(m.renderApproval())
 	default:
+		if len(m.pendingImages) > 0 {
+			b.WriteString(styleHint.Render(pendingImagesPrefix+strings.Join(imageDisplayNames(m.pendingImages), ", ")) + "\n")
+		}
 		b.WriteString(m.input.View())
 	}
 	b.WriteString("\n")
