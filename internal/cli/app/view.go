@@ -302,6 +302,14 @@ func (m Model) activityLabel() string {
 }
 
 func (m Model) renderActivityRail(stalled bool) string {
+	if !stalled {
+		// Directional flow (#132) takes over whenever bytes moved
+		// recently; the neutral cycling pulse below remains the idle and
+		// pre-first-byte look.
+		if rail, ok := m.renderFlowRail(); ok {
+			return rail
+		}
+	}
 	const nodes = 7
 	active := positiveModulo(m.animFrame/activeStepFrames, nodes)
 	var b strings.Builder

@@ -5849,3 +5849,23 @@ shipped versions carry none of those: no dialogue framing, no negative
 example (workflowSection owns the quoted anti-patterns), grounding
 stated, full-list semantics spelled out. Model profiles (#130) remain
 the open, larger phase.
+
+---
+
+## The activity rail shows data direction and volume (#132)
+
+The rail used to be a neutral cycling dot — identical whether Kram was
+uploading a huge prompt, waiting on prefill, or streaming an answer.
+It now animates by direction: glyphs sweep right while model output
+arrives (deltas/reasoning), left while data heads to the model (a call's
+prompt going up — route_start opens a "sending" phase that the first
+byte back closes — and tool args/results bound for the next call), and
+converge to a center diamond when both are fresh at once. Horizontal by
+necessity and convention: the indicator is one terminal row tall, and
+RX/TX reads left/right everywhere in computing — the vertical-bars idea
+was deliberately reserved for a possible per-glyph volume encoding
+later. Color is a log-spaced heat ramp (green → yellow → orange) off a
+smoothed bytes/sec estimate, deliberately ending in hot magenta rather
+than colorDanger's red: red already means failure in this TUI, and a
+healthy fast stream must never read as broken. Idle and stalled looks
+are unchanged — the flow takes over only while bytes actually move.
