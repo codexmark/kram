@@ -27,7 +27,7 @@ echo "==> architecture boundary check"
 # with a clear message. See internal/archcheck.
 go test ./internal/archcheck/ -run TestKramLayeringHolds -count=1
 
-echo "==> go test -race with global coverage"
+echo "==> go test -race with per-package coverage gate"
 coverage_profile="$tmp_dir/coverage.out"
 # devtools/ is intentionally gitignored local scratch space, so it must not
 # make the reproducible repository gate depend on whichever disposable mocks
@@ -45,22 +45,67 @@ if [ "${#coverage_packages[@]}" -eq 0 ]; then
   exit 1
 fi
 go test "${coverage_packages[@]}" -race -count=1 -covermode=atomic -coverprofile="$coverage_profile"
-coverage_stats="$(awk 'NR > 1 {
-  total += $2
-  if ($3 > 0) covered += $2
+
+# Per-package coverage gate. A single global threshold created the wrong
+# incentive (issue #77): for the TUI, where most lines are rendering, the
+# cheapest way to hit a high global number is trivial `View() != ""`-style
+# asserts rather than tests that would catch a regression. A per-package
+# floor keeps the bar high where it protects real logic and honest where a
+# uniform number would just reward coverage-chasing.
+#
+#   - 90%: core business logic — a real strength worth defending.
+#   - 70%: internal/cli/app — rendering-dominated; meaningful behavioral
+#          tests, not trivial asserts written only to feed the gate.
+#   - 60%: internal/localstore — a thin atomic-write helper whose remaining
+#          uncovered lines are defensive fs-error branches (fsync/rename
+#          failures) that can't be triggered portably; forcing them would be
+#          exactly the coverage-chasing this change removes.
+#   - 80%: everything else (the default floor).
+package_threshold() {
+  case "$1" in
+    */internal/daemon/agent|*/internal/router|*/internal/permission|*/internal/provider|*/internal/daemon/compaction|*/internal/breaker|*/internal/config|*/internal/daemon/contextpolicy|*/internal/gateway)
+      echo 90 ;;
+    */internal/cli/app) echo 70 ;;
+    */internal/localstore) echo 60 ;;
+    *) echo 80 ;;
+  esac
 }
-END {
-  if (total <= 0) exit 1
-  printf "%d %d %.6f", covered, total, covered * 100 / total
-}' "$coverage_profile")"
-read -r coverage_covered coverage_statements coverage_percent <<< "$coverage_stats"
-echo "  total statement coverage: ${coverage_percent}% (${coverage_covered}/${coverage_statements})"
-awk -v covered="$coverage_covered" -v total="$coverage_statements" 'BEGIN {
-  if (covered * 100 < total * 90) {
-    printf "coverage gate failed: %.6f%% is below 90.0%%\n", covered * 100 / total > "/dev/stderr"
-    exit 1
-  }
-}'
+
+# Reduce the profile to "package covered total" lines (the package is the
+# file path minus its trailing /file.go and the :range suffix).
+per_package_coverage="$(awk 'NR > 1 {
+  pkg = $1; sub(/:.*/, "", pkg); sub(/\/[^/]*$/, "", pkg)
+  total[pkg] += $2
+  if ($3 > 0) covered[pkg] += $2
+}
+END { for (p in total) printf "%s %d %d\n", p, covered[p], total[p] }' "$coverage_profile" | sort)"
+
+coverage_failed=0
+grand_covered=0
+grand_total=0
+while read -r pkg covered total; do
+  [ -z "$pkg" ] && continue
+  grand_covered=$((grand_covered + covered))
+  grand_total=$((grand_total + total))
+  threshold="$(package_threshold "$pkg")"
+  short="${pkg#github.com/codexmark/kram/}"
+  pct="$(awk -v c="$covered" -v t="$total" 'BEGIN { printf (t > 0 ? "%.1f" : "n/a"), (t > 0 ? c * 100 / t : 0) }')"
+  # Integer compare (covered*100 >= threshold*total) to avoid float rounding.
+  if [ "$total" -gt 0 ] && [ $((covered * 100)) -lt $((threshold * total)) ]; then
+    printf "  FAIL %-40s %5s%% < %d%% (%d/%d)\n" "$short" "$pct" "$threshold" "$covered" "$total" >&2
+    coverage_failed=1
+  else
+    printf "  ok   %-40s %5s%% (>= %d%%)\n" "$short" "$pct" "$threshold"
+  fi
+done <<< "$per_package_coverage"
+
+if [ "$grand_total" -gt 0 ]; then
+  awk -v c="$grand_covered" -v t="$grand_total" 'BEGIN { printf "  overall: %.1f%% (%d/%d)\n", c * 100 / t, c, t }'
+fi
+if [ "$coverage_failed" -ne 0 ]; then
+  echo "coverage gate failed: one or more packages are below their per-package threshold (see above)" >&2
+  exit 1
+fi
 
 echo "==> host build"
 go build ./...

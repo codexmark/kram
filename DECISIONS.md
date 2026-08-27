@@ -5357,3 +5357,51 @@ Tests cover the fidelity of `diffForToolCall` against each apply path
 identical), the SSE round-trip of the diff field, the line classifier
 (including the `--`/`++` trap), viewport sizing (small vs capped), the
 "always" copy, and that a diffless approval renders exactly as before.
+
+---
+
+## Per-package coverage gate (post-audit #77)
+
+`scripts/verify.sh` enforced a single **90% global** coverage floor. The audit
+found the incentive it created was wrong: for `internal/cli/app`, where most
+lines are rendering, the cheapest way to defend a high global number is
+trivial `View() != ""`-style asserts, not tests that catch a regression —
+whole files (`coverage_expansion_test.go`) exist partly to feed the gate. A
+uniform global number rewards coverage-chasing exactly where meaningful
+assertions are hardest.
+
+The gate is now **per-package, tiered**:
+- **90%** — core business logic (`daemon/agent`, `router`, `permission`,
+  `provider`, `daemon/compaction`, `breaker`, `config`, `daemon/contextpolicy`,
+  `gateway`). This is a real strength of the project and the audit was explicit
+  it must *not* drop.
+- **70%** — `internal/cli/app`. Rendering-dominated; the bar rewards
+  behavioral tests (content/output assertions) instead of trivial ones written
+  only for the number. Coverage there is currently 90.3% — the lower floor
+  simply means a legitimate trivial-assert cleanup no longer *fails the build*,
+  removing the perverse incentive rather than mandating deletions (the audit
+  cautioned against gutting TUI coverage).
+- **60%** — `internal/localstore`. A thin atomic-write helper whose remaining
+  uncovered lines are defensive fs-error branches (fsync/rename failure)
+  untriggerable portably; forcing them would be the very coverage-chasing this
+  change removes.
+- **80%** — everything else (the default floor).
+
+The computation reduces the coverage profile to per-package `covered/total`
+with awk, resolves each package's floor with a `case`, and compares with
+integer arithmetic (`covered*100 >= threshold*total`, no float rounding),
+printing a per-package table plus an overall figure. Verified both ways: it
+passes on the current tree and, in a negative test, correctly flags a package
+held to an unmet floor. `verify.sh` runs green end to end.
+
+Deliberately *not* done: a purge of "coverage-chasing" tests. Inspection found
+the naked `View() != ""` anti-pattern isn't actually widespread — the
+`!= ""` assertions that exist are behavioral (empty-input → empty-output), and
+`coverage_expansion_test.go` now holds real interaction tests. Removing them
+would strip genuine coverage for little gain, against the issue's own caution.
+Fixing the *incentive* (the gate) is the structural remedy; individual trivial
+asserts can now be improved case by case without the gate punishing honest
+removals. Two genuinely-undertested error paths were filled while here:
+`localstore.AtomicWrite`'s MkdirAll-on-a-file and temp-open failures
+(48%→64%), and `onboarding.Load`'s corrupt-file rejection (77.8%→81.5%) —
+real behavioral tests, not number-padding.

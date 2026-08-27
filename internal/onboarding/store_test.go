@@ -1,6 +1,11 @@
 package onboarding
 
-import "testing"
+import (
+	"os"
+	"testing"
+
+	"github.com/codexmark/kram/internal/kramhome"
+)
 
 func isolate(t *testing.T) {
 	t.Helper()
@@ -15,6 +20,26 @@ func TestFreshStateNeedsSetup(t *testing.T) {
 	}
 	if !s.NeedsSetup() {
 		t.Error("a state with no saved file should need setup")
+	}
+}
+
+// TestLoadRejectsCorruptFile covers the JSON-decode failure path: a
+// hand-corrupted onboarding.json must surface an error, not be silently
+// treated as a fresh (needs-setup) or completed state.
+func TestLoadRejectsCorruptFile(t *testing.T) {
+	isolate(t)
+	path, err := kramhome.Path("onboarding.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(path[:len(path)-len("/onboarding.json")], 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("{ not valid json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(); err == nil {
+		t.Error("expected Load to error on a corrupt onboarding.json")
 	}
 }
 
