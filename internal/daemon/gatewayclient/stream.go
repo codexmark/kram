@@ -6,8 +6,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
+	"sync/atomic"
+	"time"
 
 	"github.com/codexmark/kram/internal/openai"
 )
@@ -60,12 +63,36 @@ func (c *Client) ChatCompletionStream(ctx context.Context, model string, message
 		httpReq.Header.Set(openai.PromptCacheKeyHeader, key)
 	}
 
-	resp, err := c.http.Do(httpReq)
+	// Phase liveness instead of a whole-call cap: c.timeout bounds
+	// connect+headers, then converts into an idle backstop reset by every
+	// byte read — the gateway's keep-alive comments (internal/server's
+	// streamResponse) keep it fresh while an upstream attempt is alive but
+	// quiet, so this only ever fires when the pipe is genuinely dead. A
+	// whole-call cap here used to kill healthy long generations one hop
+	// above the provider adapters' identical bug.
+	wctx, cancel := context.WithCancel(ctx)
+	var watchdogFired atomic.Bool
+	watchdog := time.AfterFunc(c.timeout, func() {
+		watchdogFired.Store(true)
+		cancel()
+	})
+	stopWatchdog := func() {
+		watchdog.Stop()
+		cancel()
+	}
+	httpReq = httpReq.WithContext(wctx)
+
+	resp, err := c.stream.Do(httpReq)
 	if err != nil {
+		stopWatchdog()
+		if watchdogFired.Load() {
+			err = fmt.Errorf("no data from the gateway for %s (idle timeout)", c.timeout)
+		}
 		return nil, fmt.Errorf("calling gateway: %w", err)
 	}
 
 	if resp.StatusCode >= 400 {
+		defer stopWatchdog()
 		defer resp.Body.Close()
 		var errResp openai.ErrorResponse
 		if json.NewDecoder(resp.Body).Decode(&errResp) == nil && errResp.Error.Message != "" {
@@ -73,13 +100,15 @@ func (c *Client) ChatCompletionStream(ctx context.Context, model string, message
 		}
 		return nil, fmt.Errorf("gateway returned %s", resp.Status)
 	}
+	body := &idleWatchdogBody{rc: resp.Body, timer: watchdog, idle: c.timeout, fired: &watchdogFired}
 
 	out := make(chan StreamDelta, 16)
 	go func() {
 		defer close(out)
+		defer stopWatchdog()
 		defer resp.Body.Close()
 
-		scanner := bufio.NewScanner(resp.Body)
+		scanner := bufio.NewScanner(body)
 		scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 
 		for scanner.Scan() {
@@ -137,6 +166,9 @@ func (c *Client) ChatCompletionStream(ctx context.Context, model string, message
 			}
 		}
 		if err := scanner.Err(); err != nil {
+			if watchdogFired.Load() {
+				err = fmt.Errorf("no data from the gateway for %s (idle timeout)", c.timeout)
+			}
 			select {
 			case out <- StreamDelta{Err: fmt.Errorf("reading gateway stream: %w", err)}:
 			case <-ctx.Done():
@@ -145,4 +177,24 @@ func (c *Client) ChatCompletionStream(ctx context.Context, model string, message
 	}()
 
 	return out, nil
+}
+
+// idleWatchdogBody resets the streaming watchdog on every successful read,
+// so the timer measures quiet stretches of the gateway stream rather than
+// its total duration — the counterpart of internal/provider's watchdogBody
+// one hop down, duplicated here rather than shared for the same layering
+// reason internal/cli/app duplicates oauthRefreshAdapter.
+type idleWatchdogBody struct {
+	rc    io.ReadCloser
+	timer *time.Timer
+	idle  time.Duration
+	fired *atomic.Bool
+}
+
+func (b *idleWatchdogBody) Read(p []byte) (int, error) {
+	n, err := b.rc.Read(p)
+	if n > 0 {
+		b.timer.Reset(b.idle)
+	}
+	return n, err
 }

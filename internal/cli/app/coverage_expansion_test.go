@@ -659,12 +659,12 @@ func TestStreamEventsAndTranscriptBranches(t *testing.T) {
 
 	m.waitStartedAt = time.Now().Add(-10 * time.Second)
 	m.lastEventAt = time.Now().Add(-10 * time.Second)
-	if got := m.thinkingLine(); !strings.Contains(got, "NO STREAM EVENTS") {
+	if got := m.thinkingLine(); !strings.Contains(got, "NO DATA") {
 		t.Fatalf("stalled thinking line = %q", got)
 	}
 	m.lastEventAt = time.Now()
 	m.workState = workModelActive
-	if got := m.thinkingLine(); !strings.Contains(got, "MODEL ACTIVE") || strings.Contains(got, "NO STREAM EVENTS") {
+	if got := m.thinkingLine(); !strings.Contains(got, "MODEL ACTIVE") || strings.Contains(got, "NO DATA") {
 		t.Fatalf("active thinking line = %q", got)
 	}
 }

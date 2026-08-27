@@ -105,9 +105,11 @@ func TestBuildThreadsTemperatureForOpenAICompat(t *testing.T) {
 }
 
 // TestBuildAppliesTimeout confirms the resolved provider timeout actually
-// reaches the built adapter's HTTP client — Build is the one real
+// reaches the built adapter's phase watchdog — Build is the one real
 // construction site, so this is the end-to-end proof the tunable does
-// something. A zero timeout keeps the adapter's DefaultTimeout.
+// something. A zero timeout keeps the adapter's DefaultTimeout. The HTTP
+// client itself must stay uncapped: a whole-call client timeout is what
+// used to kill long streaming generations mid-answer (see timeout.go).
 func TestBuildAppliesTimeout(t *testing.T) {
 	t.Setenv("FACTORY_TEST_KEY", "sk-test")
 	cfg := config.ProviderConfig{ID: "p", Kind: "anthropic", APIKeyEnv: "FACTORY_TEST_KEY"}
@@ -116,16 +118,19 @@ func TestBuildAppliesTimeout(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := p.(*Anthropic).client.Timeout; got != 42*time.Second {
-		t.Errorf("built client timeout = %v, want 42s", got)
+	if got := p.(*Anthropic).timeout; got != 42*time.Second {
+		t.Errorf("built adapter timeout = %v, want 42s", got)
+	}
+	if got := p.(*Anthropic).client.Timeout; got != 0 {
+		t.Errorf("http client must have no whole-call timeout (kills long streams), got %v", got)
 	}
 
 	def, err := Build(cfg, nil, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := def.(*Anthropic).client.Timeout; got != DefaultTimeout {
-		t.Errorf("client timeout with 0 override = %v, want DefaultTimeout %v", got, DefaultTimeout)
+	if got := def.(*Anthropic).timeout; got != DefaultTimeout {
+		t.Errorf("adapter timeout with 0 override = %v, want DefaultTimeout %v", got, DefaultTimeout)
 	}
 }
 

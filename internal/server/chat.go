@@ -15,6 +15,12 @@ import (
 	"github.com/codexmark/kram/internal/router"
 )
 
+// streamKeepAliveInterval is how often streamResponse writes an SSE
+// comment while waiting on a quiet-but-alive upstream, so the daemon's
+// idle detection on this hop always has bytes to observe. Comfortably
+// under any sane idle threshold, and cheap: two dozen bytes per tick.
+var streamKeepAliveInterval = 15 * time.Second
+
 // classifyTransportError buckets a genuine transport/HTTP-level failure
 // (the request never reached a real answer at all) via openai.Classify,
 // extracting the real upstream status code the same way errorAttempt
@@ -443,9 +449,29 @@ func (s *Server) streamResponse(w http.ResponseWriter, comboID string, routeCtx 
 		}
 	}
 	if keepGoing {
-		for evt := range rest {
-			if !handle(evt) {
-				break
+		// While the upstream is alive but quiet (a reasoning model thinking
+		// before its first token, a slow generation pause), nothing gets
+		// forwarded — so the daemon's side of this connection sees zero
+		// bytes and couldn't tell healthy-quiet from dead. An SSE comment
+		// is protocol-standard, invisible to any data-line parser, and
+		// keeps bytes flowing exactly as long as this attempt is open.
+		keepAlive := time.NewTicker(streamKeepAliveInterval)
+		defer keepAlive.Stop()
+	consume:
+		for {
+			select {
+			case evt, ok := <-rest:
+				if !ok {
+					break consume
+				}
+				if !handle(evt) {
+					break consume
+				}
+			case <-keepAlive.C:
+				fmt.Fprint(w, ": keep-alive\n\n")
+				if flusher != nil {
+					flusher.Flush()
+				}
 			}
 		}
 	}

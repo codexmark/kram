@@ -5555,3 +5555,50 @@ neither applies, "connect a provider to unlock continue", which states the
 unlock condition instead of silently offering nothing — then the row-contextual
 key bar rendered through the shared renderWizardKeybar (accent keys, muted
 labels), replacing the accountsHint* string-concatenation scheme entirely.
+
+---
+
+## Long streaming turns: phase liveness instead of total-time caps
+
+Two live-observed failures on the same run (a big gpt-5.5 generation over the
+ChatGPT/Codex backend, streaming path) turned out to be one architecture bug
+seen from two angles. First, the CLI painted its yellow "NO STREAM EVENTS"
+stall warning during a perfectly healthy wait — the Codex backend legitimately
+sends nothing for 30s+ while reasoning before its first token, and the
+streaming call path (unlike `bufferedCall`, which grew heartbeats for exactly
+this reason) emitted no liveness signal at all. Then the turn died outright:
+`gateway call failed: openai-chatgpt: stream ended in error`, with the gateway
+log showing the real cause — `stream read: context deadline exceeded
+(Client.Timeout ... while reading body)`. Every provider adapter used
+`http.Client{Timeout: 120s}`, a whole-exchange cap that includes reading the
+streamed body, so any generation longer than the timeout was killed mid-answer
+and the partial response thrown away. The same total-cap pattern sat one hop
+up in the daemon's gateway client.
+
+The principle the fix installs: **a timeout should bound how long we tolerate
+silence, never how long we tolerate work.** Per hop:
+
+- **Provider adapters** (all four): the configured timeout now arms a phase
+  watchdog — it bounds connect+headers, then converts into an idle detector
+  reset by every byte read from the stream (`newStreamWatchdog`,
+  `timeout.go`). A dead upstream still fails at exactly the old threshold; a
+  slow-but-flowing generation can run indefinitely. Idle expiry is labeled
+  ("no data from upstream for 2m0s (idle timeout)") instead of surfacing as a
+  generic context cancellation.
+- **Gateway → daemon**: while a committed attempt is alive but forwarding
+  nothing, `streamResponse` writes an SSE comment (`: keep-alive`) every 15s —
+  protocol-standard, invisible to data-line parsers — so the local hop always
+  carries bytes when the upstream attempt is genuinely alive.
+- **Daemon's gateway client**: the streaming path dropped its whole-call
+  `http.Client.Timeout` for the same phase treatment (connect bound, then an
+  idle backstop at the configured chain-coherent timeout, which the gateway's
+  keep-alives keep fresh). The buffered path keeps its total cap — with no
+  incremental bytes to observe, a total cap is the right tool there.
+- **Daemon → CLI**: `streamCall` and `runTool` now emit `EventHeartbeat` on
+  the same 4s cadence `bufferedCall` always had, covering the two remaining
+  silent stretches (model quiet before/between tokens; a long tool run
+  between tool_start and tool_result).
+- **CLI**: with heartbeats flowing, the stall warning only fires on genuine
+  anomalies — and it now diagnoses instead of alarms: "NO DATA · tool bash
+  still running · quiet 12s" / "waiting for the model's first output",
+  replacing the bare "NO STREAM EVENTS".

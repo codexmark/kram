@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/codexmark/kram/internal/daemon/gatewayclient"
+	"github.com/codexmark/kram/internal/daemon/tools"
 	"github.com/codexmark/kram/internal/openai"
 )
 
@@ -169,5 +170,65 @@ func TestCallModelUsesBufferedByDefault(t *testing.T) {
 	}
 	if sawStreamingRequest {
 		t.Error("expected the default (PreferStreaming=false) path to send stream:false")
+	}
+}
+
+// TestStreamCallEmitsHeartbeatWhileProviderIsQuiet mirrors
+// TestBufferedCallEmitsHeartbeatDuringLongWait for the streaming path —
+// the live-observed gap behind the CLI's "NO DATA" warning during a
+// reasoning model's healthy pre-first-token silence: streamCall used to
+// emit nothing at all until the first delta arrived.
+func TestStreamCallEmitsHeartbeatWhileProviderIsQuiet(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fl := w.(http.Flusher)
+		fl.Flush()                         // headers out immediately — the stream is open
+		time.Sleep(120 * time.Millisecond) // then quiet for several heartbeat intervals
+		w.Write([]byte("data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},\"finish_reason\":null}]}\n\n"))
+		w.Write([]byte("data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"))
+		w.Write([]byte("data: [DONE]\n\n"))
+		fl.Flush()
+	}))
+	defer srv.Close()
+
+	s := &Service{gateway: gatewayclient.New(srv.URL), heartbeatInterval: 20 * time.Millisecond, cfg: Config{PreferStreaming: true}}
+
+	var heartbeats int
+	result, err := s.streamCall(context.Background(), "default", nil, nil, func(evt Event) {
+		if evt.Kind == EventHeartbeat {
+			heartbeats++
+		}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Content != "hi" {
+		t.Errorf("Content = %q, want %q", result.Content, "hi")
+	}
+	if heartbeats < 2 {
+		t.Errorf("expected multiple heartbeats during a 120ms quiet stretch with a 20ms interval, got %d", heartbeats)
+	}
+}
+
+// TestRunToolEmitsHeartbeatDuringLongTool: between tool_start and the
+// tool's result there are no incremental events, so a long tool run must
+// heartbeat for the same reason the model-call paths do.
+func TestRunToolEmitsHeartbeatDuringLongTool(t *testing.T) {
+	workspace := t.TempDir()
+	s := &Service{tools: tools.NewRegistry(workspace, nil, nil), heartbeatInterval: 20 * time.Millisecond}
+
+	var heartbeats int
+	activity, _ := s.runTool(context.Background(),
+		openai.ToolCall{ID: "c1", Function: openai.ToolCallFunction{Name: "bash", Arguments: `{"command":"sleep 0.12"}`}},
+		func(evt Event) {
+			if evt.Kind == EventHeartbeat {
+				heartbeats++
+			}
+		})
+	if !activity.OK {
+		t.Fatalf("bash sleep failed: %+v", activity)
+	}
+	if heartbeats < 2 {
+		t.Errorf("expected multiple heartbeats during a 120ms tool run with a 20ms interval, got %d", heartbeats)
 	}
 }

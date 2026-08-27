@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/codexmark/kram/internal/openai"
 )
@@ -24,6 +25,7 @@ type Gemini struct {
 	apiKey  string
 	model   string
 	client  *http.Client
+	timeout time.Duration
 }
 
 // NewGemini constructs the Gemini adapter. baseURL defaults to the public
@@ -38,7 +40,8 @@ func NewGemini(id, baseURL, apiKey, model string, caps capabilities) *Gemini {
 		baseURL:      baseURL,
 		apiKey:       apiKey,
 		model:        model,
-		client:       &http.Client{Timeout: DefaultTimeout},
+		client:       &http.Client{},
+		timeout:      DefaultTimeout,
 	}
 }
 
@@ -207,8 +210,15 @@ func (p *Gemini) ChatCompletion(ctx context.Context, req openai.ChatCompletionRe
 	}
 
 	url := fmt.Sprintf("%s/v1beta/models/%s:streamGenerateContent?alt=sse&key=%s", p.baseURL, model, p.apiKey)
+	// Phase watchdog, not a whole-call cap: p.timeout bounds connect+
+	// headers now, then converts into an idle detector on the response
+	// body below — a long generation that keeps streaming bytes is never
+	// cut off mid-answer.
+	ctx, watchdog := newStreamWatchdog(ctx, p.timeout, p.id)
+
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
 	if err != nil {
+		watchdog.Stop()
 		return nil, fmt.Errorf("%s: building request: %w", p.id, err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
@@ -216,22 +226,26 @@ func (p *Gemini) ChatCompletion(ctx context.Context, req openai.ChatCompletionRe
 
 	resp, err := p.client.Do(httpReq)
 	if err != nil {
-		return nil, fmt.Errorf("%s: request failed: %w", p.id, err)
+		watchdog.Stop()
+		return nil, fmt.Errorf("%s: request failed: %w", p.id, watchdog.wrapErr(err))
 	}
 	if resp.StatusCode >= 400 {
+		defer watchdog.Stop()
 		defer resp.Body.Close()
 		return nil, &HTTPError{Provider: p.id, StatusCode: resp.StatusCode, Status: resp.Status}
 	}
 
+	respBody := watchdog.Body(resp.Body)
+
 	events := make(chan StreamEvent, 16)
 	go func() {
 		defer close(events)
-		defer resp.Body.Close()
+		defer respBody.Close()
 
 		var usage *openai.Usage
 		var toolCalls []openai.ToolCall
 		callIndex := 0
-		err := scanSSEData(resp.Body, func(data string) bool {
+		err := scanSSEData(respBody, func(data string) bool {
 			var chunk geminiStreamChunk
 			if err := json.Unmarshal([]byte(data), &chunk); err != nil {
 				return true // skip malformed chunk, keep reading

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/codexmark/kram/internal/openai"
 )
@@ -35,6 +36,7 @@ type Anthropic struct {
 	apiKey  string
 	model   string
 	client  *http.Client
+	timeout time.Duration
 }
 
 // NewAnthropic constructs the Anthropic adapter. baseURL defaults to the
@@ -49,7 +51,8 @@ func NewAnthropic(id, baseURL, apiKey, model string, caps capabilities) *Anthrop
 		baseURL:      baseURL,
 		apiKey:       apiKey,
 		model:        model,
-		client:       &http.Client{Timeout: DefaultTimeout},
+		client:       &http.Client{},
+		timeout:      DefaultTimeout,
 	}
 }
 
@@ -233,8 +236,15 @@ func (p *Anthropic) ChatCompletion(ctx context.Context, req openai.ChatCompletio
 		return nil, fmt.Errorf("%s: encoding request: %w", p.id, err)
 	}
 
+	// Phase watchdog, not a whole-call cap: p.timeout bounds connect+
+	// headers now, then converts into an idle detector on the response
+	// body below — a long generation that keeps streaming bytes is never
+	// cut off mid-answer.
+	ctx, watchdog := newStreamWatchdog(ctx, p.timeout, p.id)
+
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+"/v1/messages", bytes.NewReader(payload))
 	if err != nil {
+		watchdog.Stop()
 		return nil, fmt.Errorf("%s: building request: %w", p.id, err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
@@ -244,17 +254,21 @@ func (p *Anthropic) ChatCompletion(ctx context.Context, req openai.ChatCompletio
 
 	resp, err := p.client.Do(httpReq)
 	if err != nil {
-		return nil, fmt.Errorf("%s: request failed: %w", p.id, err)
+		watchdog.Stop()
+		return nil, fmt.Errorf("%s: request failed: %w", p.id, watchdog.wrapErr(err))
 	}
 	if resp.StatusCode >= 400 {
+		defer watchdog.Stop()
 		defer resp.Body.Close()
 		return nil, &HTTPError{Provider: p.id, StatusCode: resp.StatusCode, Status: resp.Status}
 	}
 
+	respBody := watchdog.Body(resp.Body)
+
 	events := make(chan StreamEvent, 16)
 	go func() {
 		defer close(events)
-		defer resp.Body.Close()
+		defer respBody.Close()
 
 		var inputTokens, outputTokens int
 		// Anthropic streams tool_use blocks as a content_block_start
@@ -263,7 +277,7 @@ func (p *Anthropic) ChatCompletion(ctx context.Context, req openai.ChatCompletio
 		blockIsToolUse := map[int]*openai.ToolCall{}
 		var toolCalls []openai.ToolCall
 
-		err := scanSSEData(resp.Body, func(data string) bool {
+		err := scanSSEData(respBody, func(data string) bool {
 			var evt anthropicStreamEvent
 			if err := json.Unmarshal([]byte(data), &evt); err != nil {
 				return true // skip malformed event, keep reading
