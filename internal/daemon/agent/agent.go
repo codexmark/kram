@@ -357,6 +357,17 @@ type sessionApprover struct {
 }
 
 func (a *sessionApprover) Approve(ctx context.Context, toolName, subject string) (tools.ApprovalDecision, error) {
+	// No live event sink means no human is watching this run's stream —
+	// the subagent case (RunTask passes onEvent: nil). Emitting an
+	// approval prompt nobody can see and then blocking on a channel
+	// nobody can feed would just stall for the full approvalTimeout (and
+	// with delegate_task running several subagents concurrently, several
+	// such stalls at once). Deny immediately instead: a subagent must
+	// never be able to auto-approve what a human operator would have been
+	// asked to sign off on.
+	if a.onEvent == nil {
+		return tools.ApprovalDeny, nil
+	}
 	id := session.NewID()
 	ch := make(chan tools.ApprovalDecision, 1)
 
@@ -391,6 +402,15 @@ type sessionAsker struct {
 }
 
 func (a *sessionAsker) Ask(ctx context.Context, question string, options []string) (string, error) {
+	// Same reasoning as sessionApprover.Approve: with no live event sink
+	// (the subagent case — RunTask passes onEvent: nil) the question
+	// reaches no one and the wait would block for the full
+	// askQuestionTimeout. Return an error immediately so the subagent's
+	// tool call fails fast with a clear reason it can act on, rather than
+	// hanging the whole delegation.
+	if a.onEvent == nil {
+		return "", fmt.Errorf("ask_question is unavailable in this context (no interactive session attached)")
+	}
 	id := session.NewID()
 	ch := make(chan string, 1)
 
@@ -699,6 +719,16 @@ func (s *Service) runLoop(ctx context.Context, sessionID, model string, depth in
 			}
 			graceUsed = true
 		}
+
+		// This turn produced tool calls — a productive turn — so clear the
+		// empty-retry flag. Without this, a single empty response anywhere
+		// in the run latches emptyRetryUsed on forever, and every
+		// subsequent turn (including ones mid-productive-tool-loop) keeps
+		// getting the "your previous response was empty, answer in plain
+		// text now" nudge — the exact opposite of what a model working
+		// through a chain of tool calls needs. The nudge is meant only for
+		// the one retry immediately after an empty response.
+		emptyRetryUsed = false
 
 		if _, err := s.store.AppendMessage(sessionID, store.Message{
 			Role: "assistant", Content: callResult.Content, ToolCalls: callResult.ToolCalls, Provider: callResult.Provider, ProviderItems: callResult.ProviderItems,

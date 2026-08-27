@@ -182,7 +182,13 @@ func TestCompactSummarizesAndWrapsAsReferenceOnly(t *testing.T) {
 	}
 }
 
-func TestCompactExcludesExistingSystemMessagesFromTranscript(t *testing.T) {
+// TestCompactFoldsPriorSummaryForwardButSkipsOtherSystemMessages pins the
+// chained-compaction fix: a prior compaction marker must be carried into
+// the new summary's input (or a second compaction permanently drops the
+// session's earliest arc), while every OTHER system message in effective
+// history — the ephemeral project-context/memory re-injection markers —
+// stays excluded, since those are rebuilt fresh each turn.
+func TestCompactFoldsPriorSummaryForwardButSkipsOtherSystemMessages(t *testing.T) {
 	var gotTranscript string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req openai.ChatCompletionRequest
@@ -197,14 +203,18 @@ func TestCompactExcludesExistingSystemMessagesFromTranscript(t *testing.T) {
 
 	gw := gatewayclient.New(srv.URL)
 	_, err := Compact(context.Background(), gw, "default", []store.Message{
-		{Role: "system", Name: CompactionMarkerName, Content: "PRIOR SESSION CONTEXT"},
+		{Role: "system", Name: CompactionMarkerName, Content: "EARLIER ARC: shipped feature X"},
+		{Role: "system", Name: "kram:project_context", Content: "PROJECT CONTEXT reinjection marker"},
 		{Role: "user", Content: "actual turn"},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(gotTranscript, "PRIOR SESSION CONTEXT") {
-		t.Error("the transcript sent for summarization should exclude existing system messages")
+	if !strings.Contains(gotTranscript, "EARLIER ARC: shipped feature X") {
+		t.Errorf("a prior compaction summary must be folded into the new summary's input, got %q", gotTranscript)
+	}
+	if strings.Contains(gotTranscript, "PROJECT CONTEXT reinjection marker") {
+		t.Error("non-compaction system markers (project-context/memory) should still be excluded from the transcript")
 	}
 	if !strings.Contains(gotTranscript, "actual turn") {
 		t.Errorf("transcript should include the real conversation turn, got %q", gotTranscript)

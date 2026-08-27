@@ -264,3 +264,46 @@ func TestRunLoopPromptAssemblyIncludesEmptyRetryNudge(t *testing.T) {
 		t.Errorf("second request's last message should be the empty-retry nudge, got %+v", last)
 	}
 }
+
+// TestRunLoopEmptyRetryNudgeClearsAfterProductiveTurn is the regression
+// test for the latching bug: one empty response used to set emptyRetryUsed
+// forever, so every later turn in the run — even ones mid-productive-tool-
+// loop — kept getting the "your previous response was empty" nudge. Here
+// the model goes empty, retries into a real tool call (a productive turn),
+// then answers; the request that carries that final answer must NOT still
+// carry the stale nudge.
+func TestRunLoopEmptyRetryNudgeClearsAfterProductiveTurn(t *testing.T) {
+	workspace := t.TempDir()
+	toolCall := openai.ToolCall{
+		ID: "call_process_list", Type: "function",
+		Function: openai.ToolCallFunction{Name: "process_list", Arguments: `{}`},
+	}
+	srv, requests := fakeGateway(t, []scriptedChatResponse{
+		{content: ""},                            // turn 1: empty -> triggers the nudge on the retry
+		{toolCalls: []openai.ToolCall{toolCall}}, // turn 2 (retry): a real tool call — productive, clears the flag
+		{content: "done"},                        // turn 3: final answer
+	})
+	defer srv.Close()
+
+	s := newTestService(t, workspace, srv.URL, Config{Workspace: workspace, MaxTurns: 10})
+	newTestSession(t, s, "sess-1")
+
+	if _, err := s.Run(context.Background(), "sess-1", "oi", nil, nil); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	reqs := requests()
+	if len(reqs) != 3 {
+		t.Fatalf("expected exactly 3 gateway requests, got %d", len(reqs))
+	}
+	// The retry (request 2) legitimately carries the nudge...
+	if r2 := reqs[1]; !strings.Contains(r2[len(r2)-1].Content, "was empty") {
+		t.Errorf("request 2 (the retry) should carry the empty-retry nudge")
+	}
+	// ...but request 3, after a productive tool-call turn, must not.
+	for _, m := range reqs[2] {
+		if strings.Contains(m.Content, "was empty") {
+			t.Fatalf("request 3 still carries the stale empty-retry nudge after a productive turn: %+v", m)
+		}
+	}
+}

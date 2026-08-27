@@ -4567,3 +4567,61 @@ adapter level; `TestBuildThreadsTemperatureForOpenAICompat`
 (`internal/provider/factory_test.go`) is the end-to-end proof through
 `Build` itself — the config field reaching a real outgoing request, not
 just parsing without error.
+
+---
+
+## Three targeted agent-loop robustness fixes (post-audit)
+
+A full codebase audit surfaced three small, independent correctness bugs
+in the agent loop, each degrading behavior silently in exactly the hard
+cases (weak model, subagents, long session) that are the product's stated
+target. All three were verified against the real code before fixing; each
+got a mechanism-level regression test.
+
+**1. `emptyRetryUsed` latched on forever.** `agent.go` set `emptyRetryUsed
+= true` on the first empty model response (to trigger the "your previous
+response was empty, answer in plain text now" nudge on the retry) but
+never cleared it. Since it feeds `compileTurnPostscript`, a single empty
+response anywhere in a run meant *every subsequent turn* — including ones
+mid-productive-tool-loop — kept getting that nudge, the exact opposite of
+what a model working through a chain of tool calls needs. Fixed by
+resetting `emptyRetryUsed = false` once a turn produces tool calls (a
+productive turn) — the nudge is meant only for the one retry immediately
+after an empty response. `TestRunLoopEmptyRetryNudgeClearsAfterProductive
+Turn` scripts empty → tool-call → answer and asserts the final request no
+longer carries the stale nudge.
+
+**2. Subagent `ask_question`/approval stalled 10 minutes in silence.**
+`RunTask` runs a subagent with `onEvent: nil`, but `runLoop` installs
+`sessionAsker`/`sessionApprover` with that same nil callback. If a
+subagent called `ask_question`, or a tool hit an `Ask` policy, the event
+was emitted to nobody (`emit` drops a nil callback) and the goroutine
+blocked on a channel no one could feed — for the full 10-minute
+`askQuestionTimeout`/`approvalTimeout`, and with `delegate_task` running
+up to 3 subagents concurrently, several such stalls at once. Both methods
+now short-circuit when `onEvent == nil`: `Approve` denies immediately (a
+subagent must never auto-approve what a human operator would have been
+asked to sign off on), `Ask` returns a clear error fast. `TestSession
+AskerApproverNilOnEventShortCircuits` uses a plain non-cancelled context
+so a missing short-circuit would hang the test for the full timeout
+rather than fail — the exact stall the fix prevents. The pre-existing
+cancellation test relied on nil `onEvent` to reach the `ctx.Done()` path;
+it was updated to pass a non-nil no-op callback, since that path is now
+only reachable with a real event sink.
+
+**3. Chained compaction discarded the previous summary.** `Compact` built
+the summarization transcript by skipping every `system` message — which
+includes the prior compaction marker (a system message that
+`EffectiveHistory` prepends as the lead message). So a *second* compaction
+threw away the first summary, permanently losing the session's earliest
+arc. Fixed by folding the prior compaction marker's content into the new
+summary's input (tagged "earlier session summary — fold this forward"),
+while still skipping every other system message — the ephemeral
+project-context/memory re-injection markers (see the change-detection
+entry above), which are rebuilt fresh each turn and correctly ignored.
+The pre-existing `TestCompactExcludesExistingSystemMessagesFromTranscript`
+encoded the *old* (buggy) behavior verbatim — it asserted the prior
+marker was excluded — so it was rewritten as `TestCompactFoldsPriorSummary
+ForwardButSkipsOtherSystemMessages`, pinning both halves of the corrected
+contract: the compaction marker is carried forward, a project-context
+marker is not.
