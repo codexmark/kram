@@ -3,6 +3,7 @@ package config
 import (
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func testConfig() *Config {
@@ -41,6 +42,37 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 	}
 	if got.DefaultCombo != "default" {
 		t.Errorf("DefaultCombo = %q, want %q", got.DefaultCombo, "default")
+	}
+}
+
+// TestSaveLoadRoundTripTunables proves the tunables block survives a real
+// Save→Load through the Config type (not just the isolated Duration test):
+// durations come back as durations, the int threshold as an int, and an
+// unset field stays zero.
+func TestSaveLoadRoundTripTunables(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	want := testConfig()
+	want.Tunables = Tunables{
+		ProviderTimeout:         Duration(5 * time.Minute),
+		BreakerFailureThreshold: 7,
+		// BreakerCooldown and GatewayClientTimeout deliberately left unset.
+	}
+
+	if err := Save(want, path); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Tunables.ProviderTimeout.Duration() != 5*time.Minute {
+		t.Errorf("ProviderTimeout round-trip = %v, want 5m", got.Tunables.ProviderTimeout.Duration())
+	}
+	if got.Tunables.BreakerFailureThreshold != 7 {
+		t.Errorf("BreakerFailureThreshold round-trip = %d, want 7", got.Tunables.BreakerFailureThreshold)
+	}
+	if got.Tunables.BreakerCooldown != 0 {
+		t.Errorf("unset BreakerCooldown round-trip = %v, want 0", got.Tunables.BreakerCooldown.Duration())
 	}
 }
 

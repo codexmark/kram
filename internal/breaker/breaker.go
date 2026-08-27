@@ -17,19 +17,24 @@ const (
 )
 
 const (
-	// failureThreshold is consecutive failures before a provider trips open.
-	failureThreshold = 3
-	// cooldown is how long a provider stays open before a trial half-open request.
-	cooldown = 30 * time.Second
-	// halfOpenTrialTimeout bounds how long an admitted half-open trial
-	// can hold the slot before a fresh one is allowed in — a safety net
-	// for the case where the trial's caller never reports an outcome at
-	// all (e.g. its goroutine panics, or the request is abandoned via
-	// context cancellation before reaching ReportSuccess/ReportFailure),
-	// so a missed report can't wedge the breaker in "trial in flight"
-	// forever.
-	halfOpenTrialTimeout = cooldown
+	// defaultFailureThreshold is consecutive failures before a provider
+	// trips open, when Config doesn't override it.
+	defaultFailureThreshold = 3
+	// defaultCooldown is how long a provider stays open before a trial
+	// half-open request, when Config doesn't override it.
+	defaultCooldown = 30 * time.Second
 )
+
+// Config tunes a Registry's breaker behavior. Zero values fall back to the
+// defaults, so NewRegistryWithConfig(Config{}) == NewRegistry(). Fed from
+// config.Tunables so slow local hardware can loosen the thresholds without
+// a recompile.
+type Config struct {
+	// FailureThreshold is consecutive failures before a provider trips open.
+	FailureThreshold int
+	// Cooldown is how long a provider stays open before a half-open trial.
+	Cooldown time.Duration
+}
 
 type entry struct {
 	mu               sync.Mutex
@@ -46,12 +51,39 @@ type entry struct {
 type Registry struct {
 	mu      sync.RWMutex
 	entries map[string]*entry
+
+	// failureThreshold and cooldown are resolved once at construction from
+	// Config (or its defaults). halfOpenTrialTimeout equals cooldown — it
+	// bounds how long an admitted half-open trial can hold the slot before
+	// a fresh one is allowed in, a safety net for a trial whose caller
+	// never reports an outcome (its goroutine panics, or the request is
+	// abandoned via context cancellation before reaching ReportSuccess/
+	// ReportFailure), so a missed report can't wedge the breaker in "trial
+	// in flight" forever.
+	failureThreshold int
+	cooldown         time.Duration
 }
 
-// NewRegistry creates an empty breaker registry; providers register lazily
-// on first use.
+// NewRegistry creates an empty breaker registry with the default
+// thresholds; providers register lazily on first use.
 func NewRegistry() *Registry {
-	return &Registry{entries: make(map[string]*entry)}
+	return NewRegistryWithConfig(Config{})
+}
+
+// NewRegistryWithConfig is NewRegistry with tunable thresholds; a zero field
+// in cfg falls back to that field's default.
+func NewRegistryWithConfig(cfg Config) *Registry {
+	if cfg.FailureThreshold <= 0 {
+		cfg.FailureThreshold = defaultFailureThreshold
+	}
+	if cfg.Cooldown <= 0 {
+		cfg.Cooldown = defaultCooldown
+	}
+	return &Registry{
+		entries:          make(map[string]*entry),
+		failureThreshold: cfg.FailureThreshold,
+		cooldown:         cfg.Cooldown,
+	}
 }
 
 func (r *Registry) get(id string) *entry {
@@ -76,8 +108,9 @@ func (r *Registry) get(id string) *entry {
 // given provider. A provider in "open" state is allowed exactly once per
 // cooldown window (the half-open trial) — and, once that trial is
 // admitted, no further request is allowed until the trial's outcome is
-// reported (or halfOpenTrialTimeout elapses without one), so concurrent
-// callers can never all pile onto an upstream that's still recovering.
+// reported (or the trial timeout, which equals cooldown, elapses without
+// one), so concurrent callers can never all pile onto an upstream that's
+// still recovering.
 func (r *Registry) Allow(id string) bool {
 	e := r.get(id)
 	e.mu.Lock()
@@ -87,14 +120,14 @@ func (r *Registry) Allow(id string) bool {
 	case closed:
 		return true
 	case open:
-		if time.Since(e.openedAt) >= cooldown {
+		if time.Since(e.openedAt) >= r.cooldown {
 			e.state = halfOpen
 			e.trialAt = time.Now()
 			return true
 		}
 		return false
 	case halfOpen:
-		if e.trialAt.IsZero() || time.Since(e.trialAt) >= halfOpenTrialTimeout {
+		if e.trialAt.IsZero() || time.Since(e.trialAt) >= r.cooldown {
 			e.trialAt = time.Now()
 			return true
 		}
@@ -130,7 +163,7 @@ func (r *Registry) ReportFailure(id string) {
 	}
 
 	e.consecutiveFails++
-	if e.consecutiveFails >= failureThreshold {
+	if e.consecutiveFails >= r.failureThreshold {
 		e.state = open
 		e.openedAt = time.Now()
 	}

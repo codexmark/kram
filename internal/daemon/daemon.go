@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/codexmark/kram/internal/daemon/agent"
 	"github.com/codexmark/kram/internal/daemon/gatewayclient"
@@ -72,6 +73,12 @@ type Config struct {
 	// to a 0600 daemon.token file next to the DB so a standalone CLI can
 	// attach.
 	AuthToken string
+	// GatewayClientTimeout caps the whole HTTP call the daemon makes to the
+	// gateway. Zero means gatewayclient.DefaultTimeout. cmd/kram sets this
+	// to a value derived from the gateway config's provider timeout and
+	// longest fallback chain (config.Tunables.ResolvedGatewayClientTimeout),
+	// so the client never cuts off a legitimate multi-provider round.
+	GatewayClientTimeout time.Duration
 }
 
 // Run opens the store, builds the agent loop, and serves the daemon's
@@ -113,7 +120,7 @@ func Run(ctx context.Context, cfg Config, logger *slog.Logger) error {
 	}
 	defer st.Close()
 
-	gw := gatewayclient.New(cfg.GatewayURL)
+	gw := gatewayclient.NewWithTimeout(cfg.GatewayURL, cfg.GatewayClientTimeout)
 	sessions := session.New(st)
 
 	// Best-effort: a missing/unreadable settings file just means nothing's

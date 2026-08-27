@@ -13,6 +13,24 @@ import (
 	"github.com/codexmark/kram/internal/openai"
 )
 
+func TestNewWithTimeout(t *testing.T) {
+	c := NewWithTimeout("http://x", 7*time.Second)
+	if c.http.Timeout != 7*time.Second {
+		t.Errorf("timeout = %v, want 7s", c.http.Timeout)
+	}
+	// A non-positive timeout falls back to the default.
+	if got := NewWithTimeout("http://x", 0).http.Timeout; got != DefaultTimeout {
+		t.Errorf("timeout with 0 = %v, want DefaultTimeout %v", got, DefaultTimeout)
+	}
+	if got := NewWithTimeout("http://x", -5).http.Timeout; got != DefaultTimeout {
+		t.Errorf("timeout with negative = %v, want DefaultTimeout %v", got, DefaultTimeout)
+	}
+	// New keeps its historical default.
+	if got := New("http://x").http.Timeout; got != DefaultTimeout {
+		t.Errorf("New timeout = %v, want DefaultTimeout %v", got, DefaultTimeout)
+	}
+}
+
 func TestChatCompletionSendsRunIDHeaderWhenSet(t *testing.T) {
 	var gotHeader string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

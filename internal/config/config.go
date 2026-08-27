@@ -166,6 +166,10 @@ type Config struct {
 	Combos    []ComboConfig    `yaml:"combos"`
 	// DefaultCombo is used when a request's "model" doesn't match a combo ID.
 	DefaultCombo string `yaml:"default_combo"`
+	// Tunables overrides the operational timeouts and breaker thresholds
+	// that were previously compiled-in constants. Optional — an absent
+	// block reproduces the old behavior exactly. See tunables.go.
+	Tunables Tunables `yaml:"tunables,omitempty"`
 }
 
 // Load reads and validates a YAML config file.
@@ -252,6 +256,23 @@ func (c *Config) validate() error {
 
 	if c.DefaultCombo != "" && !comboIDs[c.DefaultCombo] {
 		return fmt.Errorf("config: default_combo %q is not a defined combo", c.DefaultCombo)
+	}
+
+	// Tunables are optional, but a negative duration or threshold is never
+	// meaningful and would silently disable the guard it configures (a
+	// negative timeout, once resolved, would compare as "already elapsed").
+	// Reject it loudly rather than let it brick the setting.
+	if c.Tunables.ProviderTimeout < 0 {
+		return fmt.Errorf("config: tunables.provider_timeout must not be negative")
+	}
+	if c.Tunables.GatewayClientTimeout < 0 {
+		return fmt.Errorf("config: tunables.gateway_client_timeout must not be negative")
+	}
+	if c.Tunables.BreakerCooldown < 0 {
+		return fmt.Errorf("config: tunables.breaker_cooldown must not be negative")
+	}
+	if c.Tunables.BreakerFailureThreshold < 0 {
+		return fmt.Errorf("config: tunables.breaker_failure_threshold must not be negative")
 	}
 	return nil
 }

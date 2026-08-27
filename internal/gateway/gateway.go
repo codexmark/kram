@@ -46,7 +46,7 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, credStore
 				return credStore.Resolve(ctx, envVar, refreshAdapter)
 			}
 		}
-		p, err := provider.Build(pc, resolve)
+		p, err := provider.Build(pc, resolve, cfg.Tunables.ResolvedProviderTimeout())
 		if err != nil {
 			// A single provider failing to build (almost always a missing
 			// or revoked credential left behind by a stale config.yaml)
@@ -65,7 +65,10 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, credStore
 		return fmt.Errorf("no provider could be built (%d configured, all failed) — check credentials and provider config", len(cfg.Providers))
 	}
 
-	breakers := breaker.NewRegistry()
+	breakers := breaker.NewRegistryWithConfig(breaker.Config{
+		FailureThreshold: cfg.Tunables.ResolvedBreakerFailureThreshold(),
+		Cooldown:         cfg.Tunables.ResolvedBreakerCooldown(),
+	})
 	tel := telemetry.New()
 
 	routerCfg := sanitizeCombosForBuiltProviders(cfg, providers, logger)

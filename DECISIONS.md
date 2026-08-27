@@ -4967,3 +4967,68 @@ behind on success; `Open` really lands the DB in `wal` mode with a
 successful `AppendMessage` leaves the session's `updated_at` equal to the
 new message's `created_at`, the visible signature of the two writes
 committing as one unit.
+
+---
+
+## Configurable timeouts and breaker tunables (post-audit #76)
+
+Kram targets local models, where a healthy request's latency ranges from
+seconds to minutes with the model and its cold-load state. The audit found
+the timeouts governing that were all compiled-in constants calibrated for
+fast hosted APIs — so a slow-but-healthy local model gets cut mid-response
+and forced to fall back to a worse candidate — and one of them was
+internally incoherent with the fallback chain.
+
+**The incoherence, concretely.** Each provider had a 120s whole-request
+`http.Client` timeout; the daemon's gateway client had a fixed 180s
+whole-call timeout. But one gateway call can walk a fallback chain of
+several providers back to back, so the client must allow at least
+`maxComboLen × providerTimeout`. With two providers that's 240s > 180s: a
+perfectly legitimate two-candidate fallback round could be killed
+client-side before the chain was even exhausted. A fixed client timeout
+can't be right — it has to be *derived* from the chain it fronts.
+
+**`config.Tunables`** (new `tunables:` block, every field optional; an
+absent block reproduces the old constants exactly) exposes: `provider_timeout`,
+`gateway_client_timeout`, `breaker_failure_threshold`, `breaker_cooldown`.
+Durations use a new `config.Duration` type that marshals to/from Go
+duration strings ("120s", "2m") — yaml.v3 would otherwise read a bare
+number as *nanoseconds*, a footgun in a human-edited file. The zero value
+marshals to nothing, so a Save round-trip never litters the file with
+"0s" lines for tunables nobody set. Negative values are rejected in
+`validate()` (a negative timeout, once resolved, compares as "already
+elapsed" — it would silently disable the guard it configures).
+
+**`ResolvedGatewayClientTimeout(maxComboLen)`** encodes the coherence rule:
+a user-pinned value is honored verbatim (their call), but left unset it's
+derived as `max(180s floor, maxComboLen × providerTimeout + 30s margin)`.
+The 180s floor keeps today's generous ceiling for single-provider setups;
+the margin is headroom so the last candidate isn't racing the client clock.
+`cmd/kram` computes it from the gateway config (`gwCfg.MaxComboLength()`)
+and threads it into `daemon.Config.GatewayClientTimeout` — the daemon can't
+compute it itself because it talks to the gateway over HTTP and never sees
+the provider config, but `cmd/kram` holds both.
+
+**Plumbing kept low-churn deliberately.** The four provider constructors
+(~40 test call sites) and `gatewayclient.New`/`breaker.NewRegistry` (~36
+more) were left signature-compatible: a `timeoutSetter` interface lets
+`provider.Build` apply the timeout after construction via a tiny per-adapter
+method instead of a new constructor arg; `NewRegistryWithConfig` and
+`NewWithTimeout` are additive, with the old constructors now defaulting
+wrappers. So the whole change touched production wiring, not a wall of
+test call sites.
+
+Scope held tight per the issue: timeouts are made *coherent and
+configurable*, not removed — a genuinely dead provider must still be cut.
+Deliberately **not** added: a CLI flag per tunable (config.yaml is the
+coherent home, alongside the providers and combos these values govern; a
+flag each would bloat the CLI for a rarely-touched knob). Also unchanged:
+the idle-vs-total-timeout distinction the issue floats as an ideal — the
+`http.Client` ceiling is still whole-request, and `router.BoundedPeek`
+still owns idle-timeout during the peek phase; splitting the streaming read
+into its own idle timeout is a larger change left for when it's shown to be
+needed. Tests pin the resolver defaults/overrides, the coherence arithmetic
+(a 3-provider combo derives 390s, provably > 3×120s), the breaker honoring
+a tuned threshold/cooldown by actually tripping differently, `Build`
+applying the timeout to the real client, and a full config Save→Load
+round-trip of the `tunables:` block.
