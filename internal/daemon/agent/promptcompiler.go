@@ -313,7 +313,11 @@ func needsFreshInjection(effective []store.Message, markerName, freshContent str
 // and can't replace.
 // envContext is the run-frozen dynamic environment snapshot (#127) —
 // date, active combo, git branch/status/commits; empty omits the part.
-func compilePreamble(workspace, projectContext string, haveProjectContext bool, memoryMsg openai.ChatMessage, haveMemory bool, reg *tools.Registry, toolOrder []string, systemPromptOverride, envContext string) []PromptPart {
+// haveSkills is whether any skill is installed, decided once per run
+// (see runLoop) — false swaps the skills section's check-the-shelf
+// trigger for skillsEmptySection so a fresh install doesn't burn a tool
+// call finding nothing (#134).
+func compilePreamble(workspace, projectContext string, haveProjectContext bool, memoryMsg openai.ChatMessage, haveMemory bool, reg *tools.Registry, toolOrder []string, systemPromptOverride, envContext string, haveSkills bool) []PromptPart {
 	var parts []PromptPart
 	if systemPromptOverride != "" {
 		// Wholesale replacement stays a single "base" part — see
@@ -323,6 +327,13 @@ func compilePreamble(workspace, projectContext string, haveProjectContext bool, 
 		parts = append(parts, PromptPart{ID: "base", Placement: PlacementPreamble, Refresh: RefreshStatic, Source: "builtin", Content: systemPromptOverride})
 	} else {
 		parts = append(parts, compileBaseSections(workspace)...)
+		if !haveSkills {
+			for i := range parts {
+				if parts[i].ID == "skills" {
+					parts[i].Content = skillsEmptySection
+				}
+			}
+		}
 	}
 	if reg != nil {
 		parts = append(parts, compileToolsOverview(reg, toolOrder))

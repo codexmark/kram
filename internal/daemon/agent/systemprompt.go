@@ -92,6 +92,16 @@ Call skill_list BEFORE starting any task that sounds like it has a methodology �
 skill_list is cheap (names and one-line descriptions only). Checking costs almost nothing; missing a relevant skill costs the whole task.
 `
 
+// skillsEmptySection replaces skillsSection when the run starts with no
+// skills installed at all (#134) — the standing order to check the shelf
+// costs a wasted tool round-trip on every first task of a fresh install.
+// Frozen per run like every base section: a skill installed mid-run is
+// picked up by the next run, never by mutating the prefix mid-run.
+const skillsEmptySection = `# Skills
+
+No skills are installed right now — do not call skill_list to check. The user can add them; skill_install installs skill packs from a git repository when asked.
+`
+
 // memoryPolicySection owns when to call memory_write/memory_search — the
 // proactive-save trigger memory_write's own tool description can't carry
 // on its own (see this file's top-level doc comment: it existed and

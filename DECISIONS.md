@@ -5869,3 +5869,19 @@ smoothed bytes/sec estimate, deliberately ending in hot magenta rather
 than colorDanger's red: red already means failure in this TUI, and a
 healthy fast stream must never read as broken. Idle and stalled looks
 are unchanged — the flow takes over only while bytes actually move.
+
+---
+
+## The skills trigger reflects whether any skills exist (#134)
+
+Dogfooding a fresh v0.6.0 install surfaced it immediately: the prompt's
+standing order ("Call skill_list BEFORE starting any task that sounds
+like it has a methodology") sent the model to check a shelf a fresh
+install guarantees is empty — a wasted tool round-trip on every first
+task, observed live. The preamble compiler already holds the registry,
+so the skills section now reflects reality: with zero skills installed
+the section states that plainly and points at skill_install instead of
+ordering a check; the normal trigger returns the moment skills exist.
+Decided once per run (like memory and env-context) so a mid-run
+skill_install changes the next run's prefix, never this one's — prompt
+caching stays intact. The wizard offering a starter skill pack is #135.

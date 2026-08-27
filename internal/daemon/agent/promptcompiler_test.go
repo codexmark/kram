@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,7 +12,7 @@ import (
 )
 
 func TestCompilePreambleBaseOnly(t *testing.T) {
-	parts := compilePreamble("/ws", "", false, openai.ChatMessage{}, false, nil, nil, "", "")
+	parts := compilePreamble("/ws", "", false, openai.ChatMessage{}, false, nil, nil, "", "", true)
 
 	if len(parts) != len(baseSectionOrder) {
 		t.Fatalf("parts = %d, want %d (base sections only): %+v", len(parts), len(baseSectionOrder), parts)
@@ -29,7 +30,7 @@ func TestCompilePreambleSystemPromptOverrideReplacesBaseOnly(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	reg := tools.NewRegistry(t.TempDir(), nil, nil)
 
-	parts := compilePreamble("/ws", "", false, openai.ChatMessage{}, false, reg, nil, "Custom house persona.", "")
+	parts := compilePreamble("/ws", "", false, openai.ChatMessage{}, false, reg, nil, "Custom house persona.", "", true)
 
 	if parts[0].ID != "base" || parts[0].Content != "Custom house persona." {
 		t.Errorf("base part = %+v, want Content=%q exactly (override replaces it wholesale)", parts[0], "Custom house persona.")
@@ -49,14 +50,14 @@ func TestCompilePreambleSystemPromptOverrideReplacesBaseOnly(t *testing.T) {
 }
 
 func TestCompilePreambleEmptyOverridePreservesDefaultSystemPrompt(t *testing.T) {
-	parts := compilePreamble("/ws", "", false, openai.ChatMessage{}, false, nil, nil, "", "")
+	parts := compilePreamble("/ws", "", false, openai.ChatMessage{}, false, nil, nil, "", "", true)
 	if !strings.Contains(parts[0].Content, "Kram") {
 		t.Errorf("empty override should leave the default systemPrompt() output in place, got: %q", parts[0].Content[:min(80, len(parts[0].Content))])
 	}
 }
 
 func TestCompilePreambleWithProjectContextOnly(t *testing.T) {
-	parts := compilePreamble("/ws", "some AGENTS.md text", true, openai.ChatMessage{}, false, nil, nil, "", "")
+	parts := compilePreamble("/ws", "some AGENTS.md text", true, openai.ChatMessage{}, false, nil, nil, "", "", true)
 
 	want := len(baseSectionOrder) + 1 // base sections + project-context
 	if len(parts) != want {
@@ -76,7 +77,7 @@ func TestCompilePreambleWithProjectContextOnly(t *testing.T) {
 
 func TestCompilePreambleWithMemoryOnly(t *testing.T) {
 	memMsg := openai.ChatMessage{Role: "system", Content: "remembered fact"}
-	parts := compilePreamble("/ws", "", false, memMsg, true, nil, nil, "", "")
+	parts := compilePreamble("/ws", "", false, memMsg, true, nil, nil, "", "", true)
 
 	want := len(baseSectionOrder) + 1 // base sections + memory
 	if len(parts) != want {
@@ -93,7 +94,7 @@ func TestCompilePreambleWithMemoryOnly(t *testing.T) {
 
 func TestCompilePreambleWithBothProjectContextAndMemory(t *testing.T) {
 	memMsg := openai.ChatMessage{Content: "remembered fact"}
-	parts := compilePreamble("/ws", "ctx", true, memMsg, true, nil, nil, "", "")
+	parts := compilePreamble("/ws", "ctx", true, memMsg, true, nil, nil, "", "", true)
 
 	want := len(baseSectionOrder) + 2 // base sections, project-context, memory
 	if len(parts) != want {
@@ -362,5 +363,55 @@ func TestPartsToMessagesEmptyInputProducesEmptyOutput(t *testing.T) {
 	msgs := partsToMessages(nil)
 	if len(msgs) != 0 {
 		t.Errorf("expected 0 messages for nil input, got %d", len(msgs))
+	}
+}
+
+// TestSkillsSectionReflectsInstalledSkills (#134): a run that starts
+// with an empty skill shelf must not order the model to go check it —
+// and the normal trigger returns the moment skills exist.
+func TestSkillsSectionReflectsInstalledSkills(t *testing.T) {
+	find := func(parts []PromptPart) string {
+		for _, p := range parts {
+			if p.ID == "skills" {
+				return p.Content
+			}
+		}
+		t.Fatal("no skills part")
+		return ""
+	}
+
+	empty := find(compilePreamble("/ws", "", false, openai.ChatMessage{}, false, nil, nil, "", "", false))
+	if !strings.Contains(empty, "No skills are installed") || strings.Contains(empty, "Call skill_list BEFORE") {
+		t.Fatalf("empty-shelf skills section = %q", empty)
+	}
+	installed := find(compilePreamble("/ws", "", false, openai.ChatMessage{}, false, nil, nil, "", "", true))
+	if !strings.Contains(installed, "Call skill_list BEFORE") {
+		t.Fatalf("installed skills section = %q", installed)
+	}
+}
+
+// TestRunLoopUsesEmptyShelfSkillsSectionOnFreshInstall pins the wire
+// behavior end to end: a real Run against a skill-less registry sends
+// the empty-shelf variant, never the check-the-shelf order.
+func TestRunLoopUsesEmptyShelfSkillsSectionOnFreshInstall(t *testing.T) {
+	workspace := t.TempDir()
+	srv, captured := fakeGateway(t, []scriptedChatResponse{{content: "ok"}})
+	defer srv.Close()
+	s := newTestService(t, workspace, srv.URL, Config{Workspace: workspace, MaxTurns: 3})
+	newTestSession(t, s, "sess-1")
+	if _, err := s.Run(context.Background(), "sess-1", "oi", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	var sawEmpty, sawTrigger bool
+	for _, msg := range captured()[0] {
+		if strings.Contains(msg.Content, "No skills are installed") {
+			sawEmpty = true
+		}
+		if strings.Contains(msg.Content, "Call skill_list BEFORE") {
+			sawTrigger = true
+		}
+	}
+	if !sawEmpty || sawTrigger {
+		t.Fatalf("fresh install prompt: empty=%v trigger=%v, want empty-shelf only", sawEmpty, sawTrigger)
 	}
 }
