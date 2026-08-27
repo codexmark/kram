@@ -201,8 +201,14 @@ func (s *MessageStream) Next() (evt StreamEvent, done bool, err error) {
 	return StreamEvent{}, true, nil // EOF
 }
 
-// Close releases the underlying HTTP connection.
+// Close releases the underlying HTTP connection. Safe to call on a
+// zero-value or already-closed stream (nil resp) — the CLI's interrupt
+// path closes whatever stream it holds without first proving it was ever
+// opened.
 func (s *MessageStream) Close() error {
+	if s == nil || s.resp == nil {
+		return nil
+	}
 	return s.resp.Body.Close()
 }
 

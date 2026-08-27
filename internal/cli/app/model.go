@@ -127,6 +127,14 @@ type Model struct {
 
 	messages []chatMessage
 	waiting  bool
+	// activeStream is the in-flight turn's SSE stream, held so Esc can
+	// close it to interrupt: closing the client connection cancels the
+	// daemon's r.Context(), which runLoop honors, stopping the turn
+	// server-side. interrupting guards the resulting stream error/EOF so
+	// a user-initiated cancel renders as "(interrupted)" rather than a
+	// scary connection error.
+	activeStream *daemonclient.MessageStream
+	interrupting bool
 
 	lastUsage openai.Usage
 
@@ -557,6 +565,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.refreshTranscript()
 			return m, nil
 		}
+		m.activeStream = msg.stream
 		return m, readNextEventCmd(msg.stream)
 
 	case streamEventMsg:
@@ -824,6 +833,23 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.active = panelNone
 			m.syncViewportSize()
 			m.syncTranscriptRenderer()
+			return m, nil
+		}
+		// No panel open and a turn is in flight → interrupt it. Closing
+		// the SSE stream cancels the daemon's turn context; the in-flight
+		// readNextEventCmd will then return an error/EOF that
+		// handleStreamEvent swallows because m.interrupting is set.
+		if m.waiting && m.activeStream != nil {
+			m.interrupting = true
+			_ = m.activeStream.Close()
+			m.activeStream = nil
+			m.waiting = false
+			if n := len(m.messages); n > 0 {
+				lm := &m.messages[n-1]
+				lm.streaming = false
+				lm.Notices = append(lm.Notices, "interrompido pelo usuário")
+			}
+			m.refreshTranscript()
 		}
 		return m, nil
 
@@ -1177,6 +1203,8 @@ func (m Model) submit() (tea.Model, tea.Cmd) {
 	m.err = nil
 	m.routeRunning = false
 	m.routeCall = nil
+	m.interrupting = false
+	m.activeStream = nil
 	m.refreshTranscript()
 	m.viewport.GotoBottom()
 	return m, tea.Batch(startSendMessageCmd(m.daemon, m.sessionID, text), animTickCmd(), m.spin.Tick)
@@ -1198,9 +1226,20 @@ func (m *Model) dropStreamingPlaceholder() {
 func (m Model) handleStreamEvent(msg streamEventMsg) (tea.Model, tea.Cmd) {
 	m.lastEventAt = time.Now() // any event, including error, proves the connection is alive — resets stalled detection
 
+	// A turn the user just interrupted (see the "esc" key handler): the
+	// stream we closed produces one final error/EOF here. Swallow it —
+	// the transcript already shows "interrompido pelo usuário", and
+	// surfacing a connection error for a cancel the user asked for would
+	// be noise. Stop reading the stream.
+	if m.interrupting {
+		m.interrupting = false
+		return m, nil
+	}
+
 	if msg.err != nil {
 		m.waiting = false
 		m.err = msg.err
+		m.activeStream = nil
 		m.finishStreamingPlaceholder()
 		m.refreshTranscript()
 		return m, nil
@@ -1308,6 +1347,7 @@ func (m Model) handleStreamEvent(msg streamEventMsg) (tea.Model, tea.Cmd) {
 		m.waiting = false
 		m.err = nil
 		m.routeRunning = false
+		m.activeStream = nil
 		m.routeTrace = msg.event.RouteTrace
 		m.lastUsage = msg.event.Usage
 		if lm := last(); lm != nil {
