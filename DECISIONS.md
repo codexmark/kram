@@ -4777,3 +4777,46 @@ note): a full coarse-grained bash mode (allow/ask/deny the whole tool,
 no per-command patterns) and an OS sandbox (Landlock/Seatbelt). The three
 fixes here close the concrete, demonstrated escapes; those are larger
 design decisions for later.
+
+---
+
+## Session repair: orphaned tool_calls no longer permanently brick a session (post-audit #65)
+
+The audit found a durability bug that fully contradicts the product's
+"durable sessions" pitch: `agent.runLoop` persists the assistant message
+*with* its `tool_calls` before any tool runs (so the record exists even
+if a tool blocks), and `Registry.Execute` had no `recover`. A crash or a
+tool panic between that append and the results being persisted left the
+session with a `tool_call` that has no matching `tool` message. On the
+next load, `sanitizeToolHistory` only dropped *malformed* calls — a valid
+orphan stayed, and every OpenAI-compatible API rejects that with a 400
+(`ClassInvalidRequest`, non-retryable) on *every* subsequent turn. No
+product escape hatch existed; the session was dead.
+
+Two fixes:
+
+- **Repair at the wire boundary.** `sanitizeToolHistory` (the one place
+  history is made API-valid before sending) now pre-scans for which
+  tool_call IDs actually have a `tool` response, and for any valid call
+  left unanswered synthesizes a placeholder `tool` message — `[interrupted:
+  this tool result was not recorded — the session was resumed after an
+  interruption]` — inserted immediately after the assistant message so
+  ordering stays valid. An `answered` set guards against double-inserting
+  when a real response does exist (which would itself be a 400). Fixing it
+  here means every adapter benefits, and it also retroactively repairs any
+  session already corrupted by an earlier crash.
+- **`recover` in `Registry.Execute`.** A panic inside a tool (a malformed
+  MCP response, a nil-deref in a custom tool) is now converted to a normal
+  tool-error string rather than unwinding past the agent loop — so the
+  loop records *a* result for the call and carries on, never creating a
+  fresh orphan.
+
+`TestSanitizeToolHistoryRepairsOrphanedToolCall` and
+`TestSanitizeToolHistoryNoDoubleRepairWhenAnswered` pin both halves of the
+repair; `TestExecuteRecoversFromToolPanic` (a fake tool that panics) pins
+the recover. The pre-existing sanitize test is unaffected — its one
+tool_call was already answered.
+
+Coordinates with #73's planned single-transaction `AppendMessage` (which
+would shrink the crash window), but the load-time repair is still needed
+for sessions corrupted before that lands, so it's the load-bearing fix.

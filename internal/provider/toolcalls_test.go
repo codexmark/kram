@@ -2,6 +2,7 @@ package provider
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/codexmark/kram/internal/openai"
@@ -92,5 +93,62 @@ func TestSanitizeToolHistoryDropsInvalidPairsAndKeepsValidContext(t *testing.T) 
 	}
 	if got[3].Content != "still useful" || len(got[3].ToolCalls) != 0 {
 		t.Fatalf("assistant text should survive invalid sibling call: %+v", got[3])
+	}
+}
+
+// TestSanitizeToolHistoryRepairsOrphanedToolCall is the regression test
+// for the session-brick bug: an assistant tool_call with a valid ID but
+// no matching tool message (a crash persisted the tool-call message
+// before its result) must get a synthesized placeholder result, right
+// after the assistant message, so the API doesn't 400 the whole request.
+func TestSanitizeToolHistoryRepairsOrphanedToolCall(t *testing.T) {
+	messages := []openai.ChatMessage{
+		{Role: "user", Content: "do it"},
+		{Role: "assistant", ToolCalls: []openai.ToolCall{
+			{ID: "orphan", Type: "function", Function: openai.ToolCallFunction{Name: "bash", Arguments: `{"command":"ls"}`}},
+		}},
+		// No tool message for "orphan" — the crash happened here.
+		{Role: "user", Content: "still there?"},
+	}
+
+	got := sanitizeToolHistory(messages)
+
+	// Expect: user, assistant(orphan), synthetic tool(orphan), user.
+	if len(got) != 4 {
+		t.Fatalf("len = %d, want 4 (a synthetic tool result inserted): %+v", len(got), got)
+	}
+	if got[1].Role != "assistant" || len(got[1].ToolCalls) != 1 {
+		t.Fatalf("assistant tool-call message not preserved: %+v", got[1])
+	}
+	if got[2].Role != "tool" || got[2].ToolCallID != "orphan" {
+		t.Fatalf("no synthetic tool result inserted for the orphaned call: %+v", got[2])
+	}
+	if !strings.Contains(got[2].Content, "interrupted") {
+		t.Errorf("synthetic result should explain the interruption, got %q", got[2].Content)
+	}
+	if got[3].Content != "still there?" {
+		t.Fatalf("later messages should survive the repair: %+v", got[3])
+	}
+}
+
+// TestSanitizeToolHistoryNoDoubleRepairWhenAnswered confirms a call that
+// DOES have a real response gets no synthetic placeholder (no double tool
+// message, which would itself be an API error).
+func TestSanitizeToolHistoryNoDoubleRepairWhenAnswered(t *testing.T) {
+	messages := []openai.ChatMessage{
+		{Role: "assistant", ToolCalls: []openai.ToolCall{
+			{ID: "answered", Type: "function", Function: openai.ToolCallFunction{Name: "bash", Arguments: `{"command":"ls"}`}},
+		}},
+		{Role: "tool", ToolCallID: "answered", Content: "real result"},
+	}
+	got := sanitizeToolHistory(messages)
+	toolCount := 0
+	for _, m := range got {
+		if m.Role == "tool" && m.ToolCallID == "answered" {
+			toolCount++
+		}
+	}
+	if toolCount != 1 {
+		t.Fatalf("answered call got %d tool messages, want exactly 1 (no synthetic duplicate)", toolCount)
 	}
 }
