@@ -809,7 +809,7 @@ func (s *Service) runLoop(ctx context.Context, sessionID, model string, depth in
 		turnOutputBudget := policy.ToolOutputBudgetChars(compaction.EstimateTokens(effective), maxTurnToolOutputChars)
 		for _, tc := range callResult.ToolCalls {
 			emit(onEvent, Event{Kind: EventToolStart, ToolName: tc.Function.Name, ToolArgs: tc.Function.Arguments})
-			activity, toolMsg := s.runTool(ctx, tc)
+			activity, toolMsg := s.runTool(ctx, tc, onEvent)
 			repeatedFailure := stagnation.observe(activity)
 			if repeatedFailure >= 3 {
 				guard := fmt.Sprintf(
@@ -858,8 +858,11 @@ func (s *Service) runLoop(ctx context.Context, sessionID, model string, depth in
 	return RunResult{}, fmt.Errorf("agent loop exhausted %d segments (%d turns) without a final answer", s.cfg.MaxSegmentsPerRun, totalTurns)
 }
 
-// heartbeatInterval is how often bufferedCall emits EventHeartbeat while
-// a buffered gateway call is in flight — chosen with margin under the
+// heartbeatInterval is how often the quiet stretches of a turn emit
+// EventHeartbeat — a buffered gateway call in flight (bufferedCall), a
+// streaming call whose provider hasn't sent anything yet or is pausing
+// mid-generation (streamCall), and a long-running tool between
+// tool_start and tool_result (runTool). Chosen with margin under the
 // CLI's own stall-warning threshold (internal/cli/app/view.go's
 // stallThreshold, 8s at time of writing) so at least one heartbeat lands
 // before that warning would otherwise paint during a longer-but-healthy
@@ -912,37 +915,80 @@ func (s *Service) bufferedCall(ctx context.Context, model string, messages []ope
 // accumulates it into the same shape the non-streaming call returns,
 // emitting each text fragment via onEvent as it arrives. Only reached
 // when Config.PreferStreaming opts a session into it — see callModel.
+//
+// Like bufferedCall, it emits EventHeartbeat while the channel is quiet:
+// a reasoning model can legitimately send nothing for tens of seconds
+// before its first token (and pause mid-generation), and without a
+// liveness signal the CLI's stall detector paints a scary warning over a
+// perfectly healthy wait. Single goroutine, so event emission stays
+// serialized.
 func (s *Service) streamCall(ctx context.Context, model string, messages []openai.ChatMessage, toolDefs []openai.Tool, onEvent EventFunc) (gatewayclient.Result, error) {
 	deltas, err := s.gateway.ChatCompletionStream(ctx, model, messages, toolDefs)
 	if err != nil {
 		return gatewayclient.Result{}, err
 	}
 
+	ticker := time.NewTicker(s.heartbeatInterval)
+	defer ticker.Stop()
 	var content strings.Builder
 	var result gatewayclient.Result
-	for d := range deltas {
-		if d.Err != nil {
-			return gatewayclient.Result{}, d.Err
-		}
-		if d.Content != "" {
-			content.WriteString(d.Content)
-			emit(onEvent, Event{Kind: EventDelta, Content: d.Content})
-		} else if d.Reasoning != "" {
-			emit(onEvent, Event{Kind: EventReasoning, Reasoning: d.Reasoning})
-		}
-		if d.Done {
-			result = gatewayclient.Result{
-				Content: content.String(), ToolCalls: d.ToolCalls,
-				Provider: d.Provider, Attempts: d.Attempts, Usage: d.Usage, ProviderItems: d.ProviderItems,
-				Ranking: d.Ranking, Strategy: d.Strategy,
+	for {
+		select {
+		case d, ok := <-deltas:
+			if !ok {
+				return result, nil
 			}
+			if d.Err != nil {
+				return gatewayclient.Result{}, d.Err
+			}
+			if d.Content != "" {
+				content.WriteString(d.Content)
+				emit(onEvent, Event{Kind: EventDelta, Content: d.Content})
+			} else if d.Reasoning != "" {
+				emit(onEvent, Event{Kind: EventReasoning, Reasoning: d.Reasoning})
+			}
+			if d.Done {
+				result = gatewayclient.Result{
+					Content: content.String(), ToolCalls: d.ToolCalls,
+					Provider: d.Provider, Attempts: d.Attempts, Usage: d.Usage, ProviderItems: d.ProviderItems,
+					Ranking: d.Ranking, Strategy: d.Strategy,
+				}
+			}
+		case <-ticker.C:
+			emit(onEvent, Event{Kind: EventHeartbeat})
 		}
 	}
-	return result, nil
 }
 
-func (s *Service) runTool(ctx context.Context, tc openai.ToolCall) (ToolActivity, store.Message) {
-	resultText, err := s.tools.Execute(ctx, tc.Function.Name, []byte(tc.Function.Arguments))
+// runTool executes one requested tool call. Between EventToolStart and
+// the tool's result there are no incremental events at all, so a long
+// tool run (a test suite, a build) emits EventHeartbeat on the same
+// cadence the model-call paths use — otherwise the CLI's stall detector
+// reads a healthy 30s `go test` exactly like a hung connection.
+func (s *Service) runTool(ctx context.Context, tc openai.ToolCall, onEvent EventFunc) (ToolActivity, store.Message) {
+	type outcome struct {
+		text string
+		err  error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		text, err := s.tools.Execute(ctx, tc.Function.Name, []byte(tc.Function.Arguments))
+		done <- outcome{text, err}
+	}()
+
+	ticker := time.NewTicker(s.heartbeatInterval)
+	defer ticker.Stop()
+	var resultText string
+	var err error
+	for waiting := true; waiting; {
+		select {
+		case out := <-done:
+			resultText, err = out.text, out.err
+			waiting = false
+		case <-ticker.C:
+			emit(onEvent, Event{Kind: EventHeartbeat})
+		}
+	}
 	ok := err == nil
 	if err != nil {
 		resultText = fmt.Sprintf("error: %v", err)

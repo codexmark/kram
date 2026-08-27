@@ -36,31 +36,45 @@ func (e *GatewayError) Error() string { return e.Message }
 type Client struct {
 	baseURL string
 	http    *http.Client
+	// stream is the client the SSE path uses: no whole-call timeout,
+	// because a healthy streamed generation can legitimately outlast any
+	// fixed cap — liveness on that path is governed per phase instead
+	// (connect/headers, then idle between reads; see ChatCompletionStream),
+	// with the gateway's own keep-alive comments proving the upstream
+	// attempt is still alive while it's quiet.
+	stream *http.Client
+	// timeout is the per-phase bound the streaming path enforces, and the
+	// whole-call cap the buffered path keeps (a buffered call has no
+	// incremental bytes to observe, so a total cap remains the right tool
+	// there).
+	timeout time.Duration
 }
 
-// DefaultTimeout is the whole-call timeout New uses. It's a floor, not a
-// ceiling for real deployments: because one gateway call may walk a fallback
-// chain of several providers, the daemon derives a larger, chain-coherent
-// value (see config.Tunables.ResolvedGatewayClientTimeout) and passes it to
-// NewWithTimeout. A fixed 180s here is smaller than 2×the 120s provider
-// timeout, so it must never be the client's real limit when a combo has more
-// than one provider — otherwise a healthy multi-candidate fallback round
-// could be cut off client-side before the chain is exhausted.
+// DefaultTimeout is the buffered path's whole-call timeout and the
+// streaming path's per-phase (connect, then idle) bound. It's a floor, not
+// a ceiling for real deployments: because one gateway call may walk a
+// fallback chain of several providers, the daemon derives a larger,
+// chain-coherent value (see config.Tunables.ResolvedGatewayClientTimeout)
+// and passes it to NewWithTimeout. A fixed 180s here is smaller than 2×the
+// 120s provider timeout, so it must never be the client's real limit when
+// a combo has more than one provider — otherwise a healthy multi-candidate
+// fallback round could be cut off client-side before the chain is
+// exhausted.
 const DefaultTimeout = 180 * time.Second
 
 // New builds a client pointed at a running kram-gateway (e.g. http://127.0.0.1:20128)
-// with the default whole-call timeout.
+// with the default timeout.
 func New(baseURL string) *Client {
 	return NewWithTimeout(baseURL, DefaultTimeout)
 }
 
-// NewWithTimeout is New with an explicit whole-call timeout; a non-positive
-// timeout falls back to DefaultTimeout.
+// NewWithTimeout is New with an explicit timeout; a non-positive timeout
+// falls back to DefaultTimeout.
 func NewWithTimeout(baseURL string, timeout time.Duration) *Client {
 	if timeout <= 0 {
 		timeout = DefaultTimeout
 	}
-	return &Client{baseURL: baseURL, http: &http.Client{Timeout: timeout}}
+	return &Client{baseURL: baseURL, http: &http.Client{Timeout: timeout}, stream: &http.Client{}, timeout: timeout}
 }
 
 type ctxKey int

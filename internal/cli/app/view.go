@@ -241,10 +241,32 @@ func (m Model) thinkingLine() string {
 	if stalled {
 		sinceEvent := time.Since(m.lastEventAt).Round(time.Second)
 		label = thinkingStalledLabel
-		meta = fmt.Sprintf(thinkingStalledMetaFmt, sinceEvent, elapsed)
+		meta = fmt.Sprintf(thinkingStalledMetaFmt, m.stallContext(), sinceEvent, elapsed)
 		return indicator + "  " + styleBadgeWarn.Bold(true).Render(label) + "  " + rail + "  " + styleBadgeWarn.Render(meta)
 	}
 	return indicator + "  " + shimmerText(label, m.animFrame) + "  " + rail + "  " + styleMeta.Render(meta)
+}
+
+// stallContext says what was in flight when the stream went quiet, so the
+// stall warning reads as a diagnosis ("tool bash still running", "waiting
+// for the model's first output") instead of the bare transport symptom —
+// the daemon now heartbeats through model waits and long tool runs, so
+// when this paints it's a genuine anomaly and naming the phase is the
+// most useful fact the client has.
+func (m Model) stallContext() string {
+	switch m.workState {
+	case workToolActive:
+		if m.activeTool != "" {
+			return fmt.Sprintf(stallCtxToolFmt, m.activeTool)
+		}
+		return stallCtxTool
+	case workWriting:
+		return stallCtxMidAnswer
+	case workAnalyzingResult:
+		return stallCtxAnalyzing
+	default:
+		return stallCtxModel
+	}
 }
 
 // reasoningPreviewMaxRunes bounds the live indicator's reasoning excerpt

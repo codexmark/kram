@@ -295,14 +295,14 @@ func TestRunToolAndImageCapability(t *testing.T) {
 	if err := os.WriteFile(path, []byte("hello"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	a, m := s.runTool(context.Background(), openai.ToolCall{ID: "id", Function: openai.ToolCallFunction{Name: "read_file", Arguments: `{"path":"large.txt"}`}})
+	a, m := s.runTool(context.Background(), openai.ToolCall{ID: "id", Function: openai.ToolCallFunction{Name: "read_file", Arguments: `{"path":"large.txt"}`}}, nil)
 	if !a.OK || a.Result != "hello" || m.Content != "hello" || m.ToolCallID != "id" {
 		t.Fatalf("activity=%+v message=%+v", a, m)
 	}
 	if err := os.WriteFile(path, []byte(string(make([]byte, maxToolResultChars+100))), 0644); err != nil {
 		t.Fatal(err)
 	}
-	a, _ = s.runTool(context.Background(), openai.ToolCall{Function: openai.ToolCallFunction{Name: "read_file", Arguments: `{"path":"large.txt"}`}})
+	a, _ = s.runTool(context.Background(), openai.ToolCall{Function: openai.ToolCallFunction{Name: "read_file", Arguments: `{"path":"large.txt"}`}}, nil)
 	if len(a.Result) != maxToolResultChars+len("…") {
 		t.Fatalf("display length = %d", len(a.Result))
 	}

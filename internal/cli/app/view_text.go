@@ -13,8 +13,16 @@ const (
 	thinkingSegmentFmt      = " · segment %d/%d"
 	thinkingReasoningPrefix = " · thinking: "
 	thinkingInterruptHint   = " · esc interrupts"
-	thinkingStalledLabel    = "NO STREAM EVENTS"
-	thinkingStalledMetaFmt  = "%s ago · total %s · esc interrupts"
+	thinkingStalledLabel    = "NO DATA"
+	thinkingStalledMetaFmt  = "%s · quiet %s · total %s · esc interrupts"
+
+	// stallCtx* say what was in flight when the stream went quiet (see
+	// stallContext) — the phase is the most useful fact the client has.
+	stallCtxModel     = "waiting for the model's first output"
+	stallCtxMidAnswer = "stream went quiet mid-answer"
+	stallCtxTool      = "a tool is still running"
+	stallCtxToolFmt   = "tool %s still running"
+	stallCtxAnalyzing = "model re-reading tool results"
 )
 
 // Transcript and top-level view chrome.

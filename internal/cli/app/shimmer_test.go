@@ -133,7 +133,28 @@ func TestThinkingLineDistinguishesProgressFromStall(t *testing.T) {
 	}
 
 	stalled := Model{waitStartedAt: now.Add(-10 * time.Second), lastEventAt: now.Add(-stallThreshold - time.Second)}
-	if got := stalled.thinkingLine(); !strings.Contains(got, thinkingKPlain()) || !strings.Contains(got, "NO STREAM EVENTS") {
+	if got := stalled.thinkingLine(); !strings.Contains(got, thinkingKPlain()) || !strings.Contains(got, "NO DATA") {
 		t.Fatalf("stalled line = %q", got)
+	}
+}
+
+// TestStalledLineNamesWhatWasInFlight: the stall warning must diagnose,
+// not just alarm — a quiet stream during a tool run names the tool, and
+// a quiet stream before any answer text says it's the model being waited
+// on.
+func TestStalledLineNamesWhatWasInFlight(t *testing.T) {
+	now := time.Now()
+	m := Model{
+		waitStartedAt: now.Add(-30 * time.Second),
+		lastEventAt:   now.Add(-stallThreshold - time.Second),
+		workState:     workToolActive,
+		activeTool:    "bash",
+	}
+	if got := m.thinkingLine(); !strings.Contains(got, "tool bash still running") {
+		t.Fatalf("stalled tool line = %q, want the tool named", got)
+	}
+	m.workState = workModelActive
+	if got := m.thinkingLine(); !strings.Contains(got, "waiting for the model's first output") {
+		t.Fatalf("stalled model line = %q, want the model-wait context", got)
 	}
 }

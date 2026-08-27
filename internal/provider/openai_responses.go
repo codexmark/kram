@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/codexmark/kram/internal/openai"
 )
@@ -35,6 +36,7 @@ type OpenAIResponses struct {
 	model   string
 	resolve func(context.Context) (string, error)
 	client  *http.Client
+	timeout time.Duration
 }
 
 // NewOpenAIResponses constructs the adapter. resolve is always required —
@@ -51,7 +53,8 @@ func NewOpenAIResponses(id, baseURL string, resolve func(context.Context) (strin
 		baseURL:      baseURL,
 		model:        model,
 		resolve:      resolve,
-		client:       &http.Client{Timeout: DefaultTimeout},
+		client:       &http.Client{},
+		timeout:      DefaultTimeout,
 	}
 }
 
@@ -235,13 +238,21 @@ func (p *OpenAIResponses) ChatCompletion(ctx context.Context, req openai.ChatCom
 		return nil, fmt.Errorf("%s: encoding request: %w", p.id, err)
 	}
 
+	// Phase watchdog, not a whole-call cap: p.timeout bounds credential
+	// resolution and connect+headers here, then converts into an idle
+	// detector on the response body below — a long generation that keeps
+	// streaming bytes is never cut off mid-answer.
+	ctx, watchdog := newStreamWatchdog(ctx, p.timeout, p.id)
+
 	token, err := p.resolve(ctx)
 	if err != nil {
+		watchdog.Stop()
 		return nil, fmt.Errorf("%s: resolving credential: %w", p.id, err)
 	}
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL, bytes.NewReader(payload))
 	if err != nil {
+		watchdog.Stop()
 		return nil, fmt.Errorf("%s: building request: %w", p.id, err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
@@ -250,9 +261,11 @@ func (p *OpenAIResponses) ChatCompletion(ctx context.Context, req openai.ChatCom
 
 	resp, err := p.client.Do(httpReq)
 	if err != nil {
-		return nil, fmt.Errorf("%s: request failed: %w", p.id, err)
+		watchdog.Stop()
+		return nil, fmt.Errorf("%s: request failed: %w", p.id, watchdog.wrapErr(err))
 	}
 	if resp.StatusCode >= 400 {
+		defer watchdog.Stop()
 		defer resp.Body.Close()
 		detail, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return nil, &HTTPError{
@@ -260,18 +273,19 @@ func (p *OpenAIResponses) ChatCompletion(ctx context.Context, req openai.ChatCom
 			Detail: strings.Join(strings.Fields(string(detail)), " "),
 		}
 	}
+	respBody := watchdog.Body(resp.Body)
 
 	events := make(chan StreamEvent, 16)
 	go func() {
 		defer close(events)
-		defer resp.Body.Close()
+		defer respBody.Close()
 
 		toolCalls := newToolCallAccumulator()
 		toolArgsSeen := map[int]bool{}
 		var inputTokens, outputTokens, cachedTokens, cacheWriteTokens, reasoningTokens int
 		var providerItems []openai.ProviderItem
 
-		err := scanSSEData(resp.Body, func(data string) bool {
+		err := scanSSEData(respBody, func(data string) bool {
 			var evt responsesStreamEvent
 			if err := json.Unmarshal([]byte(data), &evt); err != nil {
 				return true // skip malformed event, keep reading

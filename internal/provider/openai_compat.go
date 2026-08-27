@@ -42,6 +42,7 @@ type OpenAICompatible struct {
 	model       string   // optional: overrides req.Model when set
 	temperature *float64 // optional: overrides req.Temperature when set — see config.ProviderConfig.Temperature
 	client      *http.Client
+	timeout     time.Duration
 }
 
 // NewOpenAICompatible constructs an adapter for an OpenAI-shaped backend.
@@ -53,7 +54,8 @@ func NewOpenAICompatible(id, baseURL, apiKey, model string, temperature *float64
 		apiKey:       apiKey,
 		model:        model,
 		temperature:  temperature,
-		client:       &http.Client{Timeout: DefaultTimeout},
+		client:       &http.Client{},
+		timeout:      DefaultTimeout,
 	}
 }
 
@@ -156,8 +158,15 @@ func (p *OpenAICompatible) ChatCompletion(ctx context.Context, req openai.ChatCo
 		return nil, fmt.Errorf("%s: encoding request: %w", p.id, err)
 	}
 
+	// Phase watchdog, not a whole-call cap: p.timeout bounds connect+
+	// headers now, then converts into an idle detector on the response
+	// body below — a long generation that keeps streaming bytes is never
+	// cut off mid-answer.
+	ctx, watchdog := newStreamWatchdog(ctx, p.timeout, p.id)
+
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+"/chat/completions", bytes.NewReader(payload))
 	if err != nil {
+		watchdog.Stop()
 		return nil, fmt.Errorf("%s: building request: %w", p.id, err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
@@ -173,9 +182,11 @@ func (p *OpenAICompatible) ChatCompletion(ctx context.Context, req openai.ChatCo
 
 	resp, err := p.client.Do(httpReq)
 	if err != nil {
-		return nil, fmt.Errorf("%s: request failed: %w", p.id, err)
+		watchdog.Stop()
+		return nil, fmt.Errorf("%s: request failed: %w", p.id, watchdog.wrapErr(err))
 	}
 	if resp.StatusCode >= 400 {
+		defer watchdog.Stop()
 		defer resp.Body.Close()
 		return nil, &HTTPError{
 			Provider: p.id, StatusCode: resp.StatusCode, Status: resp.Status,
@@ -183,15 +194,17 @@ func (p *OpenAICompatible) ChatCompletion(ctx context.Context, req openai.ChatCo
 		}
 	}
 
+	respBody := watchdog.Body(resp.Body)
+
 	events := make(chan StreamEvent, 16)
 	go func() {
 		defer close(events)
-		defer resp.Body.Close()
+		defer respBody.Close()
 
 		var usage *openai.Usage
 		var upstreamErr error
 		toolCalls := newToolCallAccumulator()
-		err := scanSSEData(resp.Body, func(data string) bool {
+		err := scanSSEData(respBody, func(data string) bool {
 			if data == "[DONE]" {
 				return false
 			}
