@@ -53,6 +53,13 @@ type Provider struct {
 	// server genuinely can't has a way to say so, instead of Kram
 	// silently sending tool definitions a server can't handle.
 	SupportsTools *bool `json:"supports_tools,omitempty"`
+	// ContextWindow is the model's total token window, used to size the
+	// compaction budget (see config.Config.ComboContextWindow). Optional: 0
+	// means "unknown" and is ignored when taking a combo's minimum window.
+	// This matters most for local models — an 8K–32K local server otherwise
+	// inherits Kram's much larger default budget and overflows its real
+	// window every turn without compaction ever firing.
+	ContextWindow int `json:"context_window,omitempty"`
 }
 
 // SupportsToolsOrDefault reports p.SupportsTools' value, or true if it
@@ -101,7 +108,7 @@ func (s *Store) All() []Provider {
 // and model are all required — see Provider.Model's doc comment for why
 // an empty model isn't a supported "passthrough" mode. Persists
 // immediately.
-func (s *Store) Add(name, baseURL, model string, supportsTools bool) (Provider, error) {
+func (s *Store) Add(name, baseURL, model string, supportsTools bool, contextWindow int) (Provider, error) {
 	name = strings.TrimSpace(name)
 	baseURL = strings.TrimSpace(baseURL)
 	model = strings.TrimSpace(model)
@@ -114,6 +121,9 @@ func (s *Store) Add(name, baseURL, model string, supportsTools bool) (Provider, 
 	if model == "" {
 		return Provider{}, fmt.Errorf("custom provider model is required — Kram cannot forward the combo's internal routing id upstream as a substitute")
 	}
+	if contextWindow < 0 {
+		contextWindow = 0
+	}
 
 	id := s.uniqueID(slugify(name))
 	p := Provider{
@@ -123,6 +133,7 @@ func (s *Store) Add(name, baseURL, model string, supportsTools bool) (Provider, 
 		EnvVar:        envVarFor(id),
 		Model:         model,
 		SupportsTools: &supportsTools,
+		ContextWindow: contextWindow,
 	}
 	s.entries = append(s.entries, p)
 	if err := s.save(); err != nil {

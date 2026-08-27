@@ -5138,3 +5138,67 @@ interpolation, lost glyphs, and inconsistent terms — zero findings. Final
 gate: `go vet` clean (catches any Printf verb/arg mismatch), the full
 `go test ./... -race` green, and a repo-wide sweep confirming no pt-BR
 remains in any user-facing UI string.
+
+---
+
+## Per-model context budget + image token cost (post-audit #70, parts 1 & 2)
+
+Two context-budget defects the audit found, both in `internal/daemon/compaction`:
+
+**60K hardcoded, no entrypoint.** `DefaultMaxTokens = 60_000` was the effective
+budget for every deployment — `agent.Config.MaxContextTokens` fell to it and no
+flag or config field exposed it. So a small local model (8K–32K window)
+overflowed its real window every turn *without compaction ever firing* (the
+trigger only acts above 60K → the provider rejects or silently truncates),
+while a big hosted model (200K+) compacted at a third of its window, throwing
+away useful context. Same shape as `PreferStreaming` before #57: a reasonable
+default that had to become configurable once it met real hardware.
+
+The fix threads a real per-model window through the layers. `ContextWindow`
+was added to `providercatalog.Provider` (with conservative per-model defaults),
+`config.ProviderConfig` (`context_window` in config.yaml), and
+`customprovider.Provider` (optional, collected by a new field on the
+custom-provider form — the case that matters most, since a local server is
+exactly where the window is small and unknown to Kram). `config.Config.
+ComboContextWindow` takes the **minimum** window across a combo's providers —
+the right aggregate, because a fallback chain can route to any of them, so the
+budget must fit the smallest or a fallback would overflow it — ignoring
+providers whose window is unknown (0). `cmd/kram.resolveMaxContextTokens`
+resolves the daemon's budget: an explicit `--max-context-tokens` override wins,
+else the active combo's min window, else the `default_combo`'s, else 0 (which
+the agent turns back into `DefaultMaxTokens`, preserving today's behavior when
+nothing is known). This mirrors #76's timeout wiring — `cmd/kram` holds both
+the gateway config and the `daemon.Config` it builds, so it's the one place
+that can compute a combo-derived value and hand it to the daemon. Since
+`MaxContextTokens` is the *full* window and `contextpolicy` already subtracts
+the fixed prompt/tool cost and the response reserve, no other arithmetic
+changed.
+
+**Images cost zero.** `EstimateTokens` summed content + tool-call chars but
+ignored `store.Message.Images` entirely — yet images are base64 data URLs
+resent to the provider every turn and never pruned, each really costing
+hundreds to a couple thousand tokens. A session with a few images overflowed
+the real window long before Kram thought it needed to compact. `EstimateTokens`
+now adds a flat `imageTokenEstimate` (1200) per image — deliberately *not*
+`len(base64)`, which would wildly overcount, and deliberately on the higher
+side (overestimating fires compaction a little early, far safer than a silent
+overflow). Because both the compaction trigger and the context-usage panel
+share this one function, they stay in agreement automatically.
+
+Deliberately deferred to a focused follow-up (part 3 of the issue):
+**calibrating the `chars/4` estimate against the gateway's real
+`usage.prompt_tokens`.** The gateway already returns it on every response; the
+idea is to correct the estimate toward the model's actual tokenizer. It's a
+*stateful runtime feedback loop* (a bad ratio would skew compaction timing in
+either direction), so it warrants its own change with isolated tests rather
+than riding along with this static plumbing. Parts 1 & 2 already deliver the
+bulk of the value — a correct per-model ceiling and images that finally count.
+
+Tests pin each link: `EstimateTokens` counts images (and ignores base64 size),
+`ComboContextWindow` takes the min ignoring unknowns, `resolveMaxContextTokens`
+honors the override and the combo/default_combo fallback chain, the custom
+provider's window round-trips through save/reload (and clamps negatives), and
+`parseContextWindowInput` treats blank/garbage/negative as "unknown" without
+crashing. An adversarial review (budget wiring end-to-end, and the estimator /
+form-index integration, including a deliberate check for small-window
+compaction thrash) returned zero findings.

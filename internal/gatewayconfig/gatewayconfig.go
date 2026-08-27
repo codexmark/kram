@@ -128,7 +128,7 @@ func catalogProviderConfig(p providercatalog.Provider, credStore *credentials.St
 	return config.ProviderConfig{
 		ID: p.ID, Kind: p.Kind, BaseURL: p.BaseURL, APIKeyEnv: p.EnvVar,
 		Model: p.DefaultModel, SupportsImages: p.SupportsImages, SupportsTools: p.SupportsTools,
-		AuthMode: authMode,
+		AuthMode: authMode, ContextWindow: p.ContextWindow,
 	}, true
 }
 
@@ -150,6 +150,7 @@ func customProviderConfig(cp customprovider.Provider) (config.ProviderConfig, bo
 	return config.ProviderConfig{
 		ID: "custom-" + cp.ID, Kind: "openai-compat", BaseURL: cp.BaseURL, APIKeyEnv: cp.EnvVar,
 		Model: cp.Model, SupportsTools: cp.SupportsToolsOrDefault(), KeyOptional: true,
+		ContextWindow: cp.ContextWindow,
 	}, true
 }
 

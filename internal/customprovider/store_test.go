@@ -30,7 +30,7 @@ func TestAddGetRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	p, err := s.Add("Meu Servidor", "http://192.168.1.50:8080/v1", "llama-3", true)
+	p, err := s.Add("Meu Servidor", "http://192.168.1.50:8080/v1", "llama-3", true, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -51,16 +51,47 @@ func TestAddGetRoundTrip(t *testing.T) {
 	}
 }
 
+// TestAddPersistsContextWindow confirms the optional per-model window
+// survives a save/reload, so a local model's real window reaches the
+// compaction budget instead of defaulting to zero (unknown).
+func TestAddPersistsContextWindow(t *testing.T) {
+	isolate(t)
+	s, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Add("Lab", "http://127.0.0.1:1234/v1", "qwen", true, 32768); err != nil {
+		t.Fatal(err)
+	}
+	reloaded, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	all := reloaded.All()
+	if len(all) != 1 || all[0].ContextWindow != 32768 {
+		t.Errorf("ContextWindow did not round-trip: got %+v", all)
+	}
+	// A negative window is clamped to 0 (unknown), never persisted as-is.
+	s2, _ := Load()
+	p, err := s2.Add("Neg", "http://x", "m", true, -5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.ContextWindow != 0 {
+		t.Errorf("negative window = %d, want clamped to 0", p.ContextWindow)
+	}
+}
+
 func TestAddRequiresNameBaseURLAndModel(t *testing.T) {
 	isolate(t)
 	s, _ := Load()
-	if _, err := s.Add("", "http://x", "m", true); err == nil {
+	if _, err := s.Add("", "http://x", "m", true, 0); err == nil {
 		t.Error("expected an error for an empty name")
 	}
-	if _, err := s.Add("x", "", "m", true); err == nil {
+	if _, err := s.Add("x", "", "m", true, 0); err == nil {
 		t.Error("expected an error for an empty base URL")
 	}
-	if _, err := s.Add("x", "http://x", "", true); err == nil {
+	if _, err := s.Add("x", "http://x", "", true, 0); err == nil {
 		t.Error("expected an error for an empty model — passthrough doesn't actually work (see Provider.Model's doc comment), so this must be rejected, not silently accepted")
 	}
 }
@@ -80,7 +111,7 @@ func TestSupportsToolsDefaultsTrueWhenNeverSet(t *testing.T) {
 func TestSupportsToolsExplicitFalseIsRespected(t *testing.T) {
 	isolate(t)
 	s, _ := Load()
-	p, err := s.Add("NoTools", "http://x", "m", false)
+	p, err := s.Add("NoTools", "http://x", "m", false, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,11 +128,11 @@ func TestSupportsToolsExplicitFalseIsRespected(t *testing.T) {
 func TestDuplicateNamesGetDedupedIDs(t *testing.T) {
 	isolate(t)
 	s, _ := Load()
-	a, err := s.Add("Servidor", "http://a", "m", true)
+	a, err := s.Add("Servidor", "http://a", "m", true, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, err := s.Add("Servidor", "http://b", "m", true)
+	b, err := s.Add("Servidor", "http://b", "m", true, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,7 +152,7 @@ func TestDuplicateNamesGetDedupedIDs(t *testing.T) {
 func TestSlugifyHandlesSymbolsAndSpaces(t *testing.T) {
 	isolate(t)
 	s, _ := Load()
-	p, err := s.Add("LM Studio (casa) — GPU #1!", "http://x", "m", true)
+	p, err := s.Add("LM Studio (casa) — GPU #1!", "http://x", "m", true, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -133,7 +164,7 @@ func TestSlugifyHandlesSymbolsAndSpaces(t *testing.T) {
 func TestSlugifyFallsBackWhenNameHasNoAlnum(t *testing.T) {
 	isolate(t)
 	s, _ := Load()
-	p, err := s.Add("!!!", "http://x", "m", true)
+	p, err := s.Add("!!!", "http://x", "m", true, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -145,7 +176,7 @@ func TestSlugifyFallsBackWhenNameHasNoAlnum(t *testing.T) {
 func TestDelete(t *testing.T) {
 	isolate(t)
 	s, _ := Load()
-	p, _ := s.Add("Temp", "http://x", "m", true)
+	p, _ := s.Add("Temp", "http://x", "m", true, 0)
 	if err := s.Delete(p.ID); err != nil {
 		t.Fatal(err)
 	}
@@ -170,7 +201,7 @@ func TestDeleteUnknownIDIsNotAnError(t *testing.T) {
 func TestAllReturnsACopy(t *testing.T) {
 	isolate(t)
 	s, _ := Load()
-	_, _ = s.Add("A", "http://a", "m", true)
+	_, _ = s.Add("A", "http://a", "m", true, 0)
 
 	all := s.All()
 	all[0].Name = "tampered"
@@ -183,7 +214,7 @@ func TestAllReturnsACopy(t *testing.T) {
 func TestFilePermissions(t *testing.T) {
 	dir := isolate(t)
 	s, _ := Load()
-	if _, err := s.Add("A", "http://a", "m", true); err != nil {
+	if _, err := s.Add("A", "http://a", "m", true, 0); err != nil {
 		t.Fatal(err)
 	}
 

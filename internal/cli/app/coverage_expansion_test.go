@@ -784,7 +784,7 @@ func TestPingAccountsCommandCoversCatalogAndCustomProviders(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cp, err := custom.Add("local", server.URL, "model", true)
+	cp, err := custom.Add("local", server.URL, "model", true, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -927,7 +927,7 @@ func TestAccountsRenderingAndKeyBoundaryMatrix(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cp, err := custom.Add("Local", "http://localhost/v1", "m", true)
+	cp, err := custom.Add("Local", "http://localhost/v1", "m", true, 0)
 	if err != nil {
 		t.Fatal(err)
 	}

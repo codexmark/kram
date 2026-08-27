@@ -19,6 +19,14 @@ type Provider struct {
 	SignupURL      string // where to get a key/account
 	SupportsOAuth  bool   // true for providers with a real browser-login flow (see internal/oauthflow)
 	FreeTier       bool   // zero-cost tier: rate-limit-bound rather than cost-bound, which changes how the router should treat it
+	// ContextWindow is the model's total token window for DefaultModel, used
+	// to size the compaction budget (a combo's budget is the min window
+	// across its providers — see config.Config.ComboContextWindow). Approximate
+	// and conservative: it decides *when* to compact, never billing, and is
+	// overridable per deployment (config.yaml provider context_window, or the
+	// daemon's --max-context-tokens flag). 0 means "unknown" and is ignored
+	// when taking the combo minimum.
+	ContextWindow int
 }
 
 const openRouterBaseURL = "https://openrouter.ai/api/v1"
@@ -47,8 +55,8 @@ const openRouterBaseURL = "https://openrouter.ai/api/v1"
 // fallback — if it can't take tools, expect it to answer in plain text
 // only rather than using Kram's tools.
 var Providers = []Provider{
-	{ID: "anthropic", Label: "Anthropic (Claude)", Kind: "anthropic", EnvVar: "ANTHROPIC_API_KEY", DefaultModel: "claude-sonnet-4-5", SupportsImages: true, SupportsTools: true, SignupURL: "https://console.anthropic.com/settings/keys", SupportsOAuth: true},
-	{ID: "openai", Label: "OpenAI", Kind: "openai-compat", BaseURL: "https://api.openai.com/v1", EnvVar: "OPENAI_API_KEY", DefaultModel: "gpt-5", SupportsImages: true, SupportsTools: true, SignupURL: "https://platform.openai.com/api-keys"},
+	{ID: "anthropic", Label: "Anthropic (Claude)", Kind: "anthropic", EnvVar: "ANTHROPIC_API_KEY", DefaultModel: "claude-sonnet-4-5", ContextWindow: 200000, SupportsImages: true, SupportsTools: true, SignupURL: "https://console.anthropic.com/settings/keys", SupportsOAuth: true},
+	{ID: "openai", Label: "OpenAI", Kind: "openai-compat", BaseURL: "https://api.openai.com/v1", EnvVar: "OPENAI_API_KEY", DefaultModel: "gpt-5", ContextWindow: 400000, SupportsImages: true, SupportsTools: true, SignupURL: "https://platform.openai.com/api-keys"},
 	// openai-chatgpt is a distinct product from openai above: a ChatGPT
 	// Plus/Pro/Team subscription's Codex access via browser login, not a
 	// developer API key. It talks to a different backend
@@ -59,7 +67,7 @@ var Providers = []Provider{
 	// credential can actually do. EnvVar here is only a lookup key into
 	// the OAuth token store (internal/credentials), never a real
 	// environment variable.
-	{ID: "openai-chatgpt", Label: "OpenAI (via login ChatGPT — beta)", Kind: "openai-responses", EnvVar: "OPENAI_CHATGPT_ACCESS_TOKEN", DefaultModel: "gpt-5.5", SupportsTools: true, SignupURL: "https://chatgpt.com", SupportsOAuth: true},
+	{ID: "openai-chatgpt", Label: "OpenAI (via login ChatGPT — beta)", Kind: "openai-responses", EnvVar: "OPENAI_CHATGPT_ACCESS_TOKEN", DefaultModel: "gpt-5.5", ContextWindow: 400000, SupportsTools: true, SignupURL: "https://chatgpt.com", SupportsOAuth: true},
 	// DefaultModel is Google's own "latest" alias, not a numbered release —
 	// deliberately, after live-testing found both gemini-2.5-pro and
 	// gemini-2.5-flash rejected with a 404 ("no longer available to new
@@ -67,7 +75,7 @@ var Providers = []Provider{
 	// response (see DECISIONS.md). Numbered Gemini releases retire on a
 	// timeline the models list doesn't warn about; the "latest" aliases
 	// exist specifically so a pinned reference doesn't rot the same way.
-	{ID: "gemini", Label: "Google AI Studio (Gemini)", Kind: "gemini", EnvVar: "GEMINI_API_KEY", DefaultModel: "gemini-flash-latest", SupportsImages: true, SupportsTools: true, SignupURL: "https://aistudio.google.com/apikey"},
+	{ID: "gemini", Label: "Google AI Studio (Gemini)", Kind: "gemini", EnvVar: "GEMINI_API_KEY", DefaultModel: "gemini-flash-latest", ContextWindow: 1000000, SupportsImages: true, SupportsTools: true, SignupURL: "https://aistudio.google.com/apikey"},
 	// DeepSeek is OpenAI-compatible (confirmed against its own API docs,
 	// api-docs.deepseek.com — no dedicated adapter needed, same as
 	// OpenAI/OpenRouter/OpenCode Zen below). BaseURL deliberately has no
@@ -85,10 +93,10 @@ var Providers = []Provider{
 	// experimental — the catalog pins the non-experimental flash model as
 	// DefaultModel instead, so this stays false until a stable vision
 	// model ships. See issue #20.
-	{ID: "deepseek", Label: "DeepSeek", Kind: "openai-compat", BaseURL: "https://api.deepseek.com", EnvVar: "DEEPSEEK_API_KEY", DefaultModel: "deepseek-v4-flash", SupportsTools: true, SignupURL: "https://platform.deepseek.com/api_keys"},
-	{ID: "openrouter-gptoss", Label: "OpenRouter (free: gpt-oss-20b)", Kind: "openai-compat", BaseURL: openRouterBaseURL, EnvVar: "OPENROUTER_API_KEY", DefaultModel: "openai/gpt-oss-20b:free", SupportsTools: true, FreeTier: true, SignupURL: "https://openrouter.ai/keys", SupportsOAuth: true},
-	{ID: "openrouter-gemma", Label: "OpenRouter (free: gemma-4-31b)", Kind: "openai-compat", BaseURL: openRouterBaseURL, EnvVar: "OPENROUTER_API_KEY", DefaultModel: "google/gemma-4-31b-it:free", SupportsTools: true, FreeTier: true, SignupURL: "https://openrouter.ai/keys", SupportsOAuth: true},
-	{ID: "openrouter-nemotron", Label: "OpenRouter (free: nemotron-3-super)", Kind: "openai-compat", BaseURL: openRouterBaseURL, EnvVar: "OPENROUTER_API_KEY", DefaultModel: "nvidia/nemotron-3-super-120b-a12b:free", SupportsTools: true, FreeTier: true, SignupURL: "https://openrouter.ai/keys", SupportsOAuth: true},
+	{ID: "deepseek", Label: "DeepSeek", Kind: "openai-compat", BaseURL: "https://api.deepseek.com", EnvVar: "DEEPSEEK_API_KEY", DefaultModel: "deepseek-v4-flash", ContextWindow: 128000, SupportsTools: true, SignupURL: "https://platform.deepseek.com/api_keys"},
+	{ID: "openrouter-gptoss", Label: "OpenRouter (free: gpt-oss-20b)", Kind: "openai-compat", BaseURL: openRouterBaseURL, EnvVar: "OPENROUTER_API_KEY", DefaultModel: "openai/gpt-oss-20b:free", ContextWindow: 131072, SupportsTools: true, FreeTier: true, SignupURL: "https://openrouter.ai/keys", SupportsOAuth: true},
+	{ID: "openrouter-gemma", Label: "OpenRouter (free: gemma-4-31b)", Kind: "openai-compat", BaseURL: openRouterBaseURL, EnvVar: "OPENROUTER_API_KEY", DefaultModel: "google/gemma-4-31b-it:free", ContextWindow: 131072, SupportsTools: true, FreeTier: true, SignupURL: "https://openrouter.ai/keys", SupportsOAuth: true},
+	{ID: "openrouter-nemotron", Label: "OpenRouter (free: nemotron-3-super)", Kind: "openai-compat", BaseURL: openRouterBaseURL, EnvVar: "OPENROUTER_API_KEY", DefaultModel: "nvidia/nemotron-3-super-120b-a12b:free", ContextWindow: 131072, SupportsTools: true, FreeTier: true, SignupURL: "https://openrouter.ai/keys", SupportsOAuth: true},
 	{ID: "opencode-zen", Label: "OpenCode Zen (free: big-pickle)", Kind: "openai-compat", BaseURL: "https://opencode.ai/zen/v1", EnvVar: "OPENCODE_ZEN_API_KEY", DefaultModel: "big-pickle", SupportsTools: true, FreeTier: true, SignupURL: "https://opencode.ai/auth"},
 }
 

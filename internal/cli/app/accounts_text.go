@@ -76,11 +76,14 @@ const (
 const (
 	// "+ add custom provider" form: field labels, header, hints, placeholder,
 	// the pre-filled tool-calling default, and the fetched-models picker.
-	customFormLabelName   = "name"
-	customFormLabelURL    = "url"
-	customFormLabelAPIKey = "api key (optional)"
-	customFormLabelModel  = "model"
-	customFormLabelTools  = "accepts tool calling? (y/n)"
+	customFormLabelName          = "name"
+	customFormLabelURL           = "url"
+	customFormLabelAPIKey        = "api key (optional)"
+	customFormLabelModel         = "model"
+	customFormLabelTools         = "accepts tool calling? (y/n)"
+	customFormLabelContextWindow = "context window (optional)"
+
+	customFormContextWindowPlaceholder = "e.g. 32768 — leave blank if unsure"
 
 	customFormHeader          = "new custom provider:"
 	customFormHintBase        = "tab next · shift+tab back · enter saves · esc cancels"
