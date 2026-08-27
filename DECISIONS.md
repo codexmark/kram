@@ -5602,3 +5602,32 @@ silence, never how long we tolerate work.** Per hop:
   anomalies — and it now diagnoses instead of alarms: "NO DATA · tool bash
   still running · quiet 12s" / "waiting for the model's first output",
   replacing the bare "NO STREAM EVENTS".
+
+---
+
+## The peek's give-up budget must know whether fallback is even possible
+
+Right after a combo switch, a turn failed in ~8.7s with "no meaningful
+content within the peek window" — router.BoundedPeek's 5s idle budget firing
+while the Codex model was silently reasoning. Two things compounded. The
+openai-responses adapter never asked for (or forwarded) reasoning summaries,
+so the thinking phase was dead silence on the event channel — even though
+StreamEvent.Reasoning exists precisely as the "working, not committable"
+liveness signal the peek understands. And the peek applied its fast give-up
+even on the *last* ranked candidate, where rejection buys nothing: fallback
+is the entire justification for giving up quickly, and there was nobody left
+to fall back to. A single-provider combo — the autodetected default for one
+connected account — is always in that position, so every turn where the
+model thought >5s before its first forwarded event failed outright.
+
+Both halves fixed on their own terms. The adapter now sends
+`reasoning: {summary: "auto"}` and forwards `response.reasoning_summary_text
+.delta` / `response.reasoning_text.delta` as StreamEvent.Reasoning — honest
+progress the peek keeps waiting on and the CLI shows as its thinking
+preview. And BoundedPeek takes its idle budget as a parameter: chat.go
+passes the short default while further ranked candidates remain, and the
+provider-timeout-sized budget on the last candidate (see peekIdleFor),
+deferring to the provider layer's byte-level watchdog as the real liveness
+authority once fallback is off the table. The stale comment claiming the
+transport backstop was a whole-request http.Client.Timeout — replaced by
+the phase watchdog — was updated in passing.

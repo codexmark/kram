@@ -21,6 +21,23 @@ import (
 // under any sane idle threshold, and cheap: two dozen bytes per tick.
 var streamKeepAliveInterval = 15 * time.Second
 
+// peekIdleFor picks BoundedPeek's idle budget for one ranked attempt:
+// the short default (0 → router's own) while further candidates remain —
+// giving up fast is what makes streaming fallback responsive — and the
+// provider layer's own timeout on the last candidate, where rejecting
+// buys nothing: there is nobody left to fall back to, so the peek defers
+// to the provider watchdog as the real liveness authority. A
+// single-provider combo (the autodetected default for one connected
+// account) is always in the second case — this is what lets a reasoning
+// model think in silence past the 5s peek default without the turn
+// failing "no meaningful content within the peek window".
+func peekIdleFor(attempt, total int, providerTimeout time.Duration) time.Duration {
+	if attempt < total {
+		return 0
+	}
+	return providerTimeout
+}
+
 // classifyTransportError buckets a genuine transport/HTTP-level failure
 // (the request never reached a real answer at all) via openai.Classify,
 // extracting the real upstream status code the same way errorAttempt
@@ -96,7 +113,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if req.Stream {
-			peek := router.BoundedPeek(ctx, events)
+			peek := router.BoundedPeek(ctx, events, peekIdleFor(attemptNum, len(ranked), s.cfg.Tunables.ResolvedProviderTimeout()))
 			elapsed := time.Since(attemptStart).Milliseconds()
 			if !peek.Committed {
 				lastErr = fmt.Errorf("%s: %s", p.ID(), peek.Reason)
