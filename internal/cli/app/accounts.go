@@ -231,46 +231,52 @@ func (m Model) renderAccounts() string {
 		b.WriteString(styleHint.Render(m.accountsStatus) + "\n\n")
 	}
 
-	hint := ""
+	// Footer, two separated layers instead of one faint concatenated
+	// sentence: in wizard mode an explicit continue line first — the
+	// single action that advances the flow, styled as a visible call to
+	// action (or, when locked, a note saying exactly what unlocks it) —
+	// then the row-contextual key bar in the shared accent-key style.
+	if m.wizardMode {
+		switch {
+		case m.wizardHasOperationalProvider():
+			b.WriteString(styleBadgeOK.Bold(true).Render(accountsContinueKey) + " " +
+				styleBadgeOK.Render(accountsContinueLabel) + "\n\n")
+		case m.wizardProviderOverrideVisible && !m.accountsPinging:
+			b.WriteString(styleBadgeWarn.Bold(true).Render(accountsContinueAnywayKey) + " " +
+				styleBadgeWarn.Render(accountsContinueAnywayLabel) + "\n\n")
+		default:
+			b.WriteString(styleWizardDim.Render(accountsContinueLockedNote) + "\n\n")
+		}
+	}
+
+	var keys []wizardKey
 	switch {
 	case m.accountsCursor < staticCount:
 		cur := providercatalog.Accounts[m.accountsCursor]
 		if !cur.OAuthOnly {
-			hint = accountsHintPasteKey
+			keys = append(keys, wizardKey{"enter", accountsActionPasteKey})
 		}
 		if cur.SupportsOAuth {
-			if hint != "" {
-				hint += " · "
-			}
-			hint += accountsHintOAuth
+			keys = append(keys, wizardKey{"o", accountsActionOAuth})
 		}
 		if !m.wizardMode {
-			hint += accountsHintRemoveSavedKey
+			keys = append(keys, wizardKey{"d", accountsActionRemoveSaved})
 		}
 	case m.accountsCursor < addRow:
-		hint = accountsHintSetUpdateKey
+		keys = append(keys, wizardKey{"enter", accountsActionSetUpdate})
 		if !m.wizardMode {
-			hint += accountsHintRemove
+			keys = append(keys, wizardKey{"d", accountsActionRemove})
 		}
 	case m.accountsCursor == addRow:
-		hint = accountsHintAddCustom
+		keys = append(keys, wizardKey{"enter", accountsActionAddCustom})
 	}
-	if m.wizardMode {
-		hint += accountsHintRecheck
-		if m.wizardHasOperationalProvider() {
-			hint += accountsHintContinue
-		} else if m.wizardProviderOverrideVisible && !m.accountsPinging {
-			hint += accountsHintContinueAnyway
-		}
-		if m.wizardWorkspaceLocked {
-			hint += accountsHintEscCancel
-		} else {
-			hint += accountsHintEscBack
-		}
+	keys = append(keys, wizardKey{"r", accountsActionRecheck})
+	if m.wizardMode && m.wizardWorkspaceLocked {
+		keys = append(keys, wizardKey{"esc", accountsActionEscCancel})
 	} else {
-		hint += accountsHintRecheck + accountsHintEscBack
+		keys = append(keys, wizardKey{"esc", accountsActionEscBack})
 	}
-	b.WriteString(styleHint.Render(hint))
+	b.WriteString(renderWizardKeybar(keys))
 	return b.String()
 }
 

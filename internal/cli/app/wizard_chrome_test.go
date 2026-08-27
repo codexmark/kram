@@ -5,6 +5,8 @@ import (
 	"testing"
 
 	"github.com/charmbracelet/lipgloss"
+
+	"github.com/codexmark/kram/internal/providerping"
 )
 
 func TestWizardTrailWideShowsAllStepStates(t *testing.T) {
@@ -91,5 +93,30 @@ func TestWizardSummaryEscGoesBackToCheck(t *testing.T) {
 	got := next.(Model)
 	if got.phase != phaseWizardSystemCheck || got.wizardStep != 7 {
 		t.Fatalf("esc on Ready = (phase %v, step %d), want system check step 7", got.phase, got.wizardStep)
+	}
+}
+
+func TestAccountsWizardFooterMakesContinueExplicit(t *testing.T) {
+	m := testModel(t)
+	m.wizardMode = true
+
+	// Nothing configured: the footer says exactly what unlocks continue.
+	got := m.renderAccounts()
+	if !strings.Contains(got, "connect a provider to unlock continue") {
+		t.Fatalf("locked footer missing the unlock note: %q", got)
+	}
+	if strings.Contains(got, "continue to Routing") {
+		t.Fatalf("continue CTA must not show before a provider works: %q", got)
+	}
+
+	// An operational provider: the continue CTA appears, named after the
+	// next step, on its own line above the key bar.
+	m.accountsPings = map[string]providerping.Result{"X": {Status: providerping.StatusOK}}
+	got = m.renderAccounts()
+	if !strings.Contains(got, "continue to Routing") {
+		t.Fatalf("operational footer missing the explicit continue CTA: %q", got)
+	}
+	if !strings.Contains(got, "re-check") || !strings.Contains(got, "back") {
+		t.Fatalf("key bar lost its context actions: %q", got)
 	}
 }

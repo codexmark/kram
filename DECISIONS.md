@@ -5539,3 +5539,19 @@ outcome depended on the developer's own ~/.config/kram-gateway/permissions.json
 — the fresh Recommended preset this machine's wizard had just written flipped
 TestCompileToolsOverviewExcludesPermissionFullyDeniedTool red. The wipe-and-
 reinstall that preceded this feature is exactly what exposed it.
+
+---
+
+## Providers step footer: an explicit continue, not a fragment mid-sentence
+
+Follow-up to the wizard chrome (#100): the Providers step's footer was still
+one faint concatenated sentence ("enter adds custom provider · r re-checks ·
+n continues · esc back") — the single action that advances the whole flow was
+a two-word fragment buried in the middle of it. The footer is now two
+separated layers: an explicit continue line first — "n continue to Routing →"
+in the success color when a provider is operational, "c continue anyway —
+provider not responding" in the warn color for the override path, or, when
+neither applies, "connect a provider to unlock continue", which states the
+unlock condition instead of silently offering nothing — then the row-contextual
+key bar rendered through the shared renderWizardKeybar (accent keys, muted
+labels), replacing the accountsHint* string-concatenation scheme entirely.
