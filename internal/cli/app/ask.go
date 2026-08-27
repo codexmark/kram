@@ -42,7 +42,7 @@ func (m Model) renderQuestion() string {
 			b.WriteString("  " + opt + "\n")
 		}
 	}
-	b.WriteString(styleHint.Render("↑↓ escolher · enter responder"))
+	b.WriteString(styleHint.Render(askQuestionHint))
 	return b.String()
 }
 

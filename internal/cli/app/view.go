@@ -165,7 +165,7 @@ func (m *Model) applyTranscriptContent(followBottom bool, previousOffset int) {
 		content += separator + text
 	}
 	if m.err != nil {
-		content += "\n\n" + styleErrBadge.Render("erro: "+m.err.Error())
+		content += "\n\n" + styleErrBadge.Render(transcriptErrPrefix+m.err.Error())
 	}
 	m.processLinkRows = linkRows
 	m.viewport.SetContent(content)
@@ -217,28 +217,28 @@ func (m Model) thinkingLine() string {
 		meta += " · tool " + time.Since(m.toolStartedAt).Round(time.Second).String()
 	}
 	if m.heartbeats > 0 && !stalled {
-		meta += fmt.Sprintf(" · pulso %d", m.heartbeats)
+		meta += fmt.Sprintf(thinkingPulseFmt, m.heartbeats)
 	}
 	if m.segments > 1 {
-		meta += fmt.Sprintf(" · segmento %d/%d", m.segment, m.segments)
+		meta += fmt.Sprintf(thinkingSegmentFmt, m.segment, m.segments)
 	}
 	if !stalled && m.workState == workModelActive && m.reasoningPreview != "" {
 		// "pensando:" keeps this unmistakably a chain-of-thought excerpt,
 		// never readable as the model's actual answer — see
 		// agent.EventReasoning's own doc comment for why that distinction
 		// matters all the way down the stack this is fed from.
-		meta += " · pensando: " + boundedReasoningPreview(m.reasoningPreview)
+		meta += thinkingReasoningPrefix + boundedReasoningPreview(m.reasoningPreview)
 	}
 	// Discoverable exactly when relevant: a running turn can be interrupted
 	// with Esc (see the key handler). Only shown when there's no panel to
 	// close, since there Esc means "close panel" first.
 	if m.active == panelNone {
-		meta += " · esc interrompe"
+		meta += thinkingInterruptHint
 	}
 	if stalled {
 		sinceEvent := time.Since(m.lastEventAt).Round(time.Second)
-		label = "CONEXÃO SEM EVENTOS"
-		meta = fmt.Sprintf("há %s · total %s · esc interrompe", sinceEvent, elapsed)
+		label = thinkingStalledLabel
+		meta = fmt.Sprintf(thinkingStalledMetaFmt, sinceEvent, elapsed)
 		return indicator + "  " + styleBadgeWarn.Bold(true).Render(label) + "  " + rail + "  " + styleBadgeWarn.Render(meta)
 	}
 	return indicator + "  " + shimmerText(label, m.animFrame) + "  " + rail + "  " + styleMeta.Render(meta)
@@ -261,18 +261,18 @@ func boundedReasoningPreview(text string) string {
 func (m Model) activityLabel() string {
 	switch m.workState {
 	case workModelActive:
-		return "MODELO ATIVO"
+		return activityModelActive
 	case workToolActive:
 		if m.activeTool != "" {
-			return "EXECUTANDO · " + m.activeTool
+			return activityRunningToolPrefix + m.activeTool
 		}
-		return "EXECUTANDO TOOL"
+		return activityRunningTool
 	case workAnalyzingResult:
-		return "ANALISANDO RESULTADO"
+		return activityAnalyzingResult
 	case workWriting:
-		return "ESCREVENDO"
+		return activityWriting
 	default:
-		return "PREPARANDO ROTA"
+		return activityPreparingRoute
 	}
 }
 
@@ -297,7 +297,7 @@ func (m Model) renderActivityRail(stalled bool) string {
 
 func (m Model) View() string {
 	if !m.ready {
-		return "iniciando…"
+		return viewStarting
 	}
 	if m.phase == phaseSplash {
 		return m.renderBootSplash()
@@ -401,8 +401,8 @@ func (m Model) footerRightBlock() string {
 	// directly), distinct from the rest of the block's existing
 	// click-anywhere-opens-context behavior — see the badge width math
 	// there.
-	return joinNonEmpty("  ", m.bgProcessBadge(), m.contextIcon(), styleHint.Render("^b processos"),
-		styleHint.Render("^r rota"), styleHint.Render("^t contexto"), styleHint.Render("^s estratégia"), styleHint.Render("^p detalhes"))
+	return joinNonEmpty("  ", m.bgProcessBadge(), m.contextIcon(), styleHint.Render(footerHintProcesses),
+		styleHint.Render(footerHintRoute), styleHint.Render(footerHintContext), styleHint.Render(footerHintStrategy), styleHint.Render(footerHintDetails))
 }
 
 // contextIcon is the discreet, clickable context-window badge: a filled
@@ -534,7 +534,7 @@ func (m Model) renderToolResultPreview(act daemonclient.ToolActivity) string {
 		b.WriteString(styleHint.Render(toolResultPreviewIndent + line))
 	}
 	if overflow > 0 {
-		b.WriteString("\n" + styleHint.Render(fmt.Sprintf("%s… +%d linhas", toolResultPreviewIndent, overflow)))
+		b.WriteString("\n" + styleHint.Render(fmt.Sprintf(toolPreviewOverflowFmt, toolResultPreviewIndent, overflow)))
 	}
 	return b.String()
 }

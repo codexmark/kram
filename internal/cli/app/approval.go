@@ -42,7 +42,7 @@ func (m Model) renderApproval() string {
 			b.WriteString("  " + opt + "\n")
 		}
 	}
-	b.WriteString(styleHint.Render("↑↓ escolher · enter confirmar"))
+	b.WriteString(styleHint.Render(approvalHint))
 	return b.String()
 }
 

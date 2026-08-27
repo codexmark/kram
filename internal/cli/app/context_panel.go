@@ -13,15 +13,15 @@ import (
 // (internal/daemon/agent.ContextUsage) to display text and color — no
 // invented categories like "skills" or "MCP tools" that Kram doesn't have.
 var categoryLabels = map[string]string{
-	"messages":           "mensagens",
-	"system_prompt":      "prompt do sistema",
-	"tool_overview":      "visão geral de tools",
-	"tool_definitions":   "definições de tools",
-	"project_context":    "contexto do projeto (AGENTS.md)",
-	"memory":             "memória entre sessões",
-	"compaction_summary": "resumo de compactação",
-	"response_reserve":   "reserva para resposta",
-	"free":               "espaço livre",
+	"messages":           ctxCatMessages,
+	"system_prompt":      ctxCatSystemPrompt,
+	"tool_overview":      ctxCatToolOverview,
+	"tool_definitions":   ctxCatToolDefinitions,
+	"project_context":    ctxCatProjectContext,
+	"memory":             ctxCatMemory,
+	"compaction_summary": ctxCatCompactionSummary,
+	"response_reserve":   ctxCatResponseReserve,
+	"free":               ctxCatFree,
 }
 
 func categoryStyle(name string) lipgloss.Style {
@@ -50,18 +50,18 @@ func (m Model) renderContextPanel() string {
 	var lines []string
 
 	if m.contextErr != nil {
-		lines = append(lines, styleErrBadge.Render("não consegui ler o uso de contexto: "+m.contextErr.Error()))
+		lines = append(lines, styleErrBadge.Render(contextReadErrPrefix+m.contextErr.Error()))
 		return padLines(lines, h, m.width)
 	}
 	if !m.haveContext || m.contextData.Budget <= 0 {
-		lines = append(lines, styleMeta.Render("carregando…"))
+		lines = append(lines, styleMeta.Render(contextLoading))
 		return padLines(lines, h, m.width)
 	}
 
 	u := m.contextData
 	pct := u.Used * 100 / u.Budget
 
-	lines = append(lines, styleMeta.Render(fmt.Sprintf("janela de contexto · %s / %s (%d%%)", formatTokens(u.Used), formatTokens(u.Budget), pct)))
+	lines = append(lines, styleMeta.Render(fmt.Sprintf(contextWindowLine, formatTokens(u.Used), formatTokens(u.Budget), pct)))
 	lines = append(lines, contextBar(u, m.width-2))
 	lines = append(lines, "")
 

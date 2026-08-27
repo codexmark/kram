@@ -79,7 +79,7 @@ func TestRenderFilesTouchedShowsEveryPathUnderLimit(t *testing.T) {
 			t.Errorf("renderFilesTouched(...) missing %q, got: %q", p, got)
 		}
 	}
-	if strings.Contains(got, "mais") {
+	if strings.Contains(got, "more") {
 		t.Errorf("expected no overflow suffix under the limit, got: %q", got)
 	}
 }
@@ -90,8 +90,8 @@ func TestRenderFilesTouchedFoldsOverflowIntoSuffix(t *testing.T) {
 		paths[i] = string(rune('a'+i)) + ".go"
 	}
 	got := renderFilesTouched(paths)
-	if !strings.Contains(got, "+3 mais") {
-		t.Errorf("expected a \"+3 mais\" overflow suffix, got: %q", got)
+	if !strings.Contains(got, "+3 more") {
+		t.Errorf("expected a \"+3 more\" overflow suffix, got: %q", got)
 	}
 	if strings.Contains(got, paths[filesTouchedShownLimit]) {
 		t.Errorf("expected the (limit+1)th path to be folded into the overflow, not shown, got: %q", got)

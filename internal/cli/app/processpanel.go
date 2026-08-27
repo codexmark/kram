@@ -342,17 +342,17 @@ func (m *Model) syncProcessViewport() {
 
 func (m *Model) refreshProcessViewportContent() {
 	if m.processErr != nil {
-		m.processViewport.SetContent(styleErrBadge.Render("não foi possível atualizar o processo:\n" + m.processErr.Error()))
+		m.processViewport.SetContent(styleErrBadge.Render(processRefreshErrPrefix + m.processErr.Error()))
 		return
 	}
 	output := m.processLogs[m.processSelected]
 	if output == "" {
-		output = "(nenhuma saída produzida até agora)"
+		output = processNoOutput
 	}
 	output = sanitizeProcessOutput(output)
 	process := m.selectedProcess()
 	if m.processLogTruncated[m.processSelected] || (process != nil && process.Truncated) {
-		output = "[histórico anterior indisponível: o buffer/intervalo preservou somente a cauda]\n\n" + output
+		output = processHistoryTruncated + output
 	}
 	m.processViewport.SetContent(styleBody.Render(output))
 }
@@ -386,14 +386,14 @@ func (m Model) renderProcessPane(height, width int) string {
 	if height < 1 || width < 1 {
 		return ""
 	}
-	lines := []string{styleBadgeAccent.Bold(true).Render("PROCESSOS") + "  " + styleHint.Render("observação local · zero tokens")}
+	lines := []string{styleBadgeAccent.Bold(true).Render(processPanelTitle) + "  " + styleHint.Render(processPanelSubtitle)}
 	indices := m.visibleProcessIndices()
 	if len(indices) == 0 {
-		status := "nenhum processo iniciado por run_background"
+		status := processEmptyList
 		if m.processLoading {
-			status = "carregando processos…"
+			status = processLoadingStatus
 		} else if m.processErr != nil {
-			status = "daemon indisponível: " + m.processErr.Error()
+			status = processDaemonErrPrefix + m.processErr.Error()
 		}
 		lines = append(lines, styleMeta.Render(status))
 	} else {
@@ -417,11 +417,11 @@ func (m Model) renderProcessPane(height, width int) string {
 	}
 	lines = append(lines, styleHint.Render(strings.Repeat("─", maxInt(1, width))))
 	if process := m.selectedProcess(); process != nil {
-		state := styleBadgeOK.Render("● rodando")
+		state := styleBadgeOK.Render(processStateRunning)
 		if !process.Running && process.ExitCode == 0 {
-			state = styleBadgeIdle.Render("✓ encerrado 0")
+			state = styleBadgeIdle.Render(processStateExitZero)
 		} else if !process.Running {
-			state = styleBadgeBad.Render(fmt.Sprintf("✗ encerrado %d", process.ExitCode))
+			state = styleBadgeBad.Render(fmt.Sprintf(processStateExitFmt, process.ExitCode))
 		}
 		elapsedEnd := time.Now()
 		if process.EndedAt != nil {
@@ -439,13 +439,13 @@ func (m Model) renderProcessPane(height, width int) string {
 	} else if m.processErr != nil {
 		lines = append(lines, styleErrBadge.Render("daemon: "+m.processErr.Error()))
 	} else {
-		lines = append(lines, styleMeta.Render("selecione um processo"))
+		lines = append(lines, styleMeta.Render(processSelectPrompt))
 	}
 
 	lines = append(lines, m.processViewport.View())
-	hint := "tab trocar · ↑↓ scroll · end seguir · esc fechar"
+	hint := processFooterHint
 	if m.processNewBytes > 0 {
-		hint = fmt.Sprintf("↓ %d bytes novos · end para acompanhar", m.processNewBytes)
+		hint = fmt.Sprintf(processNewBytesFmt, m.processNewBytes)
 	}
 	lines = append(lines, styleHint.Render(hint))
 	result := strings.Join(lines, "\n")

@@ -29,10 +29,10 @@ func TestFormatAgeBuckets(t *testing.T) {
 		ago  time.Duration
 		want string
 	}{
-		{30 * time.Second, "agora"},
-		{5 * time.Minute, "5min atrás"},
-		{3 * time.Hour, "3h atrás"},
-		{2 * 24 * time.Hour, "2d atrás"},
+		{30 * time.Second, "now"},
+		{5 * time.Minute, "5min ago"},
+		{3 * time.Hour, "3h ago"},
+		{2 * 24 * time.Hour, "2d ago"},
 	}
 	for _, tc := range cases {
 		got := formatAge(now.Add(-tc.ago).Unix())
@@ -128,7 +128,7 @@ func TestWizardGatewayModeLineThresholds(t *testing.T) {
 		customCount int
 		want        string // substring expected in the output
 	}{
-		{"none configured", nil, 0, "nenhum provedor"},
+		{"none configured", nil, 0, "no provider"},
 		{"exactly one", []accountStatus{{envSet: true}}, 0, "BASIC"},
 		{"two via custom", nil, 2, "RESILIENT"},
 		{"one env plus one custom", []accountStatus{{storedSet: true}}, 1, "RESILIENT"},
@@ -189,7 +189,7 @@ func TestPingDetailPrefersExplicitDetailOverLatency(t *testing.T) {
 
 func TestBadgeForProviderNoDataYet(t *testing.T) {
 	got := badgeForProvider(statusclient.Provider{}, "p1")
-	if !strings.Contains(got, "sem dados") {
+	if !strings.Contains(got, "no data") {
 		t.Errorf("badgeForProvider(zero value) = %q, want the no-data message", got)
 	}
 }
@@ -205,8 +205,8 @@ func TestBadgeForProviderUnstableWhenSuccessRateBelowOne(t *testing.T) {
 	got := badgeForProvider(statusclient.Provider{
 		ID: "p1", Stats: statusclient.ProviderStats{Requests: 10, SuccessRate: 0.8},
 	}, "p1")
-	if !strings.Contains(got, "instável") {
-		t.Errorf("badgeForProvider(partial failures) = %q, want it to say \"instável\"", got)
+	if !strings.Contains(got, "unstable") {
+		t.Errorf("badgeForProvider(partial failures) = %q, want it to say \"unstable\"", got)
 	}
 }
 
@@ -214,8 +214,8 @@ func TestBadgeForProviderHealthyClosed(t *testing.T) {
 	got := badgeForProvider(statusclient.Provider{
 		ID: "p1", Stats: statusclient.ProviderStats{Requests: 10, SuccessRate: 1, AvgLatencyMS: 250},
 	}, "p1")
-	if !strings.Contains(got, "closed") || !strings.Contains(got, "250ms") || !strings.Contains(got, "100% sucesso") {
-		t.Errorf("badgeForProvider(healthy) = %q, want closed/250ms/100%% sucesso", got)
+	if !strings.Contains(got, "closed") || !strings.Contains(got, "250ms") || !strings.Contains(got, "100% success") {
+		t.Errorf("badgeForProvider(healthy) = %q, want closed/250ms/100%% success", got)
 	}
 }
 

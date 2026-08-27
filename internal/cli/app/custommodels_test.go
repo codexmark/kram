@@ -150,7 +150,7 @@ func TestVisibleModelIndicesEmptyList(t *testing.T) {
 func TestRenderCustomProviderFormShowsFetchingStatus(t *testing.T) {
 	m := newTestCustomForm(t)
 	m.customFormFetchingModels = true
-	if got := m.renderCustomProviderForm(); !strings.Contains(got, "buscando modelos") {
+	if got := m.renderCustomProviderForm(); !strings.Contains(got, "fetching models") {
 		t.Errorf("form render during a fetch should show a loading indicator, got: %q", got)
 	}
 }
@@ -165,7 +165,7 @@ func TestRenderCustomProviderFormShowsPickerList(t *testing.T) {
 	if !strings.Contains(got, "model-a") || !strings.Contains(got, "model-b") {
 		t.Errorf("picker render should list every fetched model, got: %q", got)
 	}
-	if !strings.Contains(got, "enter usar") {
+	if !strings.Contains(got, "enter use") {
 		t.Errorf("picker render should show its own keybinding hint, got: %q", got)
 	}
 }

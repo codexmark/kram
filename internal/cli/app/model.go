@@ -368,7 +368,7 @@ type Model struct {
 // (pass a zero WizardResult) when openOnToolsPreset is false.
 func New(daemon *daemonclient.Client, gateway *statusclient.Client, sessionID, combo, workspace string, openOnToolsPreset bool, wizard WizardResult) Model {
 	ti := textarea.New()
-	ti.Placeholder = "mensagem…"
+	ti.Placeholder = composerPlaceholder
 	ti.CharLimit = 4000
 	ti.ShowLineNumbers = false
 	// "› " only on the composer's first visual line, matching the old
@@ -384,14 +384,14 @@ func New(daemon *daemonclient.Client, gateway *statusclient.Client, sessionID, c
 	ti.Focus()
 
 	titleInput := textinput.New()
-	titleInput.Placeholder = "título (opcional, enter pra pular)"
+	titleInput.Placeholder = newSessionTitlePlaceholder
 	titleInput.CharLimit = 100
 	titleInput.Prompt = "› "
 
 	keyInput := newAccountsKeyInput()
 
 	answerInput := textinput.New()
-	answerInput.Placeholder = "resposta…"
+	answerInput.Placeholder = answerPlaceholder
 	answerInput.CharLimit = 2000
 	answerInput.Prompt = "› "
 
@@ -595,7 +595,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.routeCall = nil // an old completed call must not overwrite the new label
 		m.strategyPickerErr = nil
 		m.strategyNoticeRev++
-		m.strategyNotice = "✓ estratégia: " + strings.ToUpper(msg.combo.Strategy)
+		m.strategyNotice = strategyNoticePrefix + strings.ToUpper(msg.combo.Strategy)
 		m.active = panelNone
 		m.syncViewportSize()
 		m.syncTranscriptRenderer()
@@ -642,11 +642,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case customModelListMsg:
 		m.customFormFetchingModels = false
 		if msg.err != nil {
-			m.accountsStatus = "erro ao buscar modelos: " + msg.err.Error()
+			m.accountsStatus = customModelsFetchErrPrefix + msg.err.Error()
 			return m, nil
 		}
 		if len(msg.models) == 0 {
-			m.accountsStatus = "nenhum modelo encontrado nesse servidor."
+			m.accountsStatus = customModelsNoneFound
 			return m, nil
 		}
 		m.customFormModelOptions = msg.models
@@ -658,7 +658,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case oauthURLMsg:
 		if msg.err != nil {
 			m.accountsOAuthPending = false
-			m.accountsStatus = "erro ao iniciar oauth: " + msg.err.Error()
+			m.accountsStatus = oauthStartErrPrefix + msg.err.Error()
 			return m, nil
 		}
 		m.accountsOAuthURL = msg.url
@@ -677,13 +677,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.accountsOAuthCancel = nil
 		}
 		if msg.err != nil {
-			m.accountsStatus = "oauth falhou: " + msg.err.Error()
+			m.accountsStatus = oauthFailedPrefix + msg.err.Error()
 			return m, nil
 		}
 		if m.credStore != nil {
 			status, err := saveOAuthResult(m.credStore, msg)
 			if err != nil {
-				m.accountsStatus = "erro ao salvar: " + err.Error()
+				m.accountsStatus = oauthSaveErrPrefix + err.Error()
 				return m, nil
 			}
 			m.accountsStatus = status
@@ -705,11 +705,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case toolSettingsUpdatedMsg:
 		if msg.err != nil {
-			m.toolsStatus = "erro ao aplicar no daemon: " + msg.err.Error()
+			m.toolsStatus = toolsApplyDaemonErrPrefix + msg.err.Error()
 			m.wizardToolSettingsPending = false
 			return m, nil
 		}
-		m.toolsStatus = "configuração aplicada ao daemon atual."
+		m.toolsStatus = toolsAppliedDaemon
 		if m.wizardToolSettingsPending {
 			m.wizardToolSettingsPending = false
 			m.phase = phaseWizardSystemCheck
@@ -847,7 +847,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if n := len(m.messages); n > 0 {
 				lm := &m.messages[n-1]
 				lm.streaming = false
-				lm.Notices = append(lm.Notices, "interrompido pelo usuário")
+				lm.Notices = append(lm.Notices, interruptedByUser)
 			}
 			m.refreshTranscript()
 		}
@@ -1099,7 +1099,7 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			} else {
 				m.selection.move(msg.X, clampInt(viewportRow, 0, m.viewport.Height-1))
 			}
-			m.copyNotice = fmt.Sprintf("selecionando %d caracteres…", len([]rune(m.selection.text())))
+			m.copyNotice = fmt.Sprintf(selectionInProgressFmt, len([]rune(m.selection.text())))
 			return m, nil
 		}
 	case tea.MouseActionRelease:
@@ -1123,7 +1123,7 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			}
 			m.clipboardSequence = ansi.SetSystemClipboard(selected)
 			m.copyNoticeRevision++
-			m.copyNotice = fmt.Sprintf("✓ copiado · %d caracteres", len([]rune(selected)))
+			m.copyNotice = fmt.Sprintf(copyConfirmationFmt, len([]rune(selected)))
 			return m, tea.Batch(clearClipboardSequenceCmd(), clearCopyNoticeCmd(m.copyNoticeRevision))
 		}
 	}
@@ -1228,7 +1228,7 @@ func (m Model) handleStreamEvent(msg streamEventMsg) (tea.Model, tea.Cmd) {
 
 	// A turn the user just interrupted (see the "esc" key handler): the
 	// stream we closed produces one final error/EOF here. Swallow it —
-	// the transcript already shows "interrompido pelo usuário", and
+	// the transcript already shows "interrupted by user", and
 	// surfacing a connection error for a cancel the user asked for would
 	// be noise. Stop reading the stream.
 	if m.interrupting {

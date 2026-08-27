@@ -51,7 +51,7 @@ func TestMouseDragCopiesVisibleTextAndShowsFeedback(t *testing.T) {
 	m = next.(Model)
 	next, cmd = m.handleMouse(tea.MouseMsg{Action: tea.MouseActionRelease, Button: tea.MouseButtonNone, X: 4, Y: routeBarHeight})
 	m = next.(Model)
-	if cmd == nil || m.selection.active || !strings.Contains(m.copyNotice, "✓ copiado") {
+	if cmd == nil || m.selection.active || !strings.Contains(m.copyNotice, "✓ copied") {
 		t.Fatalf("release state = active:%v notice:%q cmd:%v", m.selection.active, m.copyNotice, cmd)
 	}
 	if !strings.Contains(m.clipboardSequence, "YWxwaGE=") { // base64("alpha") in OSC 52

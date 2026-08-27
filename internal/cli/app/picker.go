@@ -58,27 +58,27 @@ func (m Model) pickerSubagentCount() int {
 // than mixed into this default list.
 func (m Model) renderPicker() string {
 	var b strings.Builder
-	title := "sessões"
+	title := pickerTitle
 	if m.pickerShowSubagents {
-		title = "sessões de subagentes"
+		title = pickerSubagentTitle
 	}
 	b.WriteString(styleBody.Render(title) + "\n\n")
 
 	if m.titling {
-		b.WriteString(styleMeta.Render("nova sessão — título:") + "\n")
+		b.WriteString(styleMeta.Render(pickerNewSessionLabel) + "\n")
 		b.WriteString(m.newSessionText.View() + "\n\n")
-		b.WriteString(styleHint.Render("enter confirma · esc cancela"))
+		b.WriteString(styleHint.Render(pickerNewSessionHint))
 		return b.String()
 	}
 
 	if m.pickerErr != nil {
-		b.WriteString(styleErrBadge.Render("erro: "+m.pickerErr.Error()) + "\n\n")
+		b.WriteString(styleErrBadge.Render(pickerErrPrefix+m.pickerErr.Error()) + "\n\n")
 	}
 	if m.pickerBusy {
-		b.WriteString(styleMeta.Render(m.spin.View()+" carregando…") + "\n\n")
+		b.WriteString(styleMeta.Render(m.spin.View()+pickerLoading) + "\n\n")
 	}
 
-	newRow := "+ nova sessão"
+	newRow := pickerNewSessionRow
 	if m.pickerCursor == 0 {
 		b.WriteString(styleYouTag.Render("▸ "+newRow) + "\n")
 	} else {
@@ -87,9 +87,9 @@ func (m Model) renderPicker() string {
 
 	visible := m.pickerVisibleSessions()
 	if len(visible) == 0 && !m.pickerBusy {
-		empty := "  (nenhuma sessão existente ainda)"
+		empty := pickerEmptySessions
 		if m.pickerShowSubagents {
-			empty = "  (nenhuma sessão de subagente ainda)"
+			empty = pickerEmptySubagents
 		}
 		b.WriteString(styleHint.Render(empty) + "\n")
 	}
@@ -109,11 +109,11 @@ func (m Model) renderPicker() string {
 		}
 	}
 
-	hint := "↑↓ escolher · enter confirmar · a contas · f ferramentas · ctrl+c sair"
+	hint := pickerFooterMain
 	if m.pickerShowSubagents {
-		hint = "↑↓ escolher · enter confirmar · s sessões normais · ctrl+c sair"
+		hint = pickerFooterSubagent
 	} else if n := m.pickerSubagentCount(); n > 0 {
-		hint = fmt.Sprintf("s %d sessões de subagente · ", n) + hint
+		hint = fmt.Sprintf(pickerSubagentCountFmt, n) + hint
 	}
 	b.WriteString("\n" + styleHint.Render(hint))
 	return b.String()
@@ -123,12 +123,12 @@ func formatAge(unixSeconds int64) string {
 	d := time.Since(time.Unix(unixSeconds, 0))
 	switch {
 	case d < time.Minute:
-		return "agora"
+		return ageNow
 	case d < time.Hour:
-		return fmt.Sprintf("%dmin atrás", int(d.Minutes()))
+		return fmt.Sprintf(ageMinutesFmt, int(d.Minutes()))
 	case d < 24*time.Hour:
-		return fmt.Sprintf("%dh atrás", int(d.Hours()))
+		return fmt.Sprintf(ageHoursFmt, int(d.Hours()))
 	default:
-		return fmt.Sprintf("%dd atrás", int(d.Hours()/24))
+		return fmt.Sprintf(ageDaysFmt, int(d.Hours()/24))
 	}
 }

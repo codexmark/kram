@@ -27,7 +27,7 @@ func TestStrategyPickerRendersActiveChoiceAndDescription(t *testing.T) {
 	m := strategyPickerModel(t)
 	m.active = panelStrategyPicker
 	got := m.renderStrategyPicker()
-	if !strings.Contains(got, "PRIORITY") || !strings.Contains(got, "ATIVA") || !strings.Contains(got, "ordem declarada") {
+	if !strings.Contains(got, "PRIORITY") || !strings.Contains(got, "ACTIVE") || !strings.Contains(got, "declared order") {
 		t.Fatalf("picker did not render current choice and description: %q", got)
 	}
 	if lines := strings.Count(strings.TrimSuffix(got, "\n"), "\n") + 1; lines != m.panelHeight() {

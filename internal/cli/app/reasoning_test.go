@@ -75,19 +75,19 @@ func TestThinkingLineShowsReasoningPreviewOnlyWhileModelActive(t *testing.T) {
 		waitStartedAt: now.Add(-2 * time.Second), lastEventAt: now, animFrame: 1,
 		workState: workModelActive, reasoningPreview: "considering options",
 	}
-	if got := active.thinkingLine(); !strings.Contains(got, "pensando: considering options") {
+	if got := active.thinkingLine(); !strings.Contains(got, "thinking: considering options") {
 		t.Errorf("thinkingLine with an active reasoning preview = %q, want it to mention the preview", got)
 	}
 
 	writing := active
 	writing.workState = workWriting
-	if got := writing.thinkingLine(); strings.Contains(got, "pensando:") {
+	if got := writing.thinkingLine(); strings.Contains(got, "thinking:") {
 		t.Errorf("thinkingLine while workWriting = %q, want no reasoning preview shown once past workModelActive", got)
 	}
 
 	noPreview := active
 	noPreview.reasoningPreview = ""
-	if got := noPreview.thinkingLine(); strings.Contains(got, "pensando:") {
-		t.Errorf("thinkingLine with an empty preview = %q, want no \"pensando:\" segment at all", got)
+	if got := noPreview.thinkingLine(); strings.Contains(got, "thinking:") {
+		t.Errorf("thinkingLine with an empty preview = %q, want no \"thinking:\" segment at all", got)
 	}
 }

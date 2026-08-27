@@ -128,12 +128,12 @@ func TestThinkingLineDistinguishesProgressFromStall(t *testing.T) {
 	now := time.Now()
 	working := Model{waitStartedAt: now.Add(-2 * time.Second), lastEventAt: now, animFrame: 2, workState: workModelActive}
 	got := working.thinkingLine()
-	if !strings.Contains(strings.ToLower(ansi.Strip(got)), thinkingKPlain()) || !strings.Contains(got, "MODELO ATIVO") {
+	if !strings.Contains(strings.ToLower(ansi.Strip(got)), thinkingKPlain()) || !strings.Contains(got, "MODEL ACTIVE") {
 		t.Fatalf("working line = %q", got)
 	}
 
 	stalled := Model{waitStartedAt: now.Add(-10 * time.Second), lastEventAt: now.Add(-stallThreshold - time.Second)}
-	if got := stalled.thinkingLine(); !strings.Contains(got, thinkingKPlain()) || !strings.Contains(got, "CONEXÃO SEM EVENTOS") {
+	if got := stalled.thinkingLine(); !strings.Contains(got, thinkingKPlain()) || !strings.Contains(got, "NO STREAM EVENTS") {
 		t.Fatalf("stalled line = %q", got)
 	}
 }
