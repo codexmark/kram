@@ -668,6 +668,9 @@ func (s *Service) runLoop(ctx context.Context, sessionID, model string, depth in
 	// fact written mid-conversation still shows up on the user's very
 	// next message instead of only in a new session.
 	memoryMsg, haveMemory := s.recentMemoryMessage()
+	// Env context is frozen per run for the same prefix-cache reason as
+	// memory above — see collectEnvContext.
+	envContext := collectEnvContext(ctx, s.cfg.Workspace, model)
 
 	result := RunResult{ImageNotice: imageNotice}
 	compactions := 0
@@ -715,7 +718,7 @@ func (s *Service) runLoop(ctx context.Context, sessionID, model string, depth in
 		// compilePreamble actually consumes.
 		injectProjectContext := haveProjectContext && needsFreshInjection(effective, projectContextMarkerName, formatProjectContextContent(projectContext))
 		injectMemory := haveMemory && needsFreshInjection(effective, memoryMarkerName, memoryMsg.Content)
-		preambleParts := compilePreamble(s.cfg.Workspace, projectContext, injectProjectContext, memoryMsg, injectMemory, s.tools, s.cfg.ToolOrder, s.cfg.SystemPromptOverride)
+		preambleParts := compilePreamble(s.cfg.Workspace, projectContext, injectProjectContext, memoryMsg, injectMemory, s.tools, s.cfg.ToolOrder, s.cfg.SystemPromptOverride, envContext)
 		postscriptParts := compileTurnPostscript(emptyRetryUsed, nearBudget)
 		// Keep the visible definitions separately from the subset offered on
 		// this turn. The final soft-landing turn deliberately offers no tools,

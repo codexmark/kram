@@ -134,12 +134,12 @@ func TestRunLoopPromptAssemblyContract(t *testing.T) {
 		t.Fatalf("expected exactly 1 gateway request, got %d", len(reqs))
 	}
 	msgs := reqs[0]
-	// [0..8] the nine named base sections (identity..safety, see
-	// baseSectionOrder), [9] tools-overview, [10] background-job-guidance,
-	// [11] AGENTS.md, [12] memory, [13] user turn.
-	wantLen := len(baseSectionOrder) + 5
+	// The named base sections (see baseSectionOrder), then tools-overview,
+	// background-job-guidance, env-context (#127), AGENTS.md, memory, and
+	// the user turn.
+	wantLen := len(baseSectionOrder) + 6
 	if len(msgs) != wantLen {
-		t.Fatalf("expected %d messages (%d base sections + tools-overview + background-job-guidance + AGENTS.md + memory + user turn), got %d: %+v", wantLen, len(baseSectionOrder), len(msgs), msgs)
+		t.Fatalf("expected %d messages (%d base sections + tools-overview + background-job-guidance + env-context + AGENTS.md + memory + user turn), got %d: %+v", wantLen, len(baseSectionOrder), len(msgs), msgs)
 	}
 	if msgs[0].Role != "system" || msgs[0].Content == "" {
 		t.Errorf("msgs[0] should be the non-empty identity section, got %+v", msgs[0])
@@ -152,15 +152,19 @@ func TestRunLoopPromptAssemblyContract(t *testing.T) {
 	if bgGuidance.Role != "system" || !strings.Contains(bgGuidance.Content, "run_background, not bash") {
 		t.Errorf("msgs[%d] should be the background-job guidance (run_background is visible in this real registry), got %+v", len(baseSectionOrder)+1, bgGuidance)
 	}
-	projectContext := msgs[len(baseSectionOrder)+2]
+	envContext := msgs[len(baseSectionOrder)+2]
+	if envContext.Role != "system" || !strings.Contains(envContext.Content, "# Environment") || !strings.Contains(envContext.Content, "Today's date") {
+		t.Errorf("msgs[%d] should be the env-context part (date, combo, git), got %+v", len(baseSectionOrder)+2, envContext)
+	}
+	projectContext := msgs[len(baseSectionOrder)+3]
 	if projectContext.Role != "system" || !strings.Contains(projectContext.Content, "Always run tests before finishing.") {
 		t.Errorf("msgs[%d] should be the AGENTS.md project-context message, got %+v", len(baseSectionOrder)+2, projectContext)
 	}
-	memory := msgs[len(baseSectionOrder)+3]
+	memory := msgs[len(baseSectionOrder)+4]
 	if memory.Role != "system" || !strings.Contains(memory.Content, "the user prefers terse answers") {
 		t.Errorf("msgs[%d] should be the memory message, got %+v", len(baseSectionOrder)+3, memory)
 	}
-	userTurn := msgs[len(baseSectionOrder)+4]
+	userTurn := msgs[len(baseSectionOrder)+5]
 	if userTurn.Role != "user" || userTurn.Content != "oi" {
 		t.Errorf("msgs[%d] should be the real conversation turn, got %+v", len(baseSectionOrder)+4, userTurn)
 	}

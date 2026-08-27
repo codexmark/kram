@@ -11,7 +11,7 @@ import (
 // means, rather than deriving it from the function under test.
 var baseSectionOrder = []string{
 	"identity", "workflow", "skills", "memory-policy",
-	"delegation", "asking", "coding-policy", "output", "safety",
+	"delegation", "asking", "tasks", "coding-policy", "output", "examples", "safety",
 }
 
 // TestCompileBaseSectionsMatchesSystemPromptByteForByte is the golden-file

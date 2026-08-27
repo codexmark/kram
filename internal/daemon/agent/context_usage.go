@@ -67,7 +67,7 @@ func (s *Service) ContextUsage(ctx context.Context, sessionID string) (ContextUs
 	// next real turn would actually skip resending.
 	injectProjectContext := haveProjectContext && needsFreshInjection(effective, projectContextMarkerName, formatProjectContextContent(projectContext))
 	injectMemory := haveMemory && needsFreshInjection(effective, memoryMarkerName, memoryMsg.Content)
-	parts := compilePreamble(s.cfg.Workspace, projectContext, injectProjectContext, memoryMsg, injectMemory, s.tools, s.cfg.ToolOrder, s.cfg.SystemPromptOverride)
+	parts := compilePreamble(s.cfg.Workspace, projectContext, injectProjectContext, memoryMsg, injectMemory, s.tools, s.cfg.ToolOrder, s.cfg.SystemPromptOverride, collectEnvContext(ctx, s.cfg.Workspace, s.activeModel()))
 	toolTokens := estimateToolDefinitionTokens(s.tools.Definitions())
 	partTokens := make(map[string]int, len(parts))
 	for _, part := range parts {
@@ -99,7 +99,7 @@ func (s *Service) ContextUsage(ctx context.Context, sessionID string) (ContextUs
 	// base sections without this file needing a matching update.
 	nonBaseCategoryIDs := map[string]bool{
 		"tools-overview": true, "background-job-guidance": true,
-		"project-context": true, "memory": true,
+		"project-context": true, "memory": true, "env-context": true,
 	}
 	systemPromptTokens := 0
 	for id, tok := range partTokens {
@@ -116,6 +116,9 @@ func (s *Service) ContextUsage(ctx context.Context, sessionID string) (ContextUs
 	}
 	if partTokens["background-job-guidance"] > 0 {
 		categories = append(categories, ContextCategory{Name: "background_job_guidance", Tokens: partTokens["background-job-guidance"]})
+	}
+	if partTokens["env-context"] > 0 {
+		categories = append(categories, ContextCategory{Name: "env_context", Tokens: partTokens["env-context"]})
 	}
 	if partTokens["project-context"] > 0 {
 		categories = append(categories, ContextCategory{Name: "project_context", Tokens: partTokens["project-context"]})
