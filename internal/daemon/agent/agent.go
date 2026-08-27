@@ -719,7 +719,7 @@ func (s *Service) runLoop(ctx context.Context, sessionID, model string, depth in
 		emit(onEvent, Event{Kind: EventRouteStart})
 		callResult, err := s.callModelWithRetry(ctx, sessionID, sentEstimate, model, modelMessages, toolDefs, onEvent)
 		if err != nil {
-			return RunResult{}, fmt.Errorf("gateway call failed: %w", err)
+			return RunResult{}, fmt.Errorf("gateway call failed: %w", humanizeGatewayFailure(err, s.cfg.MaxGatewayRounds))
 		}
 		result.Attempts = callResult.Attempts
 		result.Usage = sumUsage(result.Usage, callResult.Usage)

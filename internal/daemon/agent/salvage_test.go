@@ -161,3 +161,59 @@ func TestStreamingPreCommitGatewayErrorIsTyped(t *testing.T) {
 		t.Fatalf("content=%q calls=%d, want ok after one retry", result.Content, calls)
 	}
 }
+
+// TestRateLimitNoticeAndHumanizedFinalError (#111): a rate-limited round
+// names the real situation in its retry notice, and a final failure
+// translates to something a person can act on — with the original error
+// still reachable via errors.As.
+func TestRateLimitNoticeAndHumanizedFinalError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadGateway)
+		w.Write([]byte(`{"error":{"message":"429 from upstream","type":"kram_gateway_error","combo":"default","retryable":true,"cause":"rate_limit","retry_after_ms":50,"attempts":[{"provider":"p1","class":"rate_limit"}]}}`))
+	}))
+	defer srv.Close()
+
+	s := &Service{
+		gateway: gatewayclient.New(srv.URL), heartbeatInterval: time.Hour,
+		calibrator: newTokenCalibrator(),
+		cfg:        Config{MaxGatewayRounds: 2},
+	}
+	var notices []string
+	_, err := s.callModelWithRetry(context.Background(), "ses", 0, "default", nil, nil, func(e Event) {
+		if e.Kind == EventNotice {
+			notices = append(notices, e.Notice)
+		}
+	})
+	if err == nil {
+		t.Fatal("expected the round to exhaust retries")
+	}
+	if len(notices) == 0 || !strings.Contains(notices[0], "provider rate limited") {
+		t.Fatalf("rate-limit retry must say so, got %v", notices)
+	}
+
+	human := humanizeGatewayFailure(err, 2)
+	if !strings.Contains(human.Error(), "rate limit hit") || !strings.Contains(human.Error(), "wait a moment") {
+		t.Fatalf("humanized error = %q", human.Error())
+	}
+	var ge *gatewayclient.GatewayError
+	if !errorsAs(human, &ge) {
+		t.Fatal("humanized error must keep the typed original wrapped")
+	}
+}
+
+func errorsAs(err error, target **gatewayclient.GatewayError) bool {
+	for err != nil {
+		if ge, ok := err.(*gatewayclient.GatewayError); ok {
+			*target = ge
+			return true
+		}
+		type unwrapper interface{ Unwrap() error }
+		u, ok := err.(unwrapper)
+		if !ok {
+			return false
+		}
+		err = u.Unwrap()
+	}
+	return false
+}
