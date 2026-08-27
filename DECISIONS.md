@@ -5660,3 +5660,31 @@ never persisted. Calibration is skipped on salvaged rounds (the
 continuation prompt is bigger than what sentEstimate measured). Transport
 errors where the gateway itself is unreachable stay non-retryable, as
 before.
+
+---
+
+## Guards for the temporal-envelope bug class
+
+The #105–#108 bugs shared one blind spot: every verification layer exercised
+logic under fast, synthetic conditions, and the bugs lived in the temporal
+envelope (5s/8s/120s of silence or duration) and in real provider behavior.
+Three cheap guards now close the class rather than the exemplars:
+
+- **Static + runtime timeout guard** (internal/provider/guards_test.go): the
+  package's sources must not construct `http.Client{Timeout...}` and the
+  four adapters' constructed clients must carry Timeout 0 — reintroducing
+  the whole-call cap (#106's root cause) fails a unit test immediately
+  instead of failing in production minutes into a real generation.
+- **Compressed-timescale slow-provider fixture** (internal/gateway/
+  slowprovider_test.go): a real gateway, real adapter, real peek and
+  watchdogs against an httptest upstream whose "30s of silent thinking" is
+  150ms — proving both directions: a slow-but-healthy upstream survives end
+  to end, and a genuinely dead one still dies at the configured threshold,
+  labeled as an idle timeout.
+- **Buffered×streaming contract parity** (internal/daemon/agent/
+  parity_test.go): the same scenario table runs through both callModel
+  paths — heartbeats through silence, identical result/usage, typed
+  retryable GatewayError on all-candidates-failed. The missing-heartbeat
+  asymmetry (#105) and the untyped streaming error (#109) both lived
+  exactly in the gap this closes; the two parallel paths can no longer
+  drift apart silently.
