@@ -5032,3 +5032,67 @@ needed. Tests pin the resolver defaults/overrides, the coherence arithmetic
 a tuned threshold/cooldown by actually tripping differently, `Build`
 applying the timeout to the real client, and a full config Save→Load
 round-trip of the `tunables:` block.
+
+---
+
+## Structural boundary enforcement + gateway-config extract (post-audit #75)
+
+The audit's verdict was that Kram's single most valuable, hardest-to-retrofit
+property — the clean layering where the CLI never imports daemon/gateway/
+router internals and the daemon reaches the gateway only over HTTP — had
+**zero automatic enforcement**. A stray `import "…/internal/router"` in
+`internal/cli/app` would compile and pass every test, silently breaching the
+layer. This change turns that convention into a gate, and moves the most
+subtle config code out of the least-testable place.
+
+**`internal/archcheck`** locks the boundaries. The rule-evaluation logic
+(`Analyze`) is a pure function — synthetic import graph in, violations out —
+unit-tested including the trap a naive `strings.Contains("internal/gateway")`
+check falls into: `internal/gatewayclient` and the newly-added
+`internal/gatewayconfig` share a string prefix with `internal/gateway` but
+are different packages that must NOT be flagged. Matching is therefore on
+whole path segments (`p == prefix || strings.HasPrefix(p, prefix+"/")`).
+`Load` feeds `Analyze` the real graph via `go list`, and
+`TestKramLayeringHolds` asserts the real module has zero violations — the
+literal "a layer can't be breached again" contract, proven against the real
+registry, with a `len(pkgs)==0` guard so it can't pass vacuously. The four
+`DefaultRules` (cli↛daemon, cli↛gateway, cli↛router, daemon↛gateway) were
+each verified to hold today before being encoded. `scripts/verify.sh` gained
+an explicit fail-fast `architecture boundary check` step; the same test also
+runs in the ordinary `go test ./...` sweep.
+
+The single most important subtlety came out of an adversarial review of this
+very change: `go list` on one platform only sees the files selected for that
+platform, so a cross-layer import hidden behind a build tag (a `*_windows.go`
+file, `//go:build windows`) would slip past a check run on the Linux CI
+runner — and Kram genuinely uses OS-split files (`internal/shell/runner_{unix,
+windows}.go`) and ships for Windows and Android. So `Load` **sweeps every
+platform Kram ships** (`linux`, `darwin`, `windows`, `android`, all
+`CGO_ENABLED=0` to match the cgo-free cross-builds) and unions the import
+sets. Verified by injecting a `//go:build windows` breach and watching the
+gate catch it while running on Linux — the exact hole the review predicted,
+now closed rather than merely documented.
+
+**Extract: `cmd/kram/autodetect.go` → `internal/gatewayconfig`.** The
+provider-reconciliation logic — the most subtle config code in the project,
+with a documented split-brain bug (an account added via the Accounts UI
+after `config.yaml` existed used to stay invisible until the file was
+hand-edited) — lived in `package main`, the least-testable place. It moved
+verbatim (three entry points exported: `LoadStoredCredentials`, `Detect`,
+`Reconcile`; helpers kept unexported), so a second entrypoint like
+`cmd/gateway` could reuse it and, more importantly, the existing regression
+tests now exercise it as a normal package. A small `isolateReconcileTest`
+helper copy stays in `cmd/kram`'s tests because `main_test.go` still drives
+`loadOrDetectGatewayConfig` (which delegates here) and the two packages
+can't share an unexported test helper.
+
+**Deliberately deferred: removing the `os.Setenv` credential passing.** The
+issue floats decoupling credentials from the global environment. But the
+gateway resolves each provider's key via `config.ProviderConfig.APIKey()` →
+`os.Getenv(APIKeyEnv)` at `provider.Build` time — so the env is load-bearing
+end to end, and decoupling only the *detection* side would just move the
+global coupling, not remove it. Removing it entirely means rethreading
+resolved credentials through config→Build→adapter: a broad refactor the
+issue's own scope guard forbids ("não reorganizar os pacotes além do
+necessário … não uma refatoração ampla"). Left for a dedicated change. The
+extract's value — testability — is fully realized without it.
