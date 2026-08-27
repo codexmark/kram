@@ -229,10 +229,16 @@ func (m Model) thinkingLine() string {
 		// matters all the way down the stack this is fed from.
 		meta += " · pensando: " + boundedReasoningPreview(m.reasoningPreview)
 	}
+	// Discoverable exactly when relevant: a running turn can be interrupted
+	// with Esc (see the key handler). Only shown when there's no panel to
+	// close, since there Esc means "close panel" first.
+	if m.active == panelNone {
+		meta += " · esc interrompe"
+	}
 	if stalled {
 		sinceEvent := time.Since(m.lastEventAt).Round(time.Second)
 		label = "CONEXÃO SEM EVENTOS"
-		meta = fmt.Sprintf("há %s · total %s", sinceEvent, elapsed)
+		meta = fmt.Sprintf("há %s · total %s · esc interrompe", sinceEvent, elapsed)
 		return indicator + "  " + styleBadgeWarn.Bold(true).Render(label) + "  " + rail + "  " + styleBadgeWarn.Render(meta)
 	}
 	return indicator + "  " + shimmerText(label, m.animFrame) + "  " + rail + "  " + styleMeta.Render(meta)

@@ -4820,3 +4820,38 @@ tool_call was already answered.
 Coordinates with #73's planned single-transaction `AppendMessage` (which
 would shrink the crash window), but the load-time repair is still needed
 for sessions corrupted before that lands, so it's the load-bearing fix.
+
+---
+
+## Esc interrupts an in-flight turn (post-audit #68)
+
+The audit noted a table-stakes gap: a running turn couldn't be
+interrupted — Esc only closed panels; the only escape was ctrl+c, which
+kills the whole program. The wiring to fix it already existed end to end:
+`daemonclient.MessageStream.Close()` tears down the SSE connection, the
+daemon runs each turn on `r.Context()`, and closing the client connection
+cancels that context, which `runLoop` honors. What was missing was a
+reference to the stream and a key binding.
+
+The CLI now holds the in-flight `activeStream` (set on `streamStartMsg`,
+cleared on `done`/`error`/`submit`). Esc, when no panel is open and a turn
+is in flight, closes it: that cancels the daemon turn server-side, marks
+the tail message not-streaming with an "interrompido pelo usuário" notice,
+and stops waiting. The closed stream produces one final error/EOF on its
+reader goroutine — an `interrupting` flag makes `handleStreamEvent`
+swallow exactly that one event, so a user-initiated cancel never surfaces
+as a scary connection error. The thinking-line meta now shows
+"esc interrompe" while a turn runs (and no panel is open), so the
+affordance is discoverable exactly when it applies.
+
+`MessageStream.Close()` was made nil-safe as part of this — the interrupt
+path closes whatever stream it holds without first proving one was ever
+opened, and a zero-value stream must not panic. Three tests pin the
+behavior: Esc interrupts (stops waiting, sets the guard, clears the
+stream, notices the message); the guard swallows the trailing stream
+error; Esc with no in-flight turn is a harmless no-op.
+
+Deliberately kept the connection-close cancel rather than adding a
+dedicated `POST /cancel` endpoint: the close already cancels the daemon's
+context cleanly, and a separate endpoint is only worth it once headless
+mode (#66) needs SIGINT→cancel without a live SSE connection to close.
