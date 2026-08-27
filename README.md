@@ -4,6 +4,8 @@
 
 **A local-first coding agent runtime, multi-provider LLM gateway, and terminal workspace — built from scratch in Go.**
 
+🌐 **[kram.codexmark.com.br](https://kram.codexmark.com.br)**
+
 > [!NOTE]
 > **Status: Public Beta.** Kram is ready for real-world testing while its
 > cross-platform behavior and provider compatibility continue to stabilize.
@@ -579,6 +581,53 @@ Both fixes narrow the guard rather than removing the mechanism: exploration now 
 
 ---
 
+## 20. A timeout must bound silence, never work
+
+The most damaging timeout bug Kram had was not a missing timeout — it was a *whole-call* timeout. An `http.Client.Timeout` on a streaming request counts from the first byte of the request to the last byte of the response, so any generation longer than the cap was killed mid-answer while working perfectly.
+
+The replacement is a phase watchdog:
+
+```text
+connect + response headers   -> bounded (a dead upstream fails fast)
+        │
+        ▼
+streaming body               -> bounded per gap BETWEEN bytes
+                                (idle timeout, reset on every read)
+```
+
+A provider that thinks for 40 seconds and then streams for 10 minutes never trips it. A provider that goes silent for the idle budget does — immediately, with an error that says exactly that.
+
+The same rule propagates down the chain: the gateway emits SSE keep-alive comments while an upstream is alive-but-quiet, and the daemon heartbeats through model waits and long tool runs so no hop above it mistakes patience for death.
+
+**The insight:** a timeout is a claim about what silence means. Applying it to work makes the system kill its own successes.
+
+---
+
+## 21. A turn should survive its client
+
+A terminal is the *viewer* of an agent run, not its *owner*. If a network drop or closed laptop lid kills minute 8 of a 10-minute turn, the architecture had the ownership backwards.
+
+Kram moved turn ownership fully into the daemon:
+
+```text
+terminal dies mid-turn
+        │
+        ▼
+daemon keeps executing the run
+        │  (replay buffer accumulates everything emitted)
+        ▼
+terminal reopens the session
+        │
+        ▼
+automatic reattach -> replay missed events -> live stream continues
+```
+
+Because disconnecting no longer cancels anything, cancellation became an explicit protocol action: `Esc` sends a server-side interrupt, not a side effect of hanging up.
+
+**The insight:** once the daemon owns the turn, "my terminal crashed" and "I pressed Esc" stop being the same event — and only one of them should stop the work.
+
+---
+
 # What Kram is today
 
 At a high level, Kram is four things working together:
@@ -715,6 +764,14 @@ Conversation state:
 -gateway-port   explicit gateway port; 0 chooses a free localhost port
 -daemon-port    explicit daemon port; 0 chooses a free localhost port
 -setup          re-run the first-run setup wizard even if it already completed
+-stream         prefer the streaming gateway path (default true); disable for a
+                slow local server that sends nothing during prompt prefill
+-max-context-tokens
+                override the context-window budget that triggers compaction
+                (0 = derive from the active combo's smallest provider window)
+-p              headless mode: run one prompt to completion, print the answer
+                to stdout, and exit — no TUI (for CI, scripting, evals)
+-json           with -p, emit one JSON event object per line instead of text
 -version        print Kram version
 ```
 
@@ -726,6 +783,16 @@ go run ./cmd/kram \
   -strategy smart \
   -max-turns 50
 ```
+
+## Headless mode
+
+`-p` runs a single prompt through the full runtime — gateway, daemon, agent loop, tools, permissions — with no TUI, printing the final answer to stdout and exiting with a meaningful status code:
+
+```bash
+kram -workspace . -p "run the tests and summarize any failure"
+```
+
+`-json` switches stdout to one JSON event object per line (deltas, tool activity, the final answer), for CI pipelines, scripting, and eval harnesses that want structure instead of prose.
 
 ---
 
@@ -740,7 +807,7 @@ Kram opens an 8-step wizard automatically the first time it runs with no complet
 3. **Providers** — the same accounts screen described below, in-flow: paste a key or, for OpenRouter, authorize in the browser (no card, real per-user key, the wizard's recommended path — see "Provider credentials"). Each addition is pinged immediately, and a live "Gateway mode: BASIC/RESILIENT" line reports genuine independent-upstream count, never inflated by OpenRouter's several free-model routes sharing one account.
 4. **Routing** — Auto (Kram's existing priority/round-robin heuristic, shown resolved live), Smart, or Round Robin; a note that weights/gates/custom strategies stay tunable in the generated config afterward.
 5. **Permissions** — Recommended, Strict, or Autonomous, each a real starter `permissions.json` evaluated by the same engine described in "Permission engine" below, not a separate simplified rule set.
-6. **Tools & Skills** — Recommended (nothing disabled), Minimal (read/search/navigation/code-intelligence only), or Custom (the same tools/skills screen described below, with bulk enable-all/disable-all added alongside individual toggles).
+6. **Tools & Skills** — Recommended (nothing disabled), Minimal (read/search/navigation/code-intelligence only), or Custom (the same tools/skills screen described below, with bulk enable-all/disable-all added alongside individual toggles). The wizard then offers the curated [kram-skills](https://github.com/codexmark/kram-skills) starter pack — install or skip, never silently assumed.
 7. **System Check** — real, non-fabricated status for Git/Go/gopls, workspace writability, configured providers, and MCP servers — informational only, nothing here blocks continuing.
 8. **Ready** — a recap of every choice, then Kram creates a real session and drops straight into it with a one-time, client-side-only welcome note (never persisted, never mistaken for a model reply).
 
@@ -772,6 +839,9 @@ model call
 Important properties:
 
 - tool calls execute only after their model response is complete;
+- read-only tool calls issued in one batch (reads, greps, globs, searches) run in parallel; any call that mutates keeps its exact sequential position;
+- a stream that dies mid-answer retries with backoff and **continues from the text already streamed** instead of restarting the answer; rate limits honor the provider's own `Retry-After` and say so visibly;
+- steering messages typed during the run are folded in at the next model-call boundary (see "Mid-turn steering");
 - the default run budget is four automatic segments of 50 model calls (200-call emergency ceiling);
 - identical tool calls/results trigger a strategy-change nudge and then a visible stagnation stop instead of looping to that ceiling;
 - final-budget behavior uses a soft landing rather than a hard mid-task cutoff;
@@ -889,6 +959,20 @@ The gateway also exposes real provider telemetry such as request count, failures
 
 ---
 
+## Streaming resilience
+
+Every timeout in the model-call chain bounds **silence**, never **work** (insight 20):
+
+- provider adapters use a phase watchdog — connect+headers bounded, then an idle budget *between bytes* — instead of a whole-call cap that used to kill long generations mid-answer;
+- the gateway emits SSE keep-alive comments while an upstream is alive-but-thinking, so intermediaries and clients never mistake a thinking model for a dead one;
+- the daemon heartbeats through model waits and long tool runs, keeping the TUI's activity indicator truthful;
+- a single-provider combo waits out that provider's own timeout instead of failing fast with nowhere to fall back to;
+- reasoning-capable backends stream their thinking summaries live instead of silence.
+
+When a committed stream still dies mid-answer, the retry does not throw the partial answer away: the salvaged text is preserved, the retry continues from where it stopped, and the text you watched stream is exactly what the final answer begins with. Provider rate limits surface as what they are ("retrying in 34s", honoring `Retry-After`), and terminal failures are translated into something actionable rather than a raw transport error.
+
+---
+
 ## Durable sessions
 
 The daemon owns conversation durability. The TUI is only a view.
@@ -902,6 +986,35 @@ The same store backs:
 - FTS5 session search;
 - compaction summaries;
 - provider attribution.
+
+---
+
+## Detachable turns
+
+Durability extends to the turn that is *currently running* (insight 21). The daemon owns every live turn through a per-session turn registry with a replay buffer:
+
+- closing the terminal — crash, network drop, `kill` — does **not** stop the run; the daemon keeps executing;
+- reopening the session reattaches automatically, replaying everything missed and then continuing live;
+- `Esc` is an explicit server-side interrupt (`POST /sessions/{id}/interrupt`), not a side effect of disconnecting;
+- a finished detached turn is retained briefly so a returning client still gets its ending.
+
+---
+
+## Mid-turn steering
+
+The composer stays live while a turn runs. A message typed mid-turn queues as steering and is folded in at the agent's next model-call boundary — without cancelling tools in flight or throwing away progress. If the model produces its final answer while steering is still pending, the turn simply continues to address it.
+
+---
+
+## Automatic checkpoints and Ctrl+G rewind
+
+Before a turn's first **mutating** tool batch, Kram lazily captures an automatic checkpoint of the workspace (read-only batches never trigger one). If the turn goes somewhere you did not want:
+
+- `Ctrl+G` shows exactly which checkpoint would be restored;
+- `Ctrl+G` again restores it — including removing files the turn created;
+- the rewind itself is undoable: a pre-rewind snapshot is always captured first.
+
+Checkpoints ride the same isolated snapshot repository described in "Workspace snapshots" — never the project's real `.git`.
 
 ---
 
@@ -1013,6 +1126,8 @@ Current path:
 5. reload the reduced effective history.
 
 Compaction attempts are capped per run. Persistent overflow becomes a real `ErrContextOverflow` rather than an infinite summarize/retry loop.
+
+A *failed summarizer* no longer takes the turn down with it: emergency pruning cuts at user-turn boundaries (never splitting a tool call from its result) to keep the current call viable, while the durable session keeps its full history.
 
 The TUI context panel uses the same runtime accounting path instead of maintaining a separate estimate.
 
@@ -1132,6 +1247,8 @@ Kram uses progressive disclosure:
 1. `skill_list` exposes names/descriptions;
 2. `skill` loads full instructions only when needed;
 3. `skill_install` can discover/install skills from a public Git repository while reporting source/license information.
+
+The curated starter pack lives at [codexmark/kram-skills](https://github.com/codexmark/kram-skills) — TDD, debugging, review, and domain playbooks (MIT, with per-skill source/license provenance). The first-run wizard offers to install it; `skill_install` accepts it — or any other public skills repository — at any time.
 
 Project skills:
 
@@ -1263,7 +1380,7 @@ The snapshot layer:
 - leaves files that were never captured alone;
 - degrades cleanly if Git is unavailable.
 
-Snapshots are explicit, not automatically created before every mutation.
+`snapshot_create` remains an explicit, model-driven operation — but the runtime additionally captures an automatic checkpoint before a turn's first mutating tool batch, backing `Ctrl+G` rewind (see "Automatic checkpoints and Ctrl+G rewind").
 
 ---
 
@@ -1309,9 +1426,11 @@ It does not persist conversations itself and does not call providers directly.
   for your next message and clears once sent. The transcript notes the
   attachment, and the daemon emits a notice if no provider in the active combo
   accepts images (the message is then sent as text only);
-- assistant text streams incrementally;
+- assistant text streams incrementally, including live reasoning summaries from providers that emit them;
 - tool calls appear while running and settle to result state;
 - notices, questions, and approval prompts appear inside the active turn;
+- the composer stays live during a turn: typed messages queue as mid-turn steering, applied at the next model-call boundary;
+- `Esc` interrupts the running turn server-side; closing the terminal does **not** — reopening the session reattaches to the still-running turn and replays what was missed;
 - mouse-wheel transcript scrolling is supported.
 - dragging text copies it through OSC 52 and leaves a short visual confirmation;
 - live activity labels (`MODEL ACTIVE`, `RUNNING`, `WRITING`) come from daemon events and consume no model tokens.
@@ -1319,6 +1438,8 @@ It does not persist conversations itself and does not call providers directly.
 ## Route bar
 
 A one-line bar above the transcript reports the active routing strategy and, once available, the real attempt trail.
+
+The activity rail is directional: glyphs flow right while model output arrives, left while data heads upstream (prompts, tool results), and converge when both are fresh at once. Its color is a volume heat ramp — green for a slow stream up through hot magenta for high throughput — deliberately never the red that this TUI reserves for actual failure.
 
 Wide terminals can show provider names, outcome glyphs, and latency. Narrower layouts progressively reduce detail without letting long provider IDs wrap the UI.
 
@@ -1362,6 +1483,10 @@ The TUI never recomputes the routing score.
 ## `Ctrl+T` — context panel
 
 Shows context usage and remaining budget sourced from the daemon's own accounting path.
+
+## `Ctrl+G` — checkpoint rewind
+
+First press shows exactly which automatic checkpoint would be restored (id-pinned, so what you confirm is what you get); second press restores it, removing files the turn created. A pre-rewind snapshot is captured first, so the rewind itself is undoable.
 
 ## `Ctrl+B` — background-process observer
 
@@ -1526,9 +1651,18 @@ GET  /sessions
 GET  /sessions/{id}
 GET  /sessions/{id}/context
 POST /sessions/{id}/messages
+GET  /sessions/{id}/turn        attach/reattach to the live (or just-finished) turn
+POST /sessions/{id}/interrupt   explicit server-side turn interrupt (Esc)
+POST /sessions/{id}/steer       queue a mid-turn steering message
 POST /sessions/{id}/answer
 POST /sessions/{id}/approve
 GET  /tools
+PUT  /tools/settings
+GET  /processes
+GET  /processes/{id}/output
+POST /combo                     runtime strategy switch (loopback-only)
+GET  /rewind                    which checkpoint Ctrl+G would restore
+POST /rewind                    perform the id-pinned rewind
 ```
 
 `POST /sessions/{id}/messages` responds over SSE with events such as:
@@ -1624,6 +1758,10 @@ Examples:
 - gateway and daemon handlers recover panics rather than killing the whole process;
 - providers have independent circuit breakers;
 - fallback happens before response commitment when possible;
+- timeouts bound upstream silence, never in-progress work;
+- a stream that dies after commitment salvages its partial answer and resumes instead of restarting;
+- a running turn survives its terminal and replays missed events on reattach;
+- automatic checkpoints plus an undoable Ctrl+G rewind bound the damage of a bad turn;
 - MCP failures stay isolated to their server;
 - LSP failure stays isolated to its language capability;
 - background processes and LSP servers are cleaned up on daemon shutdown;
@@ -1756,14 +1894,14 @@ Install a specific Unix version by passing the variable to `sh`, which is the
 process that evaluates the installer:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/codexmark/kram-releases/master/install.sh | KRAM_VERSION=v0.2.7 sh
+curl -fsSL https://raw.githubusercontent.com/codexmark/kram-releases/master/install.sh | KRAM_VERSION=v0.6.0 sh
 ```
 
 PowerShell version pinning uses a script block so the requested version is
 visible to the installer:
 
 ```powershell
-$env:KRAM_VERSION = "v0.2.7"
+$env:KRAM_VERSION = "v0.6.0"
 & ([scriptblock]::Create((irm https://raw.githubusercontent.com/codexmark/kram-releases/master/install.ps1)))
 ```
 
@@ -1846,9 +1984,9 @@ Important current boundaries include:
 
 - shell execution is not a host sandbox;
 - subagents share the workspace;
-- snapshots are explicit rather than automatic before every mutation;
+- automatic checkpoints capture once per turn (before the first mutating batch), not before every individual mutation;
 - MCP schema caching does not yet replace every startup connection with fully lazy discovery;
-- streaming fallback is only possible before downstream commitment;
+- streaming fallback is only possible before downstream commitment — after commit, recovery means salvage-and-continue rather than a clean provider switch;
 - live route progress is currently per model call rather than true per-provider-attempt streaming;
 - scheduling/cron-style autonomous runs are not part of the current core;
 - context accounting is provider-agnostic and uses a documented chars/4 estimate rather than each provider's tokenizer;
