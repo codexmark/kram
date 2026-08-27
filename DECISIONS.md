@@ -5825,3 +5825,27 @@ Service and drains before the *next* run's first model call; on the CLI
 side, a failed steer (turn just ended) puts the text back in the
 composer with a "press enter to send normally" notice. Images can't be
 queued — they need a fresh turn, and the composer says so.
+
+---
+
+## Prompt maturity: env context, examples, todo discipline (#127-#129)
+
+Three of the four gaps a comparison against the top harnesses surfaced,
+each an increment on the section architecture. Env context (#127): a
+generated part carrying today's date, the active combo, and the git
+branch/working-tree/recent-commits snapshot — frozen once per run like
+memory (prefix caching), placed after the statics so its between-run
+variance never invalidates them, with a hard honesty rule: a failed or
+timed-out git call makes the affected line absent, never guessed
+("clean" must not be a timeout artifact). Detached HEAD and unborn
+repos report truthfully; the context panel shows env_context as its own
+category. Examples (#128) and Tasks (#129) were shaped by a three-lens
+adversarial review that caught real defects in the first draft: a
+bracketed stage direction that modeled roleplay narration, a verbatim
+"Bad" announce-phrase in the most imitable position, an example
+contradicting the new 3+-steps todo rule, and todo_write's
+replace-the-whole-list semantics missing from the discipline text. The
+shipped versions carry none of those: no dialogue framing, no negative
+example (workflowSection owns the quoted anti-patterns), grounding
+stated, full-list semantics spelled out. Model profiles (#130) remain
+the open, larger phase.

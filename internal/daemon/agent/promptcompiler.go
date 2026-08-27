@@ -108,7 +108,7 @@ func estimateToolDefinitionTokens(defs any) int {
 //     all stay exactly as cacheable as they already were; nothing earlier
 //     in the sequence is affected by a part appended at the end.
 
-// compileBaseSections turns systemprompt.go's nine named sections into
+// compileBaseSections turns systemprompt.go's named sections into
 // PromptParts, in the same order systemPrompt itself joins them — the
 // Model/Agent Profile phase's actual deliverable: section ordering as an
 // explicit, inspectable property of this list, instead of implicit in one
@@ -127,8 +127,10 @@ func compileBaseSections(workspace string) []PromptPart {
 		{"memory-policy", memoryPolicySection},
 		{"delegation", delegationSection},
 		{"asking", askingSection},
+		{"tasks", tasksSection},
 		{"coding-policy", codingPolicySection},
 		{"output", outputSection},
+		{"examples", examplesSection},
 		{"safety", safetySection},
 	}
 	parts := make([]PromptPart, len(sections))
@@ -309,7 +311,9 @@ func needsFreshInjection(effective []store.Message, markerName, freshContent str
 // Empty means today's systemPrompt(workspace) output, unchanged; see
 // Config.SystemPromptOverride's own doc comment for exactly what it can
 // and can't replace.
-func compilePreamble(workspace, projectContext string, haveProjectContext bool, memoryMsg openai.ChatMessage, haveMemory bool, reg *tools.Registry, toolOrder []string, systemPromptOverride string) []PromptPart {
+// envContext is the run-frozen dynamic environment snapshot (#127) —
+// date, active combo, git branch/status/commits; empty omits the part.
+func compilePreamble(workspace, projectContext string, haveProjectContext bool, memoryMsg openai.ChatMessage, haveMemory bool, reg *tools.Registry, toolOrder []string, systemPromptOverride, envContext string) []PromptPart {
 	var parts []PromptPart
 	if systemPromptOverride != "" {
 		// Wholesale replacement stays a single "base" part — see
@@ -325,6 +329,12 @@ func compilePreamble(workspace, projectContext string, haveProjectContext bool, 
 		if guidance := compileBackgroundJobGuidance(reg); guidance.Content != "" {
 			parts = append(parts, guidance)
 		}
+	}
+	if envContext != "" {
+		parts = append(parts, PromptPart{
+			ID: "env-context", Placement: PlacementPreamble, Refresh: RefreshRun, Source: "environment",
+			Content: "# Environment\n\n" + envContext,
+		})
 	}
 	if haveProjectContext {
 		parts = append(parts, PromptPart{
