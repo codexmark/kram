@@ -89,6 +89,8 @@ func runMain(args []string, stdout, stderr io.Writer) error {
 	showVersion := fs.Bool("version", false, "print the version and exit")
 	setup := fs.Bool("setup", false, "re-run the first-run setup wizard even if it already completed")
 	stream := fs.Bool("stream", true, "prefer the streaming gateway path (see daemon.Config.PreferStreaming's doc comment for the tradeoff); disable for a slow local model whose server sends nothing during prompt prefill, which can trip the streaming peek's idle timeout and fail every turn")
+	prompt := fs.String("p", "", "headless mode: run this single prompt to completion, print the answer to stdout, and exit — no TUI (for CI, scripting, evals)")
+	jsonOut := fs.Bool("json", false, "with -p, emit one JSON event object per line on stdout instead of plain text")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
@@ -109,6 +111,7 @@ func runMain(args []string, stdout, stderr io.Writer) error {
 		workspace: *workspace, workspaceExplicit: workspaceExplicit, gatewayConfigPath: *gatewayConfigPath, combo: *combo,
 		sessionID: *sessionID, title: *title, maxTurns: *maxTurns,
 		gatewayPort: *gatewayPort, daemonPort: *daemonPort, strategy: *strategy, setup: *setup, stream: *stream,
+		prompt: *prompt, jsonOut: *jsonOut, stdout: stdout,
 	})
 }
 
@@ -124,7 +127,13 @@ type runOptions struct {
 	daemonPort        int
 	strategy          string
 	setup             bool
-	stream            bool
+	// prompt/jsonOut/stdout drive headless mode (-p): when prompt is
+	// non-empty, run() runs one turn to completion and writes to stdout
+	// instead of launching the TUI.
+	prompt  string
+	jsonOut bool
+	stdout  io.Writer
+	stream  bool
 }
 
 func run(opts runOptions) error {
@@ -149,7 +158,11 @@ func run(opts runOptions) error {
 	// guards for it, same as every other local store in this codebase.
 	credStore, _ := credentials.Load()
 
-	if (opts.setup || onboardState.NeedsSetup()) && opts.gatewayConfigPath == "" {
+	// Headless mode can't run the interactive setup wizard — there's no
+	// TUI. Skip it; if no provider ends up configured, the gateway fails
+	// to start below with a clear error, which is the right non-interactive
+	// behavior.
+	if (opts.setup || onboardState.NeedsSetup()) && opts.gatewayConfigPath == "" && opts.prompt == "" {
 		result, err := runWizard(workspace, opts.workspaceExplicit)
 		if err != nil {
 			return fmt.Errorf("running setup wizard: %w", err)
@@ -319,6 +332,23 @@ func run(opts runOptions) error {
 
 	daemonC := daemonclient.New(daemonURL, daemonToken)
 	gatewayC := statusclient.New(gatewayURL)
+
+	// Headless mode: run the one prompt to completion, print to stdout,
+	// and return — no TUI. The daemon/gateway shut down via the deferred
+	// cancel + drain below, same as the interactive path.
+	if opts.prompt != "" {
+		out := opts.stdout
+		if out == nil {
+			out = os.Stdout
+		}
+		headlessErr := runHeadless(ctx, daemonC, opts.sessionID, opts.prompt, opts.jsonOut, out, os.Stderr)
+		cancel()
+		select {
+		case <-errCh:
+		case <-time.After(2 * time.Second):
+		}
+		return headlessErr
+	}
 
 	// An explicit -session or -title skips the picker and goes straight to
 	// chat/creation; otherwise the CLI opens on the session picker so a

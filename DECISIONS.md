@@ -4855,3 +4855,50 @@ Deliberately kept the connection-close cancel rather than adding a
 dedicated `POST /cancel` endpoint: the close already cancels the daemon's
 context cleanly, and a separate endpoint is only worth it once headless
 mode (#66) needs SIGINT→cancel without a live SSE connection to close.
+
+---
+
+## Headless mode: `kram -p "prompt"` (post-audit #66)
+
+The audit called this the highest product leverage per unit of effort:
+every `cmd/kram` entrypoint terminated in the TUI, so there was no way to
+run an agent turn in CI, a script, an editor integration, or a cheap
+hermetic eval — and the daemon's SSE API already did all the work; only a
+non-TUI consumer of it was missing.
+
+`-p "prompt"` runs one turn to completion and prints to stdout, no TUI.
+`--json` switches the output from plain text to one JSON event object per
+line (the machine-readable shape a harness consumes). `run()` branches to
+`runHeadless` right after the in-process daemon/gateway come up — the same
+gateway/daemon orchestration the TUI path uses, just a different consumer
+of the stream. Verified live against the real LM Studio provider in both
+modes (text printed "OK"; JSON emitted the full
+`segment→route_start→reasoning*→delta→route_done→done` sequence).
+
+Output shape decisions:
+- **Text mode**: assistant deltas go to stdout; tool activity and notices
+  go to stderr, so stdout is *only* the answer (pipe-friendly). A trailing
+  newline is added. If the buffered gateway path produced no deltas, the
+  final message content is printed at `done` so stdout still carries the
+  answer.
+- **JSON mode**: every stream event is marshaled as a line on stdout.
+- Either way, an `error` event returns a non-nil error → non-zero exit,
+  so a CI job fails correctly.
+
+Two non-interactive concerns handled explicitly:
+- **No human to answer prompts.** A mid-turn `ask_question` or approval
+  would otherwise block forever waiting for input that never comes.
+  Headless auto-resolves: an **approval is denied** (a script must never be
+  able to auto-approve a policy-gated action the operator never saw), a
+  **question is answered with a sentinel** telling the model no interactive
+  input is available. Both let the turn finish deterministically.
+- **No wizard.** The interactive setup wizard can't run without a TUI, so
+  headless skips it; if no provider ends up configured the gateway fails
+  to start with a clear error — the right non-interactive behavior.
+
+`runHeadless` is fully unit-tested against a fake daemon (text final
+answer, JSON event lines, error→non-zero, approval auto-denied); the live
+runs covered the real end-to-end path. Deliberately deferred: `SIGINT`→
+graceful-cancel in headless (the connection close on process exit already
+tears the turn down; a `POST /cancel` endpoint pairs naturally with this
+later, as the interrupt entry noted).
