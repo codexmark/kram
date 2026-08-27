@@ -128,6 +128,35 @@ func readNextEventCmd(stream *daemonclient.MessageStream) tea.Cmd {
 	}
 }
 
+// interruptDoneMsg reports the explicit server-side turn cancellation
+// Esc now performs — closing the SSE stream alone no longer stops
+// anything (a detached turn keeps running; see the daemon's turn
+// registry), so the interrupt endpoint is the real stop.
+type interruptDoneMsg struct{ err error }
+
+func interruptTurnCmd(c *daemonclient.Client, sessionID string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		return interruptDoneMsg{err: c.Interrupt(ctx, sessionID)}
+	}
+}
+
+// attachTurnMsg carries the result of trying to reattach to a turn that
+// kept running while no client was watching. err covers the common
+// "no active turn" case — simply nothing to do.
+type attachTurnMsg struct {
+	stream *daemonclient.MessageStream
+	err    error
+}
+
+func attachTurnCmd(c *daemonclient.Client, sessionID string) tea.Cmd {
+	return func() tea.Msg {
+		stream, err := c.AttachTurn(context.Background(), sessionID)
+		return attachTurnMsg{stream: stream, err: err}
+	}
+}
+
 type statusResultMsg struct {
 	status statusclient.Status
 	err    error

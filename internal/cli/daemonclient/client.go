@@ -256,6 +256,44 @@ func (c *Client) SendMessageStream(ctx context.Context, sessionID, content strin
 	return &MessageStream{resp: resp, scanner: scanner}, nil
 }
 
+// AttachTurn reattaches to a session's running (or just-finished) turn:
+// the daemon replays every event published so far and then streams live
+// until the turn ends. A "no active turn" daemon error means there is
+// nothing to attach to — the session's persisted history is the record.
+func (c *Client) AttachTurn(ctx context.Context, sessionID string) (*MessageStream, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/sessions/"+sessionID+"/turn", nil)
+	if err != nil {
+		return nil, fmt.Errorf("building request: %w", err)
+	}
+	req.Header.Set("Accept", "text/event-stream")
+	c.authorize(req)
+
+	resp, err := c.stream.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("calling daemon: %w", err)
+	}
+	if resp.StatusCode >= 400 {
+		defer resp.Body.Close()
+		var errBody struct {
+			Error string `json:"error"`
+		}
+		if json.NewDecoder(resp.Body).Decode(&errBody) == nil && errBody.Error != "" {
+			return nil, fmt.Errorf("daemon: %s", errBody.Error)
+		}
+		return nil, fmt.Errorf("daemon returned %s", resp.Status)
+	}
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+	return &MessageStream{resp: resp, scanner: scanner}, nil
+}
+
+// Interrupt cancels the session's active turn server-side. Closing the
+// SSE stream alone no longer cancels anything (a detached turn keeps
+// running — see the daemon's turn registry); this is the explicit stop.
+func (c *Client) Interrupt(ctx context.Context, sessionID string) error {
+	return c.doJSON(ctx, http.MethodPost, "/sessions/"+sessionID+"/interrupt", struct{}{}, nil)
+}
+
 // AnswerQuestion delivers an answer to a pending ask_question call — the
 // SSE stream that produced the "question" event stays open and blocked
 // server-side the whole time; this is a separate HTTP request that

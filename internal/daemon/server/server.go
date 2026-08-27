@@ -5,10 +5,10 @@
 package server
 
 import (
+	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
@@ -26,6 +26,7 @@ type Server struct {
 	agent     *agent.Service
 	logger    *slog.Logger
 	authToken string // required bearer token on every route except /health — see New and authMiddleware
+	turns     *turnRegistry
 }
 
 // New builds a daemon Server. authToken is the per-process bearer token
@@ -42,7 +43,7 @@ func New(sessions *session.Service, agentSvc *agent.Service, logger *slog.Logger
 	if authToken == "" {
 		logger.Warn("daemon HTTP server started with NO auth token — every local process can drive it; this should only happen in tests")
 	}
-	return &Server{sessions: sessions, agent: agentSvc, logger: logger, authToken: authToken}
+	return &Server{sessions: sessions, agent: agentSvc, logger: logger, authToken: authToken, turns: newTurnRegistry()}
 }
 
 // Handler returns the fully wired HTTP handler, including panic recovery.
@@ -54,6 +55,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /sessions/{id}", s.handleGetSession)
 	mux.HandleFunc("GET /sessions/{id}/context", s.handleGetContext)
 	mux.HandleFunc("POST /sessions/{id}/messages", s.handleSendMessage)
+	mux.HandleFunc("GET /sessions/{id}/turn", s.handleAttachTurn)
+	mux.HandleFunc("POST /sessions/{id}/interrupt", s.handleInterrupt)
 	mux.HandleFunc("POST /sessions/{id}/answer", s.handleAnswerQuestion)
 	mux.HandleFunc("POST /sessions/{id}/approve", s.handleAnswerApproval)
 	mux.HandleFunc("GET /tools", s.handleListTools)
@@ -243,84 +246,66 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		writeError(w, http.StatusInternalServerError, "streaming unsupported")
+	// The run gets its own context, detached from this request: closing
+	// the stream merely unsubscribes (the work continues server-side);
+	// only POST /sessions/{id}/interrupt cancels it. One turn per session.
+	runCtx, cancel := context.WithCancel(context.Background())
+	t, started := s.turns.start(id, cancel)
+	if !started {
+		cancel()
+		writeError(w, http.StatusConflict, "a turn is already running for this session — attach with GET /sessions/{id}/turn or interrupt it first")
 		return
 	}
 
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	w.WriteHeader(http.StatusOK)
-
-	writeEvent := func(v any) {
-		b, err := json.Marshal(v)
+	go func() {
+		onEvent := func(evt agent.Event) {
+			if frame, ok := eventFrame(evt); ok {
+				t.publish(frame)
+			}
+		}
+		result, err := s.agent.Run(runCtx, id, req.Content, req.Images, onEvent)
+		cancel()
 		if err != nil {
-			return
+			t.finish(mustFrame(map[string]any{"type": "error", "error": err.Error()}))
+		} else {
+			t.finish(mustFrame(map[string]any{
+				"type":          "done",
+				"message":       result.Message,
+				"attempts":      result.Attempts,
+				"route_trace":   result.RouteTrace,
+				"usage":         result.Usage,
+				"tool_activity": result.ToolActivity,
+				"compactions":   result.Compactions,
+				"image_notice":  result.ImageNotice,
+			}))
 		}
-		fmt.Fprintf(w, "data: %s\n\n", b)
-		flusher.Flush()
-	}
+		s.turns.retire(id, t)
+	}()
 
-	onEvent := func(evt agent.Event) {
-		switch evt.Kind {
-		case agent.EventDelta:
-			writeEvent(map[string]any{"type": "delta", "content": evt.Content})
-		case agent.EventReasoning:
-			writeEvent(map[string]any{"type": "reasoning", "content": evt.Reasoning})
-		case agent.EventToolStart:
-			writeEvent(map[string]any{"type": "tool_start", "name": evt.ToolName, "args": evt.ToolArgs})
-		case agent.EventToolResult:
-			writeEvent(map[string]any{
-				"type": "tool_result", "name": evt.ToolName, "result": evt.ToolResult,
-				"ok": evt.ToolOK, "process_id": evt.ProcessID,
-			})
-		case agent.EventNotice:
-			writeEvent(map[string]any{"type": "notice", "text": evt.Notice})
-		case agent.EventQuestion:
-			writeEvent(map[string]any{"type": "question", "question_id": evt.QuestionID, "question": evt.Question, "options": evt.Options})
-		case agent.EventApproval:
-			writeEvent(map[string]any{
-				"type": "approval", "approval_id": evt.ApprovalID, "tool": evt.ApprovalTool,
-				"subject": evt.ApprovalSubject, "diff": evt.ApprovalDiff,
-				"options": []string{"once", "always", "deny"},
-			})
-		case agent.EventRouteStart:
-			writeEvent(map[string]any{"type": "route_start"})
-		case agent.EventRouteDone:
-			writeEvent(map[string]any{"type": "route_done", "route_call": evt.RouteCall})
-		case agent.EventHeartbeat:
-			// Payload-free on purpose — see EventHeartbeat's doc comment.
-			// Harmless for a client with no special handling for this
-			// type: it still resets any "time since last event" clock the
-			// same way every other frame on this stream already does.
-			writeEvent(map[string]any{"type": "heartbeat"})
-		case agent.EventSegment:
-			writeEvent(map[string]any{"type": "segment", "segment": evt.Segment, "segments": evt.Segments})
-		}
-	}
+	s.streamTurn(w, r, t)
+}
 
-	result, err := s.agent.Run(r.Context(), id, req.Content, req.Images, onEvent)
-	if err != nil {
-		writeEvent(map[string]any{"type": "error", "error": err.Error()})
-		fmt.Fprint(w, "data: [DONE]\n\n")
-		flusher.Flush()
+// handleAttachTurn reattaches a client to the session's turn: full replay
+// of everything published so far, then live until it finishes. 404 when
+// no turn is active or recently finished — the session's persisted
+// history is then the complete record.
+func (s *Server) handleAttachTurn(w http.ResponseWriter, r *http.Request) {
+	t := s.turns.get(r.PathValue("id"))
+	if t == nil {
+		writeError(w, http.StatusNotFound, "no active turn for this session")
 		return
 	}
+	s.streamTurn(w, r, t)
+}
 
-	writeEvent(map[string]any{
-		"type":          "done",
-		"message":       result.Message,
-		"attempts":      result.Attempts,
-		"route_trace":   result.RouteTrace,
-		"usage":         result.Usage,
-		"tool_activity": result.ToolActivity,
-		"compactions":   result.Compactions,
-		"image_notice":  result.ImageNotice,
-	})
-	fmt.Fprint(w, "data: [DONE]\n\n")
-	flusher.Flush()
+// handleInterrupt cancels the session's active turn — the explicit
+// replacement for the old closing-the-stream-cancels contract.
+func (s *Server) handleInterrupt(w http.ResponseWriter, r *http.Request) {
+	if !s.turns.interrupt(r.PathValue("id")) {
+		writeError(w, http.StatusNotFound, "no active turn for this session")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "interrupting"})
 }
 
 type answerQuestionRequest struct {
