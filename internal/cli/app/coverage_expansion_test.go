@@ -691,7 +691,7 @@ func TestCommandClosuresAgainstLocalHTTPServer(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	dc := daemonclient.New(server.URL)
+	dc := daemonclient.New(server.URL, "")
 	sc := statusclient.New(server.URL)
 
 	for name, cmd := range map[string]tea.Cmd{

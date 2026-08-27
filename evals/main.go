@@ -98,11 +98,15 @@ func run() int {
 	go func() { errCh <- gatewayRun(ctx, &gwCfg, logger, nil) }()
 
 	dbPath := filepath.Join(workspace, "eval.db")
+	// A fixed token shared between this eval's daemon and its client — the
+	// eval is a hermetic in-process pair, same as cmd/kram.
+	const evalAuthToken = "eval-local-token"
 	daemonCfg := daemon.Config{
 		Host: "127.0.0.1", Port: daemonPort,
 		DBPath:     dbPath,
 		GatewayURL: fmt.Sprintf("http://127.0.0.1:%d", gwPort),
 		Model:      "default", Workspace: workspace, MaxTurns: 20,
+		AuthToken: evalAuthToken,
 	}
 	daemonRun := evalDaemonRun
 	go func() { errCh <- daemonRun(ctx, daemonCfg, logger) }()
@@ -118,7 +122,7 @@ func run() int {
 		return 1
 	}
 
-	client := evalNewDaemonClient(daemonURL)
+	client := evalNewDaemonClient(daemonURL, evalAuthToken)
 	env := &env{ctx: ctx, client: client, workspace: workspace}
 
 	results := make([]result, 0, len(evalScenarios))

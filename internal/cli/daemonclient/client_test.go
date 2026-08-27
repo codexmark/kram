@@ -25,7 +25,7 @@ func TestCreateSessionPostsAndDecodes(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := New(srv.URL)
+	c := New(srv.URL, "")
 	sess, err := c.CreateSession(context.Background(), "my title")
 	if err != nil {
 		t.Fatal(err)
@@ -45,7 +45,7 @@ func TestListSessionsGetsAndDecodes(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := New(srv.URL)
+	c := New(srv.URL, "")
 	list, err := c.ListSessions(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -68,7 +68,7 @@ func TestGetSessionReturnsSessionAndMessages(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := New(srv.URL)
+	c := New(srv.URL, "")
 	sess, msgs, err := c.GetSession(context.Background(), "ses_1")
 	if err != nil {
 		t.Fatal(err)
@@ -91,7 +91,7 @@ func TestListToolsDecodesToolsAndSkills(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := New(srv.URL)
+	c := New(srv.URL, "")
 	tools, skills, err := c.ListTools(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -120,7 +120,7 @@ func TestUpdateToolSettingsPutsDisabledSet(t *testing.T) {
 		_, _ = w.Write([]byte(`{"status":"ok"}`))
 	}))
 	defer srv.Close()
-	if err := New(srv.URL).UpdateToolSettings(context.Background(), []string{"bash", "write_file"}); err != nil {
+	if err := New(srv.URL, "").UpdateToolSettings(context.Background(), []string{"bash", "write_file"}); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -135,7 +135,7 @@ func TestGetContextDecodesUsage(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := New(srv.URL)
+	c := New(srv.URL, "")
 	usage, err := c.GetContext(context.Background(), "ses_1")
 	if err != nil {
 		t.Fatal(err)
@@ -159,7 +159,7 @@ func TestAnswerQuestionPostsExpectedBody(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := New(srv.URL)
+	c := New(srv.URL, "")
 	if err := c.AnswerQuestion(context.Background(), "ses_1", "q1", "yes"); err != nil {
 		t.Fatal(err)
 	}
@@ -179,7 +179,7 @@ func TestAnswerApprovalPostsExpectedBody(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := New(srv.URL)
+	c := New(srv.URL, "")
 	if err := c.AnswerApproval(context.Background(), "ses_1", "a1", "once"); err != nil {
 		t.Fatal(err)
 	}
@@ -193,7 +193,7 @@ func TestDoJSONReturnsDaemonErrorMessageOnFailureBody(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := New(srv.URL)
+	c := New(srv.URL, "")
 	_, _, err := c.GetSession(context.Background(), "ses_missing")
 	if err == nil || !strings.Contains(err.Error(), "session not found") {
 		t.Errorf("err = %v, want it to mention the daemon's error message", err)
@@ -206,7 +206,7 @@ func TestDoJSONReturnsPlainErrorWhenNoJSONErrorBody(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := New(srv.URL)
+	c := New(srv.URL, "")
 	_, err := c.ListSessions(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "500") {
 		t.Errorf("err = %v, want it to mention the raw status", err)
@@ -239,7 +239,7 @@ func TestSendMessageStreamParsesDeltasAndDoneEvent(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := New(srv.URL)
+	c := New(srv.URL, "")
 	stream, err := c.SendMessageStream(context.Background(), "ses_1", "hello", nil)
 	if err != nil {
 		t.Fatal(err)
@@ -280,7 +280,7 @@ func TestSendMessageStreamReturnsErrorOnNon2xxBeforeStreaming(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := New(srv.URL)
+	c := New(srv.URL, "")
 	_, err := c.SendMessageStream(context.Background(), "ses_1", "", nil)
 	if err == nil || !strings.Contains(err.Error(), "content must not be empty") {
 		t.Errorf("err = %v, want it to mention the daemon's rejection message", err)
@@ -294,7 +294,7 @@ func TestMessageStreamNextReportsDoneOnEOF(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := New(srv.URL)
+	c := New(srv.URL, "")
 	stream, err := c.SendMessageStream(context.Background(), "ses_1", "hi", nil)
 	if err != nil {
 		t.Fatal(err)
@@ -318,7 +318,7 @@ func TestMessageStreamNextSkipsMalformedEvents(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := New(srv.URL)
+	c := New(srv.URL, "")
 	stream, err := c.SendMessageStream(context.Background(), "ses_1", "hi", nil)
 	if err != nil {
 		t.Fatal(err)
@@ -347,7 +347,7 @@ func TestSendMessageStreamIncludesImagesWhenPresent(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := New(srv.URL)
+	c := New(srv.URL, "")
 	stream, err := c.SendMessageStream(context.Background(), "ses_1", "hi", []string{"data:image/png;base64,abc"})
 	if err != nil {
 		t.Fatal(err)
@@ -371,7 +371,7 @@ func TestBackgroundProcessClientListAndCursorOutput(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	client := New(srv.URL)
+	client := New(srv.URL, "")
 	processes, err := client.ListBackgroundProcesses(context.Background())
 	if err != nil || len(processes) != 1 || processes[0].Command != "rails server" {
 		t.Fatalf("processes = %+v, err=%v", processes, err)

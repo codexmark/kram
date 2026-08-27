@@ -5,12 +5,15 @@
 package server
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/codexmark/kram/internal/daemon/agent"
@@ -19,17 +22,27 @@ import (
 
 // Server holds the session and agent services and exposes them over HTTP.
 type Server struct {
-	sessions *session.Service
-	agent    *agent.Service
-	logger   *slog.Logger
+	sessions  *session.Service
+	agent     *agent.Service
+	logger    *slog.Logger
+	authToken string // required bearer token on every route except /health — see New and authMiddleware
 }
 
-// New builds a daemon Server.
-func New(sessions *session.Service, agentSvc *agent.Service, logger *slog.Logger) *Server {
+// New builds a daemon Server. authToken is the per-process bearer token
+// every route (except /health) requires — the daemon's HTTP surface drives
+// real code execution (bash, edit_file, approving its own tool calls), so
+// leaving it open would let any local process, or a browser tab via DNS
+// rebinding, run code as the user. An empty authToken means "no auth"
+// (only for tests / an explicitly-insecure standalone run) and logs a
+// loud warning.
+func New(sessions *session.Service, agentSvc *agent.Service, logger *slog.Logger, authToken string) *Server {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Server{sessions: sessions, agent: agentSvc, logger: logger}
+	if authToken == "" {
+		logger.Warn("daemon HTTP server started with NO auth token — every local process can drive it; this should only happen in tests")
+	}
+	return &Server{sessions: sessions, agent: agentSvc, logger: logger, authToken: authToken}
 }
 
 // Handler returns the fully wired HTTP handler, including panic recovery.
@@ -47,7 +60,67 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /tools/settings", s.handleUpdateToolSettings)
 	mux.HandleFunc("GET /processes", s.handleListProcesses)
 	mux.HandleFunc("GET /processes/{id}/output", s.handleProcessOutput)
-	return s.recoverMiddleware(s.logMiddleware(mux))
+	// Order matters: recover (outermost) → log → host/auth gate → mux.
+	return s.recoverMiddleware(s.logMiddleware(s.guardMiddleware(mux)))
+}
+
+// guardMiddleware is the daemon's HTTP perimeter: a Host-header check
+// (cheap DNS-rebinding defense — a rebinding attack arrives with an
+// attacker-controlled Host, not localhost) plus a constant-time bearer
+// token check. /health is exempt (it exposes nothing and is used as a
+// readiness probe before the client knows anything). The bearer token is
+// itself the core defense: a cross-origin "simple" request from a browser
+// cannot set an Authorization header without tripping a CORS preflight the
+// daemon never answers, so this also closes the no-Content-Type-check
+// simple-request vector the audit flagged.
+func (s *Server) guardMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/health" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if !hostIsLocal(r.Host) {
+			writeError(w, http.StatusForbidden, "requests must target localhost")
+			return
+		}
+		if s.authToken != "" && !bearerTokenValid(r, s.authToken) {
+			writeError(w, http.StatusUnauthorized, "missing or invalid daemon auth token")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// hostIsLocal reports whether the request's Host header names a loopback
+// address (or is empty/HTTP-1.0-style with no host). A DNS-rebinding
+// attack reaches the daemon with the attacker's own hostname in Host, so
+// rejecting anything non-loopback here blocks that class before the token
+// check even runs.
+func hostIsLocal(host string) bool {
+	if host == "" {
+		return true
+	}
+	h, _, err := net.SplitHostPort(host)
+	if err != nil {
+		h = host
+	}
+	if h == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(h)
+	return ip != nil && ip.IsLoopback()
+}
+
+// bearerTokenValid does a constant-time compare of the request's bearer
+// token against want, so a timing side channel can't be used to recover
+// the token byte by byte.
+func bearerTokenValid(r *http.Request, want string) bool {
+	const prefix = "Bearer "
+	got := r.Header.Get("Authorization")
+	if !strings.HasPrefix(got, prefix) {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(strings.TrimPrefix(got, prefix)), []byte(want)) == 1
 }
 
 func (s *Server) recoverMiddleware(next http.Handler) http.Handler {
