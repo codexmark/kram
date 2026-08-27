@@ -155,6 +155,7 @@ type StreamEvent struct {
 	ApprovalID   string               `json:"approval_id,omitempty"`
 	Tool         string               `json:"tool,omitempty"`
 	Subject      string               `json:"subject,omitempty"`
+	Diff         string               `json:"diff,omitempty"` // approval: unified diff for edit_file/write_file
 	RouteCall    *RouteCall           `json:"route_call,omitempty"`
 	Message      Message              `json:"message,omitempty"`
 	Attempts     []openai.AttemptInfo `json:"attempts,omitempty"`

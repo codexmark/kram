@@ -280,7 +280,8 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 		case agent.EventApproval:
 			writeEvent(map[string]any{
 				"type": "approval", "approval_id": evt.ApprovalID, "tool": evt.ApprovalTool,
-				"subject": evt.ApprovalSubject, "options": []string{"once", "always", "deny"},
+				"subject": evt.ApprovalSubject, "diff": evt.ApprovalDiff,
+				"options": []string{"once", "always", "deny"},
 			})
 		case agent.EventRouteStart:
 			writeEvent(map[string]any{"type": "route_start"})

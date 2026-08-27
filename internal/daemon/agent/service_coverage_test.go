@@ -99,7 +99,7 @@ func TestSessionAskerAndApproverDeliverAndCancel(t *testing.T) {
 			t.Error("approval rejected")
 		}
 	}}
-	decision, err := approve.Approve(ctx, "bash", "echo")
+	decision, err := approve.Approve(ctx, "bash", "echo", "")
 	if err != nil || decision != tools.ApprovalAlways {
 		t.Fatalf("Approve = %q, %v", decision, err)
 	}
@@ -115,7 +115,7 @@ func TestSessionAskerAndApproverDeliverAndCancel(t *testing.T) {
 	if _, err := (&sessionAsker{svc: s, onEvent: noop}).Ask(canceled, "q", nil); !errors.Is(err, context.Canceled) {
 		t.Fatalf("canceled Ask err = %v", err)
 	}
-	if decision, err := (&sessionApprover{svc: s, onEvent: noop}).Approve(canceled, "bash", "x"); !errors.Is(err, context.Canceled) || decision != tools.ApprovalDeny {
+	if decision, err := (&sessionApprover{svc: s, onEvent: noop}).Approve(canceled, "bash", "x", ""); !errors.Is(err, context.Canceled) || decision != tools.ApprovalDeny {
 		t.Fatalf("canceled Approve = %q, %v", decision, err)
 	}
 }
@@ -132,7 +132,7 @@ func TestSessionAskerApproverNilOnEventShortCircuits(t *testing.T) {
 	// instead of failing fast — the exact stall the fix prevents.
 	ctx := context.Background()
 
-	decision, err := (&sessionApprover{svc: s}).Approve(ctx, "bash", "rm -rf /")
+	decision, err := (&sessionApprover{svc: s}).Approve(ctx, "bash", "rm -rf /", "")
 	if decision != tools.ApprovalDeny || err != nil {
 		t.Fatalf("nil-onEvent Approve = %q, %v; want ApprovalDeny, nil", decision, err)
 	}

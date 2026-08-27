@@ -33,7 +33,7 @@ type fakeApprover struct {
 	called   bool
 }
 
-func (a *fakeApprover) Approve(ctx context.Context, toolName, subject string) (ApprovalDecision, error) {
+func (a *fakeApprover) Approve(ctx context.Context, toolName, subject, diff string) (ApprovalDecision, error) {
 	a.called = true
 	return a.decision, a.err
 }

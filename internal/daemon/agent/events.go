@@ -95,6 +95,7 @@ type Event struct {
 	ApprovalID      string // EventApproval
 	ApprovalTool    string // EventApproval
 	ApprovalSubject string // EventApproval
+	ApprovalDiff    string // EventApproval — unified diff for edit_file/write_file, empty otherwise
 
 	RouteCall *RouteCall // EventRouteDone
 	Segment   int        // EventSegment, one-based

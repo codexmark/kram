@@ -500,6 +500,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.syncViewportSize()
 		m.syncTranscriptRenderer()
+		if m.approval != nil && m.approval.diff != "" {
+			m.approval.diffVP.Width = maxInt(1, m.width-2)
+		}
 		return m, nil
 
 	case tea.KeyMsg:
@@ -1339,7 +1342,7 @@ func (m Model) handleStreamEvent(msg streamEventMsg) (tea.Model, tea.Cmd) {
 
 	case "approval":
 		// Same "still blocked server-side" shape as question above.
-		m.approval = &pendingApproval{id: msg.event.ApprovalID, tool: msg.event.Tool, subject: msg.event.Subject, options: msg.event.Options}
+		m.approval = newPendingApproval(msg.event, m.width)
 		m.refreshTranscript()
 
 	case "route_start":
