@@ -4658,3 +4658,63 @@ it to a sentinel, fires all four event types through the real
 `handleStreamEvent`, and asserts none overwrote the sentinel (a full
 rebuild would) while the delta content still reached the rendered
 viewport (the cheap path must actually render, not silently no-op).
+
+---
+
+## Daemon HTTP perimeter: bearer token + Host guard (post-audit #63)
+
+The daemon's HTTP surface drives real code execution — `bash`, `edit_file`,
+and (worst) `POST /sessions/{id}/approve`, which answers the very
+permission prompts the agent loop raises. The audit found it ran behind
+only panic-recovery and logging middleware: no auth, no Content-Type
+check, no Host/Origin check. So any local process, or a browser tab via
+DNS rebinding, could create a session, send a message, and approve its
+own tool calls — code execution as the user. The bitter irony the audit
+underlined: the *gateway* already loopback-guards its far less dangerous
+`handleSetStrategy`, while the dangerous daemon was wide open.
+
+`server.guardMiddleware` (new, wrapping the mux inside recover→log) closes
+it with two layers:
+
+- **Bearer token** — a per-process 128-bit random token required on every
+  route except `/health`, compared in constant time (`crypto/subtle`) so a
+  timing side channel can't recover it. This is the core defense, and it
+  transitively kills the Content-Type/simple-request CORS vector the audit
+  also flagged: a cross-origin "simple" request from a browser *cannot*
+  set an `Authorization` header without triggering a CORS preflight the
+  daemon never answers.
+- **Host guard** — rejects any request whose `Host` isn't loopback, the
+  cheap defense against DNS rebinding (a rebinding attack arrives with the
+  attacker's hostname in `Host`, not localhost). `/health` is exempt: it
+  exposes nothing and is the readiness probe a client hits before it knows
+  the token.
+
+**Token flow, two paths:**
+
+- *Single binary (`cmd/kram`, the real product):* `cmd/kram` generates one
+  token and hands the *same* value to both `daemon.Config.AuthToken` and
+  its in-process `daemonclient.New(url, token)` — so the CLI is authorized
+  without any file round-trip, and every other local process is not. Fully
+  closed, no config surface.
+- *Standalone (`cmd/daemon` + `cmd/cli`):* both gain an `-auth-token` flag.
+  `daemon.Run` generates one if unset and writes it (0600) to a
+  `daemon.token` file next to the DB; a standalone CLI passes that value.
+
+`daemon.Run` writes the resolved token to the `daemon.token` file
+regardless (best-effort, logged-not-fatal), so external attach/debugging
+works even for the single-binary case. `server.New` gained the token
+parameter and logs a loud warning when it's empty (only tests / an
+explicitly-insecure run).
+
+`daemonclient` routes both its request-building sites (`doJSON` and
+`SendMessageStream`) through one `authorize` helper, so neither can forget
+the header. The eval harness (`evals/`), being a hermetic in-process pair
+like `cmd/kram`, uses a fixed shared token.
+
+Five `guardMiddleware` tests pin the contract directly (missing token →
+401, wrong token → 401, correct token → 200, non-local Host → 403 even
+*with* a valid token, `/health` exempt from both). `daemon_test.go`'s
+real-`Run` integration test now sends the token as a real client would;
+two pre-existing handler tests used `httptest.NewRequest` (whose default
+`Host` is `example.com`, which the Host guard correctly rejects) and were
+updated to set a loopback `Host`.

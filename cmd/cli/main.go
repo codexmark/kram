@@ -52,17 +52,18 @@ func runMain(args []string, output io.Writer) error {
 	title := fs.String("title", "", "create a session with this title, skipping the picker")
 	combo := fs.String("model", "default", "gateway combo used for messages in this session")
 	workspace := fs.String("workspace", "", "project root shown on the picker banner (informational only — the daemon, not this process, enforces it)")
+	authToken := fs.String("auth-token", "", "bearer token for the daemon (the value the daemon printed / wrote to its daemon.token file); required against a daemon started with auth")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
 		}
 		return err
 	}
-	return runCLI(*daemonURL, *gatewayURL, *sessionID, *title, *combo, *workspace)
+	return runCLI(*daemonURL, *gatewayURL, *sessionID, *title, *combo, *workspace, *authToken)
 }
 
-func run(daemonURL, gatewayURL, sessionID, title, combo, workspace string) error {
-	daemon := daemonclient.New(daemonURL)
+func run(daemonURL, gatewayURL, sessionID, title, combo, workspace, authToken string) error {
+	daemon := daemonclient.New(daemonURL, authToken)
 	gateway := statusclient.New(gatewayURL)
 
 	// An explicit -session or -title skips straight to chat/creation;

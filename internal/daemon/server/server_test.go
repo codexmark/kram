@@ -57,7 +57,7 @@ func newTestServerWithRegistry(t *testing.T, script []openai.ChatCompletionRespo
 	}
 	sessSvc := session.New(st)
 
-	return New(sessSvc, agentSvc, nil), tr
+	return New(sessSvc, agentSvc, nil, ""), tr
 }
 
 // newStreamingTestServer wires a real Server against a real temp-file
@@ -87,7 +87,7 @@ func newStreamingTestServer(t *testing.T, sseBody string) *Server {
 		t.Fatal(err)
 	}
 	sessSvc := session.New(st)
-	return New(sessSvc, agentSvc, nil)
+	return New(sessSvc, agentSvc, nil, "")
 }
 
 // TestHandleSendMessageRelaysReasoningEventOverSSE confirms
@@ -603,6 +603,7 @@ func TestHandlersRejectMalformedJSON(t *testing.T) {
 	srv := newTestServer(t, nil)
 	for _, path := range []string{"/sessions/x/messages", "/sessions/x/answer", "/sessions/x/approve"} {
 		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader("{"))
+		req.Host = "localhost" // httptest.NewRequest defaults to "example.com", which the daemon's Host guard rejects
 		rr := httptest.NewRecorder()
 		srv.Handler().ServeHTTP(rr, req)
 		if rr.Code != http.StatusBadRequest {
@@ -646,7 +647,7 @@ func TestStoreFailuresBecomeInternalServerErrors(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := New(session.New(st), agentSvc, nil)
+	srv := New(session.New(st), agentSvc, nil, "")
 	created, err := srv.sessions.Create("before close")
 	if err != nil {
 		t.Fatal(err)
@@ -663,10 +664,91 @@ func TestStoreFailuresBecomeInternalServerErrors(t *testing.T) {
 		{http.MethodPost, "/sessions/" + created.ID + "/messages", `{"content":"hi"}`},
 	} {
 		req := httptest.NewRequest(tc.method, tc.path, strings.NewReader(tc.body))
+		req.Host = "localhost" // pass the daemon's Host guard — see TestHandlersRejectMalformedJSON
 		rr := httptest.NewRecorder()
 		srv.Handler().ServeHTTP(rr, req)
 		if rr.Code != http.StatusInternalServerError {
 			t.Errorf("%s %s status = %d, want 500: %s", tc.method, tc.path, rr.Code, rr.Body.String())
 		}
+	}
+}
+
+// newAuthedTestServer builds a real Server that requires the given bearer
+// token — the perimeter TestGuardMiddleware exercises.
+func newAuthedTestServer(t *testing.T, token string) *Server {
+	t.Helper()
+	workspace := t.TempDir()
+	st, err := store.Open(filepath.Join(workspace, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := tools.NewRegistry(workspace, st, nil)
+	agentSvc, err := agent.New(st, gatewayclient.New("http://127.0.0.1:1"), tr, agent.Config{Workspace: workspace, MaxTurns: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return New(session.New(st), agentSvc, nil, token)
+}
+
+func TestGuardMiddlewareRejectsMissingToken(t *testing.T) {
+	srv := newAuthedTestServer(t, "sekret")
+	req := httptest.NewRequest(http.MethodGet, "/sessions", nil)
+	req.Host = "localhost"
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("no token: status = %d, want 401", rr.Code)
+	}
+}
+
+func TestGuardMiddlewareRejectsWrongToken(t *testing.T) {
+	srv := newAuthedTestServer(t, "sekret")
+	req := httptest.NewRequest(http.MethodGet, "/sessions", nil)
+	req.Host = "localhost"
+	req.Header.Set("Authorization", "Bearer wrong")
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("wrong token: status = %d, want 401", rr.Code)
+	}
+}
+
+func TestGuardMiddlewareAcceptsCorrectToken(t *testing.T) {
+	srv := newAuthedTestServer(t, "sekret")
+	req := httptest.NewRequest(http.MethodGet, "/sessions", nil)
+	req.Host = "localhost"
+	req.Header.Set("Authorization", "Bearer sekret")
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("correct token: status = %d, want 200 (%s)", rr.Code, rr.Body.String())
+	}
+}
+
+func TestGuardMiddlewareRejectsNonLocalHost(t *testing.T) {
+	srv := newAuthedTestServer(t, "sekret")
+	// A DNS-rebinding attack arrives with an attacker hostname in Host,
+	// even carrying a token it somehow guessed — the Host check must
+	// reject it before that matters.
+	req := httptest.NewRequest(http.MethodGet, "/sessions", nil)
+	req.Host = "evil.example.com"
+	req.Header.Set("Authorization", "Bearer sekret")
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("non-local Host: status = %d, want 403", rr.Code)
+	}
+}
+
+func TestGuardMiddlewareHealthExemptFromAuth(t *testing.T) {
+	srv := newAuthedTestServer(t, "sekret")
+	// /health carries no token and any Host — it's a readiness probe used
+	// before a client knows the token, and exposes nothing.
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	req.Host = "example.com"
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("/health status = %d, want 200 without auth", rr.Code)
 	}
 }

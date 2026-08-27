@@ -8,10 +8,13 @@ package daemon
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
+	"os"
 	"path/filepath"
 
 	"github.com/codexmark/kram/internal/daemon/agent"
@@ -23,6 +26,21 @@ import (
 	"github.com/codexmark/kram/internal/mcp"
 	"github.com/codexmark/kram/internal/toolsettings"
 )
+
+// TokenFileName is the 0600 file, written next to the daemon's DB, that
+// carries the per-process auth token. A standalone CLI reads it to attach
+// to a running daemon; the single-binary cmd/kram threads the token
+// in-process and only writes this for external attach/debugging.
+const TokenFileName = "daemon.token"
+
+// newAuthToken returns a fresh random bearer token (128 bits, hex).
+func newAuthToken() (string, error) {
+	buf := make([]byte, 16)
+	if _, err := rand.Read(buf); err != nil {
+		return "", fmt.Errorf("generating daemon auth token: %w", err)
+	}
+	return hex.EncodeToString(buf), nil
+}
 
 // Config configures one daemon instance.
 type Config struct {
@@ -46,6 +64,14 @@ type Config struct {
 	// the first token streams, failing every turn outright — buffered
 	// mode has no such window and works fine for the exact same setup.
 	PreferStreaming bool
+	// AuthToken is the bearer token the daemon's HTTP surface requires on
+	// every route except /health (see server.New). Empty means Run
+	// generates a fresh random one at boot. The single-binary cmd/kram
+	// passes the same token it hands its in-process CLI, so the two agree
+	// without a file round-trip; either way Run writes the resolved token
+	// to a 0600 daemon.token file next to the DB so a standalone CLI can
+	// attach.
+	AuthToken string
 }
 
 // Run opens the store, builds the agent loop, and serves the daemon's
@@ -59,6 +85,26 @@ func Run(ctx context.Context, cfg Config, logger *slog.Logger) error {
 	absWorkspace, err := filepath.Abs(cfg.Workspace)
 	if err != nil {
 		return fmt.Errorf("resolving workspace: %w", err)
+	}
+
+	// Resolve the auth token before anything binds: a fresh random one
+	// when the caller didn't supply it (standalone cmd/daemon), or the
+	// caller's own (cmd/kram threads the same token to its in-process
+	// CLI). Written to a 0600 file next to the DB so a standalone CLI can
+	// attach — best-effort: a write failure is logged, not fatal, since
+	// the in-process cmd/kram path doesn't need the file at all.
+	authToken := cfg.AuthToken
+	if authToken == "" {
+		authToken, err = newAuthToken()
+		if err != nil {
+			return err
+		}
+	}
+	if cfg.DBPath != "" {
+		tokenPath := filepath.Join(filepath.Dir(cfg.DBPath), TokenFileName)
+		if werr := os.WriteFile(tokenPath, []byte(authToken), 0o600); werr != nil {
+			logger.Warn("could not write daemon token file (standalone CLI attach will need -auth-token)", "path", tokenPath, "error", werr)
+		}
 	}
 
 	st, err := store.Open(cfg.DBPath)
@@ -109,7 +155,7 @@ func Run(ctx context.Context, cfg Config, logger *slog.Logger) error {
 	// tool — wired after construction since Registry can't import agent
 	// (agent already imports tools) without a cycle.
 	toolRegistry.SetDelegator(agentSvc)
-	srv := server.New(sessions, agentSvc, logger)
+	srv := server.New(sessions, agentSvc, logger, authToken)
 
 	addr := fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
 	httpServer := &http.Server{Addr: addr, Handler: srv.Handler()}

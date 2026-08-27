@@ -150,7 +150,7 @@ func TestBgProcessListPollEndToEnd(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	client := daemonclient.New(srv.URL)
+	client := daemonclient.New(srv.URL, "")
 	m := New(client, nil, "session", "default", t.TempDir(), false, WizardResult{BootSplashShown: true})
 	cmd := fetchProcessListCmd(client, m.bgBadgeGeneration)
 	next, cmd := m.Update(cmd())

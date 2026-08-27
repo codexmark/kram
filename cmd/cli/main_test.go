@@ -23,7 +23,7 @@ func TestRunWithTitleSurfacesDaemonFailureBeforeOpeningTUI(t *testing.T) {
 		http.Error(w, `{"error":"unavailable"}`, http.StatusServiceUnavailable)
 	}))
 	defer srv.Close()
-	err := run(srv.URL, "http://gateway.invalid", "", "new session", "default", "")
+	err := run(srv.URL, "http://gateway.invalid", "", "new session", "default", "", "")
 	if err == nil || !strings.Contains(err.Error(), "could not reach kram-daemon") {
 		t.Fatalf("run error = %v, want daemon reachability context", err)
 	}
@@ -44,10 +44,10 @@ func TestRunCreatesOptionalSessionAndReturnsProgramResult(t *testing.T) {
 	wantErr := errors.New("program stopped")
 	calls := 0
 	newProgram = func(app.Model) programRunner { calls++; return immediateProgram{err: wantErr} }
-	if err := run(srv.URL, "http://gateway", "", "new", "default", t.TempDir()); !errors.Is(err, wantErr) {
+	if err := run(srv.URL, "http://gateway", "", "new", "default", t.TempDir(), ""); !errors.Is(err, wantErr) {
 		t.Fatalf("title run error = %v", err)
 	}
-	if err := run(srv.URL, "http://gateway", "existing", "", "default", t.TempDir()); !errors.Is(err, wantErr) {
+	if err := run(srv.URL, "http://gateway", "existing", "", "default", t.TempDir(), ""); !errors.Is(err, wantErr) {
 		t.Fatalf("session run error = %v", err)
 	}
 	if calls != 2 {
@@ -60,12 +60,12 @@ func TestRunMainParsesAllFlags(t *testing.T) {
 	t.Cleanup(func() { runCLI = original })
 	wantErr := errors.New("delegated")
 	var got []string
-	runCLI = func(daemon, gateway, session, title, model, workspace string) error {
-		got = []string{daemon, gateway, session, title, model, workspace}
+	runCLI = func(daemon, gateway, session, title, model, workspace, authToken string) error {
+		got = []string{daemon, gateway, session, title, model, workspace, authToken}
 		return wantErr
 	}
-	err := runMain([]string{"-daemon", "d", "-gateway", "g", "-session", "s", "-title", "t", "-model", "m", "-workspace", "w"}, &bytes.Buffer{})
-	if !errors.Is(err, wantErr) || strings.Join(got, ",") != "d,g,s,t,m,w" {
+	err := runMain([]string{"-daemon", "d", "-gateway", "g", "-session", "s", "-title", "t", "-model", "m", "-workspace", "w", "-auth-token", "tok"}, &bytes.Buffer{})
+	if !errors.Is(err, wantErr) || strings.Join(got, ",") != "d,g,s,t,m,w,tok" {
 		t.Fatalf("runMain args=%v err=%v", got, err)
 	}
 	if err := runMain([]string{"-unknown"}, &bytes.Buffer{}); err == nil {
@@ -77,7 +77,7 @@ func TestRunMainHelpSucceedsWithoutStartingCLI(t *testing.T) {
 	original := runCLI
 	t.Cleanup(func() { runCLI = original })
 	calls := 0
-	runCLI = func(string, string, string, string, string, string) error {
+	runCLI = func(string, string, string, string, string, string, string) error {
 		calls++
 		return nil
 	}
@@ -100,7 +100,7 @@ func TestRunMainInvalidFlagDoesNotStartCLI(t *testing.T) {
 	original := runCLI
 	t.Cleanup(func() { runCLI = original })
 	calls := 0
-	runCLI = func(string, string, string, string, string, string) error {
+	runCLI = func(string, string, string, string, string, string, string) error {
 		calls++
 		return nil
 	}
@@ -117,7 +117,7 @@ func TestRunMainInvalidFlagDoesNotStartCLI(t *testing.T) {
 func TestMainExitDoesNotLogHelpAsAnError(t *testing.T) {
 	original := runCLI
 	t.Cleanup(func() { runCLI = original })
-	runCLI = func(string, string, string, string, string, string) error {
+	runCLI = func(string, string, string, string, string, string, string) error {
 		t.Fatal("CLI started while printing help")
 		return nil
 	}

@@ -39,17 +39,34 @@ type Session struct {
 
 // Client talks to a kram-daemon instance.
 type Client struct {
-	baseURL string
-	http    *http.Client
-	stream  *http.Client // no fixed timeout: a multi-tool agent turn can legitimately run long; the caller's context is the only bound
+	baseURL   string
+	authToken string // sent as "Authorization: Bearer <token>" on every request — see daemon.Config.AuthToken
+	http      *http.Client
+	stream    *http.Client // no fixed timeout: a multi-tool agent turn can legitimately run long; the caller's context is the only bound
 }
 
-// New builds a client pointed at a running daemon (e.g. http://127.0.0.1:20130).
-func New(baseURL string) *Client {
+// New builds a client pointed at a running daemon (e.g.
+// http://127.0.0.1:20130). authToken is the per-process bearer token the
+// daemon requires on every request (may be "" when talking to a daemon
+// started without auth, e.g. an old build — the header is simply omitted
+// then). The single-binary cmd/kram threads the same token it hands the
+// daemon; a standalone CLI passes the token the daemon wrote to its
+// daemon.token file.
+func New(baseURL, authToken string) *Client {
 	return &Client{
-		baseURL: baseURL,
-		http:    &http.Client{Timeout: 30 * time.Second},
-		stream:  &http.Client{},
+		baseURL:   baseURL,
+		authToken: authToken,
+		http:      &http.Client{Timeout: 30 * time.Second},
+		stream:    &http.Client{},
+	}
+}
+
+// authorize adds the bearer header when a token is configured — the one
+// place both request-building sites (doJSON and SendMessageStream) route
+// through, so neither can forget it.
+func (c *Client) authorize(req *http.Request) {
+	if c.authToken != "" {
+		req.Header.Set("Authorization", "Bearer "+c.authToken)
 	}
 }
 
@@ -209,6 +226,7 @@ func (c *Client) SendMessageStream(ctx context.Context, sessionID, content strin
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "text/event-stream")
+	c.authorize(req)
 
 	resp, err := c.stream.Do(req)
 	if err != nil {
@@ -363,6 +381,7 @@ func (c *Client) doJSON(ctx context.Context, method, path string, body any, out 
 		return fmt.Errorf("building request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	c.authorize(req)
 
 	resp, err := c.http.Do(req)
 	if err != nil {

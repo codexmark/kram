@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -99,6 +98,7 @@ func TestRunThreadsPreferStreamingToGateway(t *testing.T) {
 			defer gwSrv.Close()
 
 			port := freePort(t)
+			const token = "test-daemon-token"
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			done := make(chan error, 1)
@@ -107,26 +107,34 @@ func TestRunThreadsPreferStreamingToGateway(t *testing.T) {
 					Host: "127.0.0.1", Port: port, DBPath: filepath.Join(t.TempDir(), "daemon.db"),
 					GatewayURL: gwSrv.URL, Workspace: t.TempDir(), MaxTurns: 1,
 					PreferStreaming: preferStreaming,
+					AuthToken:       token,
 				}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 			}()
 
 			baseURL := fmt.Sprintf("http://127.0.0.1:%d", port)
 			waitForDaemon(t, baseURL)
 
-			createResp, err := http.Post(baseURL+"/sessions", "application/json", strings.NewReader(`{"title":"x"}`))
-			if err != nil {
-				t.Fatal(err)
+			// The daemon now requires the bearer token on every route
+			// except /health — send it, as a real client would.
+			post := func(path, body string) *http.Response {
+				req, _ := http.NewRequest(http.MethodPost, baseURL+path, strings.NewReader(body))
+				req.Header.Set("Content-Type", "application/json")
+				req.Header.Set("Authorization", "Bearer "+token)
+				resp, err := http.DefaultClient.Do(req)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return resp
 			}
+
+			createResp := post("/sessions", `{"title":"x"}`)
 			var created struct {
 				ID string `json:"id"`
 			}
 			_ = json.NewDecoder(createResp.Body).Decode(&created)
 			createResp.Body.Close()
 
-			msgResp, err := http.Post(baseURL+"/sessions/"+created.ID+"/messages", "application/json", bytes.NewReader([]byte(`{"content":"oi"}`)))
-			if err != nil {
-				t.Fatal(err)
-			}
+			msgResp := post("/sessions/"+created.ID+"/messages", `{"content":"oi"}`)
 			_, _ = io.Copy(io.Discard, msgResp.Body)
 			msgResp.Body.Close()
 

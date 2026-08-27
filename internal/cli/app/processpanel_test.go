@@ -39,7 +39,7 @@ func TestProcessPanelFetchesStructuredOutputAndPollsOnlyWhileOpen(t *testing.T) 
 	}))
 	defer srv.Close()
 
-	client := daemonclient.New(srv.URL)
+	client := daemonclient.New(srv.URL, "")
 	m := New(client, nil, "session", "default", t.TempDir(), false, WizardResult{BootSplashShown: true})
 	next, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 30})
 	m = next.(Model)

@@ -64,7 +64,7 @@ func TestEvalScenariosAgainstDeterministicDaemon(t *testing.T) {
 	}))
 	defer server.Close()
 
-	e := &env{ctx: context.Background(), client: daemonclient.New(server.URL), workspace: t.TempDir()}
+	e := &env{ctx: context.Background(), client: daemonclient.New(server.URL, ""), workspace: t.TempDir()}
 	for _, sc := range scenarios {
 		got := runScenario(e, sc)
 		if got.err != nil || got.verdict != PassVerdict {
@@ -84,7 +84,7 @@ func TestSendAndWaitSurfacesStreamErrorAndSetupFailure(t *testing.T) {
 		fmt.Fprint(w, "data: {\"type\":\"error\",\"error\":\"boom\"}\n\n")
 	}))
 	defer server.Close()
-	e := &env{ctx: context.Background(), client: daemonclient.New(server.URL)}
+	e := &env{ctx: context.Background(), client: daemonclient.New(server.URL, "")}
 	_, tools, err := e.sendAndWait("fail")
 	if err == nil || !strings.Contains(err.Error(), "boom") || len(tools) != 1 {
 		t.Fatalf("sendAndWait error=%v tools=%v", err, tools)
@@ -100,7 +100,7 @@ func TestSendAndWaitSurfacesStreamErrorAndSetupFailure(t *testing.T) {
 
 	createFail := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { http.Error(w, "no", http.StatusInternalServerError) }))
 	defer createFail.Close()
-	if _, _, err := (&env{ctx: context.Background(), client: daemonclient.New(createFail.URL)}).sendAndWait("x"); err == nil {
+	if _, _, err := (&env{ctx: context.Background(), client: daemonclient.New(createFail.URL, "")}).sendAndWait("x"); err == nil {
 		t.Fatal("session creation failure was lost")
 	}
 	streamFail := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -111,7 +111,7 @@ func TestSendAndWaitSurfacesStreamErrorAndSetupFailure(t *testing.T) {
 		http.Error(w, "no", http.StatusInternalServerError)
 	}))
 	defer streamFail.Close()
-	if _, _, err := (&env{ctx: context.Background(), client: daemonclient.New(streamFail.URL)}).sendAndWait("x"); err == nil {
+	if _, _, err := (&env{ctx: context.Background(), client: daemonclient.New(streamFail.URL, "")}).sendAndWait("x"); err == nil {
 		t.Fatal("stream creation failure was lost")
 	}
 }
@@ -213,7 +213,7 @@ func TestRunOrchestratesServicesAndReportsScenarios(t *testing.T) {
 		<-ctx.Done()
 		return nil
 	}
-	evalNewDaemonClient = func(string) *daemonclient.Client { return daemonclient.New(server.URL) }
+	evalNewDaemonClient = func(string, string) *daemonclient.Client { return daemonclient.New(server.URL, "") }
 	evalScenarios = []scenario{{name: "orchestration", check: func(e *env) (verdict, string) {
 		evt, _, err := e.sendAndWait("hello")
 		if err != nil || evt.Message.Content != "ok" {
@@ -290,7 +290,7 @@ func TestScenarioNegativeAndInconclusiveVerdicts(t *testing.T) {
 	}
 
 	empty := serve(`{"type":"done","message":{"content":""}}`)
-	e := &env{ctx: context.Background(), client: daemonclient.New(empty.URL), workspace: t.TempDir()}
+	e := &env{ctx: context.Background(), client: daemonclient.New(empty.URL, ""), workspace: t.TempDir()}
 	for _, sc := range scenarios {
 		if sc.setup != nil {
 			if err := sc.setup(e); err != nil {
@@ -305,7 +305,7 @@ func TestScenarioNegativeAndInconclusiveVerdicts(t *testing.T) {
 	empty.Close()
 
 	failing := serve(`{"type":"error","error":"model unavailable"}`)
-	e.client = daemonclient.New(failing.URL)
+	e.client = daemonclient.New(failing.URL, "")
 	for _, sc := range scenarios[:5] { // the registry scenario uses /tools, not the stream
 		v, _ := sc.check(e)
 		if v != FailVerdict {
