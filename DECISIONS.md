@@ -4625,3 +4625,36 @@ marker was excluded — so it was rewritten as `TestCompactFoldsPriorSummary
 ForwardButSkipsOtherSystemMessages`, pinning both halves of the corrected
 contract: the compaction marker is carried forward, a project-context
 marker is not.
+
+---
+
+## Streaming events use the cheap tail-render path (post-audit #69)
+
+The transcript-perf split (the `transcriptBody` cache + `refreshLiveIndicator`,
+from the earlier "camera lenta" fix) moved `animTickMsg` off the full
+`refreshTranscript` rebuild — but the audit found the *streaming event
+handlers* were never switched over. `handleStreamEvent`'s four hot-path
+cases — `delta`, `tool_start`, `tool_result`, `notice` — each mutate only
+the streaming tail message, yet all called `refreshTranscript()` (the full
+rebuild: glamour re-rendering every prior message, ~16ms on a long
+session) on *every* event. With streaming the shipped default and a long
+answer producing many deltas, that reintroduced the exact O(full-history)-
+per-event cost the split existed to kill, through a path the split's
+original PR hadn't covered.
+
+Fixed by switching those four cases to `refreshLiveIndicator()`. The
+safety condition they rely on holds by construction: `submit()` appends
+the streaming assistant placeholder and calls `refreshTranscript()` once,
+which primes `transcriptBody` (the static prefix = everything except the
+live tail) and sets `transcriptLiveIndicatorActive = true`, before any
+event arrives. From there each event re-renders only the tail. The
+terminal `done`/`error` cases deliberately keep the full
+`refreshTranscript()` — `done` finalizes the tail to a full markdown
+render and must fold it back into the static body; that's correct, not an
+oversight.
+
+`TestStreamingEventsUseCheapTailPathNotFullRebuild` primes the body, sets
+it to a sentinel, fires all four event types through the real
+`handleStreamEvent`, and asserts none overwrote the sentinel (a full
+rebuild would) while the delta content still reached the rendered
+viewport (the cheap path must actually render, not silently no-op).

@@ -112,3 +112,38 @@ func TestRefreshLiveIndicatorAnimatesRunningToolSpinner(t *testing.T) {
 		t.Fatalf("running tool spinner never visibly changed across 8 animation frames — refreshLiveIndicator froze it")
 	}
 }
+
+// TestStreamingEventsUseCheapTailPathNotFullRebuild is the regression
+// test for #69: the four hot-path streaming events (delta, tool_start,
+// tool_result, notice) mutate only the streaming tail message, so they
+// must go through refreshLiveIndicator (cached static body) rather than
+// refreshTranscript (full rebuild of every prior message per event).
+// Proven by mutating m.transcriptBody to a sentinel after priming and
+// asserting the events never overwrite it — only a full refresh would.
+func TestStreamingEventsUseCheapTailPathNotFullRebuild(t *testing.T) {
+	m := longSessionModel(t)
+	m.refreshTranscript() // prime the cached static body (submit() does this in real use)
+
+	const sentinel = "<<SENTINEL-BODY-DO-NOT-REBUILD>>"
+	m.transcriptBody = sentinel
+
+	events := []daemonclient.StreamEvent{
+		{Type: "delta", Content: " more"},
+		{Type: "tool_start", Name: "grep", Args: `{"pattern":"x"}`},
+		{Type: "tool_result", Name: "grep", Result: "hit", OK: true},
+		{Type: "notice", Text: "compaction happened"},
+	}
+	for _, ev := range events {
+		next, _ := m.handleStreamEvent(streamEventMsg{event: ev})
+		m = next.(Model)
+		if m.transcriptBody != sentinel {
+			t.Fatalf("event %q rebuilt the static transcript body — should have used the cheap tail path", ev.Type)
+		}
+	}
+
+	// The tail content must still reflect the delta (cheap path must
+	// actually render, not silently no-op).
+	if !strings.Contains(m.viewport.View(), "more") {
+		t.Errorf("streaming delta content did not reach the rendered viewport: %q", m.viewport.View())
+	}
+}

@@ -1221,7 +1221,7 @@ func (m Model) handleStreamEvent(msg streamEventMsg) (tea.Model, tea.Cmd) {
 		if lm := last(); lm != nil {
 			lm.Content += msg.event.Content
 		}
-		m.refreshTranscript()
+		m.refreshLiveIndicator() // only the streaming tail changed — see #69/refreshTranscript doc
 
 	case "reasoning":
 		// Still workModelActive: reasoning is not an answer and never
@@ -1240,7 +1240,7 @@ func (m Model) handleStreamEvent(msg streamEventMsg) (tea.Model, tea.Cmd) {
 				Name: msg.event.Name, Args: msg.event.Args, Running: true,
 			})
 		}
-		m.refreshTranscript()
+		m.refreshLiveIndicator() // only the streaming tail changed — see #69
 
 	case "tool_result":
 		m.workState = workAnalyzingResult
@@ -1256,13 +1256,13 @@ func (m Model) handleStreamEvent(msg streamEventMsg) (tea.Model, tea.Cmd) {
 				}
 			}
 		}
-		m.refreshTranscript()
+		m.refreshLiveIndicator() // only the streaming tail changed — see #69
 
 	case "notice":
 		if lm := last(); lm != nil {
 			lm.Notices = append(lm.Notices, msg.event.Text)
 		}
-		m.refreshTranscript()
+		m.refreshLiveIndicator() // only the streaming tail changed — see #69
 
 	case "question":
 		// The turn is genuinely paused server-side until answered —
