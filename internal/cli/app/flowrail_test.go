@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/codexmark/kram/internal/cli/daemonclient"
 )
 
 func TestFlowRailDirections(t *testing.T) {
@@ -74,5 +76,32 @@ func TestNoteFlowBytesSmoothsRate(t *testing.T) {
 	m.noteFlowRx(1)
 	if m.flowSending {
 		t.Fatal("first received byte must end the sending phase")
+	}
+}
+
+// TestDeltasAcrossModelCallsGetParagraphBreaks: each tool round's
+// narration must not weld onto the previous one ("planejando
+// tarefaverificando arquivos..." — user-observed word soup).
+func TestDeltasAcrossModelCallsGetParagraphBreaks(t *testing.T) {
+	m := testModel(t)
+	m.phase = phaseChat
+	m.waiting = true
+	m.messages = append(m.messages, chatMessage{Role: "assistant", streaming: true})
+
+	stream := &daemonclient.MessageStream{}
+	feed := func(evt daemonclient.StreamEvent) {
+		next, _ := m.Update(streamEventMsg{stream: stream, event: evt})
+		m = next.(Model)
+	}
+	feed(daemonclient.StreamEvent{Type: "route_start"})
+	feed(daemonclient.StreamEvent{Type: "delta", Content: "planejando tarefa"})
+	feed(daemonclient.StreamEvent{Type: "tool_start", Name: "read_file"})
+	feed(daemonclient.StreamEvent{Type: "tool_result", Name: "read_file", OK: true})
+	feed(daemonclient.StreamEvent{Type: "route_start"})
+	feed(daemonclient.StreamEvent{Type: "delta", Content: "verificando arquivos"})
+
+	got := m.messages[len(m.messages)-1].Content
+	if got != "planejando tarefa\n\nverificando arquivos" {
+		t.Fatalf("content = %q, want paragraph-separated calls", got)
 	}
 }

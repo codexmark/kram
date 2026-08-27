@@ -5901,3 +5901,16 @@ internal/skillpack, a neutral package deliberately mirroring the daemon
 tool's behavior instead of importing internal/daemon/tools into the CLI
 — the same small-duplication layering trade oauthRefreshAdapter
 documents.
+
+---
+
+## Per-call narration no longer welds into word soup
+
+Dogfooding again: a run whose model narrates each tool round ("planejando
+tarefa", "verificando arquivos...") showed the live transcript jamming
+every call's text together with no separator — deltas append to the
+streaming message across ALL of a run's model calls, and nothing marked
+the boundary. The done event's authoritative replacement hid it in the
+final transcript, which is exactly why it survived: the mess only existed
+while someone was watching. route_start now arms a flag; the next delta
+of a message that already has content opens a fresh paragraph first.
