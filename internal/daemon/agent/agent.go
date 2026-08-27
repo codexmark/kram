@@ -699,15 +699,29 @@ func (s *Service) runLoop(ctx context.Context, sessionID, model string, depth in
 			}
 			marker, err := compaction.Compact(ctx, s.gateway, model, pruned)
 			if err != nil {
-				return RunResult{}, fmt.Errorf("compacting session: %w", err)
+				// The summarizer itself needs a model call, and the model
+				// being unreachable is precisely when compaction tends to be
+				// needed — failing the turn here turned a transient
+				// summarizer error into a dead session. Emergency-prune this
+				// call's context instead (drop oldest whole user-turns; see
+				// compaction.EmergencyPrune) and proceed: nothing is
+				// persisted, the full history stays intact, and the next
+				// healthy compaction summarizes as usual.
+				emergency := compaction.EmergencyPrune(pruned, s.cfg.MaxContextTokens)
+				if len(emergency) >= len(pruned) {
+					return RunResult{}, fmt.Errorf("compacting session: %w", err)
+				}
+				effective = emergency
+				emit(onEvent, Event{Kind: EventNotice, Notice: "summary model unavailable — oldest turns left out of this call's context (the session keeps them)"})
+			} else {
+				if _, err := s.store.AppendMessage(sessionID, marker); err != nil {
+					return RunResult{}, fmt.Errorf("persisting compaction summary: %w", err)
+				}
+				compactions++
+				result.Compactions = compactions
+				emit(onEvent, Event{Kind: EventNotice, Notice: "session history was compacted to stay in budget"})
+				continue // reload the now-much-shorter effective history before calling the model
 			}
-			if _, err := s.store.AppendMessage(sessionID, marker); err != nil {
-				return RunResult{}, fmt.Errorf("persisting compaction summary: %w", err)
-			}
-			compactions++
-			result.Compactions = compactions
-			emit(onEvent, Event{Kind: EventNotice, Notice: "session history was compacted to stay in budget"})
-			continue // reload the now-much-shorter effective history before calling the model
 		case contextpolicy.Prune:
 			effective = pruned
 		}
