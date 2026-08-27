@@ -5914,3 +5914,16 @@ the boundary. The done event's authoritative replacement hid it in the
 final transcript, which is exactly why it survived: the mess only existed
 while someone was watching. route_start now arms a flag; the next delta
 of a message that already has content opens a fresh paragraph first.
+
+---
+
+## The delegation section carries the parallel fan-out trigger (#139)
+
+Same bug class as #134, third instance: the "pass multiple tasks to run
+them in parallel" trigger lived only in delegate_task's tool description
+— exactly where this prompt's own thesis says triggers never fire. Small
+models (the stated audience) would never discover that one call carrying
+several independent tasks fans out concurrently (3 at a time, depth 1).
+The section now states the trigger, the self-containment requirement,
+and keeps the restraint line; a test pins all three so none silently
+disappears.

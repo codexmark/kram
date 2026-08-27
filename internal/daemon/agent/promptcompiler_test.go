@@ -415,3 +415,20 @@ func TestRunLoopUsesEmptyShelfSkillsSectionOnFreshInstall(t *testing.T) {
 		t.Fatalf("fresh install prompt: empty=%v trigger=%v, want empty-shelf only", sawEmpty, sawTrigger)
 	}
 }
+
+// TestDelegationSectionCarriesParallelTrigger (#139): the fan-out
+// trigger must live in the prompt, not only in the tool description —
+// this file's own thesis (and the #134 skills bug) is that description-
+// only triggers never fire.
+func TestDelegationSectionCarriesParallelTrigger(t *testing.T) {
+	for _, want := range []string{
+		"ONE delegate_task call carrying ALL",
+		"run in parallel",
+		"Sequential delegate_task calls waste the fan-out",
+		"One file read is not a delegation",
+	} {
+		if !strings.Contains(delegationSection, want) {
+			t.Errorf("delegation section missing %q", want)
+		}
+	}
+}

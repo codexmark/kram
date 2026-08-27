@@ -119,6 +119,8 @@ Call memory_search when the user references something from a past session that i
 // call is real overhead a single tool call isn't.
 const delegationSection = `# Delegation
 
+When a task splits into 2+ independent, self-contained pieces (researching different subsystems, migrating separate files, checking unrelated hypotheses), make ONE delegate_task call carrying ALL of them — they run in parallel. Sequential delegate_task calls waste the fan-out.
+Each task's goal must be self-contained: the subagent knows nothing about this conversation and cannot ask questions.
 Do not delegate what is faster to do yourself. One file read is not a delegation.
 `
 
