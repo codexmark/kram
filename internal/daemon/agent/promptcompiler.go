@@ -362,14 +362,21 @@ func compilePreamble(workspace, projectContext string, haveProjectContext bool, 
 	return parts
 }
 
-// compileTurnPostscript reproduces the two after-history conditional
-// messages, same order (empty-retry nudge before near-budget message).
-func compileTurnPostscript(emptyRetryUsed, nearBudget bool) []PromptPart {
+// compileTurnPostscript reproduces the after-history conditional
+// messages, in a fixed order: empty-retry nudge, then the verification
+// gate's nudge (#116), then the near-budget soft landing.
+func compileTurnPostscript(emptyRetryUsed, verifyNudgePending, nearBudget bool) []PromptPart {
 	var parts []PromptPart
 	if emptyRetryUsed {
 		parts = append(parts, PromptPart{
 			ID: "empty-retry-nudge", Placement: PlacementPostHistory, Refresh: RefreshIteration, Source: "runtime",
 			Content: "Your previous response was empty. Answer the user directly in plain text now — do not return another empty response.",
+		})
+	}
+	if verifyNudgePending {
+		parts = append(parts, PromptPart{
+			ID: "verify-nudge", Placement: PlacementPostHistory, Refresh: RefreshIteration, Source: "runtime",
+			Content: verifyNudge,
 		})
 	}
 	if nearBudget {
