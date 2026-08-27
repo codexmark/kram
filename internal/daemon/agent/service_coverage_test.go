@@ -104,13 +104,41 @@ func TestSessionAskerAndApproverDeliverAndCancel(t *testing.T) {
 		t.Fatalf("Approve = %q, %v", decision, err)
 	}
 
+	// A non-nil onEvent (a real interactive session) that never answers,
+	// with an already-canceled context, must surface the cancellation —
+	// exercises the ctx.Done() branch of the select. The onEvent is a
+	// no-op here specifically because it must be non-nil to reach that
+	// path at all (a nil onEvent short-circuits first — see below).
+	noop := func(Event) {}
 	canceled, stop := context.WithCancel(context.Background())
 	stop()
-	if _, err := (&sessionAsker{svc: s}).Ask(canceled, "q", nil); !errors.Is(err, context.Canceled) {
+	if _, err := (&sessionAsker{svc: s, onEvent: noop}).Ask(canceled, "q", nil); !errors.Is(err, context.Canceled) {
 		t.Fatalf("canceled Ask err = %v", err)
 	}
-	if decision, err := (&sessionApprover{svc: s}).Approve(canceled, "bash", "x"); !errors.Is(err, context.Canceled) || decision != tools.ApprovalDeny {
+	if decision, err := (&sessionApprover{svc: s, onEvent: noop}).Approve(canceled, "bash", "x"); !errors.Is(err, context.Canceled) || decision != tools.ApprovalDeny {
 		t.Fatalf("canceled Approve = %q, %v", decision, err)
+	}
+}
+
+// TestSessionAskerApproverNilOnEventShortCircuits pins the subagent
+// safety fix: with no live event sink (onEvent == nil, the RunTask case),
+// Ask and Approve must return immediately rather than block for the full
+// 10-minute timeout emitting a prompt nobody can see. Approve denies (a
+// subagent must never auto-approve); Ask fails with a clear reason.
+func TestSessionAskerApproverNilOnEventShortCircuits(t *testing.T) {
+	s := coverageService(t)
+	// A plain background context (not canceled, no deadline): if the
+	// short-circuit is missing, this test hangs for approvalTimeout
+	// instead of failing fast — the exact stall the fix prevents.
+	ctx := context.Background()
+
+	decision, err := (&sessionApprover{svc: s}).Approve(ctx, "bash", "rm -rf /")
+	if decision != tools.ApprovalDeny || err != nil {
+		t.Fatalf("nil-onEvent Approve = %q, %v; want ApprovalDeny, nil", decision, err)
+	}
+
+	if _, err := (&sessionAsker{svc: s}).Ask(ctx, "which option?", []string{"a", "b"}); err == nil {
+		t.Fatal("nil-onEvent Ask should return an error, not block or succeed")
 	}
 }
 

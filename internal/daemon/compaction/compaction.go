@@ -122,6 +122,19 @@ func Compact(ctx context.Context, gw *gatewayclient.Client, model string, effect
 	var transcript strings.Builder
 	for _, m := range effective {
 		if m.Role == "system" {
+			// A prior compaction summary is the one system message worth
+			// folding into a second compaction: EffectiveHistory prepends
+			// the most recent marker as the lead message, so on a chained
+			// compaction it sits at effective[0]. Skipping it (as every
+			// other system message here is skipped) would permanently drop
+			// the session's earliest arc — the Goal/Constraints/decisions
+			// the first summary preserved. Every other system message in
+			// effective is an ephemeral re-injection marker (project-
+			// context/memory, see agent's needsFreshInjection) that's
+			// rebuilt fresh each turn and correctly ignored here.
+			if m.Name == CompactionMarkerName {
+				fmt.Fprintf(&transcript, "[earlier session summary — fold this forward]\n%s\n", m.Content)
+			}
 			continue
 		}
 		fmt.Fprintf(&transcript, "[%s] %s\n", m.Role, m.Content)
