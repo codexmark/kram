@@ -5405,3 +5405,32 @@ removals. Two genuinely-undertested error paths were filled while here:
 `localstore.AtomicWrite`'s MkdirAll-on-a-file and temp-open failures
 (48%→64%), and `onboarding.Load`'s corrupt-file rejection (77.8%→81.5%) —
 real behavioral tests, not number-padding.
+
+---
+
+## The ChatGPT-login health dot: a 400 means auth passed, not "down"
+
+The accounts screen pinged a connected `openai-chatgpt` (Codex) account red even
+though the login worked and real completions streamed fine. Diagnosed live
+against a real ChatGPT subscription: the token authenticates correctly, but the
+`openai-responses` probe deliberately sends a minimal, incomplete body (empty
+`input`, no `store` flag), and the Codex backend — which validates auth *before*
+body shape — always rejects it with a body-validation **400** ("Store must be
+set to false", then "input required"). `providerping.Ping` classified every
+`>= 400` as `StatusDown`, so that healthy-signal 400 showed as a red "HTTP 400"
+dot. An invalid token, by contrast, returns **401** ("Could not parse your
+authentication token"), which the probe already caught.
+
+So for the `openai-responses` kind specifically, a 4xx that isn't 401/403/429
+now reads as reachable (`StatusOK`): reaching a body-validation error is proof
+that auth succeeded and the backend is up — the only thing this probe can
+confirm short of a real, quota-consuming completion. This matches the probe's
+own long-standing comment ("a 401/403 still reads as invalid key, anything else
+as reachable"), which the generic `>= 400` branch had been silently
+contradicting. The alternative — sending a valid completion to turn the dot
+green — was rejected: a health check must not spend the user's ChatGPT quota.
+
+Fixed in passing: `internal/providerping/ping.go` still carried Brazilian-
+Portuguese `Detail` strings the #74 sweep missed (it only covered
+`internal/cli/app`), even though these surface in the accounts screen next to
+the dot. Translated to English alongside the fix.

@@ -44,8 +44,8 @@ type Result struct {
 	Status  Status
 	Latency time.Duration
 	// Detail is a short, human-readable explanation — empty for a clean
-	// StatusOK, set for anything else ("429 sem cota", "401 chave
-	// inválida", "latência alta", ...).
+	// StatusOK, set for anything else ("no quota (429)", "invalid
+	// key", "high latency", ...).
 	Detail string
 }
 
@@ -63,28 +63,39 @@ func Ping(ctx context.Context, kind, baseURL, apiKey string) Result {
 
 	req, err := buildPingRequest(ctx, kind, baseURL, apiKey)
 	if err != nil {
-		return Result{Status: StatusDown, Detail: "requisição inválida: " + err.Error()}
+		return Result{Status: StatusDown, Detail: "invalid request: " + err.Error()}
 	}
 
 	start := time.Now()
 	resp, err := http.DefaultClient.Do(req)
 	elapsed := time.Since(start)
 	if err != nil {
-		return Result{Status: StatusDown, Latency: elapsed, Detail: "sem resposta"}
+		return Result{Status: StatusDown, Latency: elapsed, Detail: "no response"}
 	}
 	defer resp.Body.Close()
 
 	switch {
 	case resp.StatusCode == http.StatusTooManyRequests:
-		return Result{Status: StatusDown, Latency: elapsed, Detail: "sem cota (429)"}
+		return Result{Status: StatusDown, Latency: elapsed, Detail: "no quota (429)"}
 	case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
-		return Result{Status: StatusDown, Latency: elapsed, Detail: "chave inválida"}
+		return Result{Status: StatusDown, Latency: elapsed, Detail: "invalid key"}
 	case resp.StatusCode >= 500:
-		return Result{Status: StatusDown, Latency: elapsed, Detail: "erro do provider"}
+		return Result{Status: StatusDown, Latency: elapsed, Detail: "provider error"}
+	case kind == "openai-responses" && resp.StatusCode >= 400:
+		// The Codex/ChatGPT backend validates auth *before* request-body
+		// shape, and this probe deliberately sends a minimal, incomplete
+		// body (see buildPingRequest) that the backend always rejects with a
+		// body-validation 400 ("Store must be set to false" / "input
+		// required"). Reaching that 400 means auth succeeded and the backend
+		// is reachable — the only thing this probe can confirm short of a
+		// real, quota-consuming completion. A genuine auth failure is the
+		// 401/403 already handled above; treating this 400 as down was a
+		// false-negative red dot on a working ChatGPT login.
+		return Result{Status: StatusOK, Latency: elapsed}
 	case resp.StatusCode >= 400:
 		return Result{Status: StatusDown, Latency: elapsed, Detail: fmt.Sprintf("HTTP %d", resp.StatusCode)}
 	case elapsed >= degradedLatency:
-		return Result{Status: StatusDegraded, Latency: elapsed, Detail: "latência alta"}
+		return Result{Status: StatusDegraded, Latency: elapsed, Detail: "high latency"}
 	default:
 		return Result{Status: StatusOK, Latency: elapsed}
 	}
@@ -105,7 +116,7 @@ func ListModels(ctx context.Context, baseURL, apiKey string) ([]string, error) {
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/models", nil)
 	if err != nil {
-		return nil, fmt.Errorf("requisição inválida: %w", err)
+		return nil, fmt.Errorf("invalid request: %w", err)
 	}
 	if apiKey != "" {
 		req.Header.Set("Authorization", "Bearer "+apiKey)
@@ -113,11 +124,11 @@ func ListModels(ctx context.Context, baseURL, apiKey string) ([]string, error) {
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("sem resposta: %w", err)
+		return nil, fmt.Errorf("no response: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-		return nil, fmt.Errorf("chave inválida")
+		return nil, fmt.Errorf("invalid key")
 	}
 	if resp.StatusCode >= 400 {
 		return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
@@ -129,7 +140,7 @@ func ListModels(ctx context.Context, baseURL, apiKey string) ([]string, error) {
 		} `json:"data"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
-		return nil, fmt.Errorf("resposta inesperada: %w", err)
+		return nil, fmt.Errorf("unexpected response: %w", err)
 	}
 
 	ids := make([]string, 0, len(body.Data))
@@ -172,7 +183,7 @@ func buildPingRequest(ctx context.Context, kind, baseURL, apiKey string) (*http.
 		// this sends a request that's expected to be rejected as
 		// malformed (empty input) rather than complete, and relies on
 		// the backend checking auth before body shape: a 401/403 still
-		// reads as "chave inválida" below, anything else as reachable.
+		// reads as "invalid key" below, anything else as reachable.
 		// Approximate by nature — a real completion is the only fully
 		// reliable check for this backend.
 		if baseURL == "" {

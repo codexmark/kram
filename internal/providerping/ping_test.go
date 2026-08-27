@@ -67,6 +67,38 @@ func TestPingOpenAIResponsesUsesBearer(t *testing.T) {
 	}
 }
 
+// TestPingOpenAIResponsesBodyErrorIsReachable is the regression test for the
+// false-negative red dot on a working ChatGPT login: the Codex backend
+// rejects this probe's deliberately-minimal body with a 400 ("Store must be
+// set to false"), which means auth SUCCEEDED — so it must read as reachable
+// (StatusOK), not down.
+func TestPingOpenAIResponsesBodyErrorIsReachable(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"detail":"Store must be set to false"}`))
+	}))
+	defer srv.Close()
+
+	res := Ping(context.Background(), "openai-responses", srv.URL, "valid-token")
+	if res.Status != StatusOK {
+		t.Errorf("Status = %v, want StatusOK for a Codex 400 body-validation error (auth passed)", res.Status)
+	}
+}
+
+// TestPingOpenAIResponsesAuthFailureIsDown confirms a genuine auth failure
+// (401) still shows down — the body-error leniency above must not swallow it.
+func TestPingOpenAIResponsesAuthFailureIsDown(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+
+	res := Ping(context.Background(), "openai-responses", srv.URL, "bad-token")
+	if res.Status != StatusDown || res.Detail != "invalid key" {
+		t.Errorf("Status/Detail = %v/%q, want StatusDown/\"invalid key\" for a 401", res.Status, res.Detail)
+	}
+}
+
 func TestPingGeminiKeyAsQueryParam(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Query().Get("key") != "gk-test" {
