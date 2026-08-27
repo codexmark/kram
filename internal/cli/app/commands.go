@@ -16,6 +16,7 @@ import (
 	"github.com/codexmark/kram/internal/oauthflow"
 	"github.com/codexmark/kram/internal/providercatalog"
 	"github.com/codexmark/kram/internal/providerping"
+	"github.com/codexmark/kram/internal/skillpack"
 )
 
 // oauthRefreshAdapter bridges oauthflow's Token-returning refresh
@@ -139,6 +140,21 @@ func interruptTurnCmd(c *daemonclient.Client, sessionID string) tea.Cmd {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		return interruptDoneMsg{err: c.Interrupt(ctx, sessionID)}
+	}
+}
+
+// skillPackInstalledMsg reports the wizard's starter-pack install (#135).
+type skillPackInstalledMsg struct {
+	names []string
+	err   error
+}
+
+func installSkillPackCmd() tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+		defer cancel()
+		names, err := skillpack.Install(ctx, skillpack.DefaultRepo)
+		return skillPackInstalledMsg{names: names, err: err}
 	}
 }
 

@@ -5885,3 +5885,19 @@ ordering a check; the normal trigger returns the moment skills exist.
 Decided once per run (like memory and env-context) so a mid-run
 skill_install changes the next run's prefix, never this one's — prompt
 caching stays intact. The wizard offering a starter skill pack is #135.
+
+---
+
+## Onboarding offers the starter skill pack (#135)
+
+A fresh install has zero skills (#134's empty-shelf prompt made that
+honest; this makes it fixable at the door). Wizard step 6 gained a
+second half: with the tool preset applied, offer the curated
+kram-skills pack — install (clones and installs every skill, recording
+SOURCE files identical to skill_install's) or skip (always safe; the
+prompt teaches skill_install for later). A network/git failure reports
+on the offer screen and never blocks onboarding. The installer lives in
+internal/skillpack, a neutral package deliberately mirroring the daemon
+tool's behavior instead of importing internal/daemon/tools into the CLI
+— the same small-duplication layering trade oauthRefreshAdapter
+documents.

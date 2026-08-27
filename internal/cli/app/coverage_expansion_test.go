@@ -587,8 +587,10 @@ func TestUpdateMessageMatrix(t *testing.T) {
 	m.wizardToolSettingsPending = true
 	next, cmd = m.Update(toolSettingsUpdatedMsg{})
 	m = next.(Model)
-	if m.wizardToolSettingsPending || m.phase != phaseWizardSystemCheck || m.wizardStep != 7 || cmd != nil {
-		t.Fatalf("settings success = pending %v phase %d step %d cmd=%v", m.wizardToolSettingsPending, m.phase, m.wizardStep, cmd != nil)
+	// The ack now opens step 6's second half — the starter skill pack
+	// offer (#135) — instead of jumping straight to System Check.
+	if m.wizardToolSettingsPending || !m.wizardSkillsOffer || cmd != nil {
+		t.Fatalf("settings success = pending %v offer %v cmd=%v", m.wizardToolSettingsPending, m.wizardSkillsOffer, cmd != nil)
 	}
 	next, cmd = m.Update(answerSentMsg{err: errors.New("answer")})
 	m = next.(Model)
@@ -914,8 +916,8 @@ func TestUpdateOAuthSuccessAndRoutingBranches(t *testing.T) {
 	m = testModel(t)
 	m.wizardToolSettingsPending = true
 	next, follow = m.Update(toolSettingsUpdatedMsg{})
-	if next.(Model).phase != phaseWizardSystemCheck || follow != nil {
-		t.Fatal("tool settings acknowledgement did not advance wizard")
+	if !next.(Model).wizardSkillsOffer || follow != nil {
+		t.Fatal("tool settings acknowledgement did not open the skill-pack offer")
 	}
 
 	for _, p := range []phase{phaseAccounts, phaseTools, phaseWizardEnvironment, phaseWizardProjects, phaseWizardRouting, phaseWizardPermissions, phaseWizardToolsPreset, phaseWizardSystemCheck, phaseWizardSummary} {
