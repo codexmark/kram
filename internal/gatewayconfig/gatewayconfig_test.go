@@ -1,4 +1,4 @@
-package main
+package gatewayconfig
 
 import (
 	"encoding/json"
@@ -24,11 +24,11 @@ func TestLoadStoredCredentialsAndAutodetectionStrategies(t *testing.T) {
 	if err := store.Set("ANTHROPIC_API_KEY", "stored-key"); err != nil {
 		t.Fatal(err)
 	}
-	loadStoredCredentials()
+	LoadStoredCredentials()
 	if got := os.Getenv("ANTHROPIC_API_KEY"); got != "stored-key" {
 		t.Fatalf("loaded key = %q", got)
 	}
-	cfg, err := detectGatewayConfig("", nil, slog.New(slog.DiscardHandler))
+	cfg, err := Detect("", nil, slog.New(slog.DiscardHandler))
 	if err != nil || cfg.Combos[0].Strategy != "" {
 		t.Fatalf("paid-provider strategy = %q err=%v", cfg.Combos[0].Strategy, err)
 	}
@@ -67,7 +67,7 @@ func TestCatalogProviderConfigSupportsOAuthAndMissingCredentials(t *testing.T) {
 
 func TestDetectGatewayConfigErrorsWithoutProviderAndIncludesCustom(t *testing.T) {
 	isolateReconcileTest(t)
-	if _, err := detectGatewayConfig("", nil, slog.New(slog.DiscardHandler)); err == nil || !strings.Contains(err.Error(), "no LLM provider") {
+	if _, err := Detect("", nil, slog.New(slog.DiscardHandler)); err == nil || !strings.Contains(err.Error(), "no LLM provider") {
 		t.Fatalf("empty autodetection error = %v", err)
 	}
 	store, err := customprovider.Load()
@@ -78,7 +78,7 @@ func TestDetectGatewayConfigErrorsWithoutProviderAndIncludesCustom(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg, err := detectGatewayConfig("smart", nil, slog.New(slog.DiscardHandler))
+	cfg, err := Detect("smart", nil, slog.New(slog.DiscardHandler))
 	if err != nil || len(cfg.Providers) != 1 || cfg.Providers[0].ID != "custom-"+provider.ID || cfg.Combos[0].Strategy != "smart" {
 		t.Fatalf("custom autodetection = %+v err=%v", cfg, err)
 	}
@@ -97,7 +97,7 @@ func TestDetectGatewayConfigUsesRoundRobinForFreeCatalogProvider(t *testing.T) {
 		t.Skip("catalog has no free-tier provider")
 	}
 	t.Setenv(free.EnvVar, "test-key")
-	cfg, err := detectGatewayConfig("", nil, nil)
+	cfg, err := Detect("", nil, nil)
 	if err != nil || cfg.Combos[0].Strategy != "round-robin" {
 		t.Fatalf("free autodetection strategy = %+v err=%v", cfg, err)
 	}
@@ -106,7 +106,7 @@ func TestDetectGatewayConfigUsesRoundRobinForFreeCatalogProvider(t *testing.T) {
 // isolateReconcileTest points customprovider.Store at a fresh temp dir
 // and clears every catalog provider's env var — this machine's real
 // shell environment may have real keys exported (e.g. a developer's own
-// OPENROUTER_API_KEY), and reconcileLiveProviders reads os.Getenv
+// OPENROUTER_API_KEY), and Reconcile reads os.Getenv
 // directly, so without this a test asserting an exact provider count
 // would be at the mercy of whatever happens to be exported outside the
 // test.
@@ -142,7 +142,7 @@ func TestReconcileLiveProvidersAddsNewCustomProvider(t *testing.T) {
 		DefaultCombo: "default",
 	}
 
-	got := reconcileLiveProviders(cfg, nil, slog.New(slog.DiscardHandler))
+	got := Reconcile(cfg, nil, slog.New(slog.DiscardHandler))
 
 	if len(got.Providers) != 2 {
 		t.Fatalf("expected 2 providers after reconciliation, got %d: %+v", len(got.Providers), got.Providers)
@@ -191,7 +191,7 @@ func TestReconcileLiveProvidersNoOpWhenNothingNew(t *testing.T) {
 		DefaultCombo: "default",
 	}
 
-	got := reconcileLiveProviders(cfg, nil, slog.New(slog.DiscardHandler))
+	got := Reconcile(cfg, nil, slog.New(slog.DiscardHandler))
 
 	if got != cfg {
 		t.Error("expected the exact same *config.Config pointer back when there's nothing new to reconcile")
@@ -212,7 +212,7 @@ func TestReconcileLiveProvidersAddsCatalogProviderWithNewCredential(t *testing.T
 		DefaultCombo: "default",
 	}
 
-	got := reconcileLiveProviders(cfg, nil, slog.New(slog.DiscardHandler))
+	got := Reconcile(cfg, nil, slog.New(slog.DiscardHandler))
 
 	found := false
 	for _, pc := range got.Providers {
@@ -228,8 +228,8 @@ func TestReconcileLiveProvidersAddsCatalogProviderWithNewCredential(t *testing.T
 // TestCustomProviderConfigSkipsEmptyModel is the defense-in-depth case:
 // customprovider.Store.Add rejects an empty model today, but an entry
 // saved before that validation existed could still have one on disk —
-// customProviderConfig (shared by detectGatewayConfig and
-// reconcileLiveProviders) must skip it rather than build a
+// customProviderConfig (shared by Detect and
+// Reconcile) must skip it rather than build a
 // ProviderConfig that would forward a bogus model name upstream.
 func TestCustomProviderConfigSkipsEmptyModel(t *testing.T) {
 	_, ok := customProviderConfig(customprovider.Provider{ID: "legacy", Name: "legacy", BaseURL: "http://x", Model: ""})
@@ -272,7 +272,7 @@ func TestReconcileLiveProvidersSkipsCustomProviderWithNoModel(t *testing.T) {
 		Combos:       []config.ComboConfig{{ID: "default", Strategy: "priority", Providers: []string{"anthropic"}}},
 		DefaultCombo: "default",
 	}
-	got := reconcileLiveProviders(cfg, nil, slog.New(slog.DiscardHandler))
+	got := Reconcile(cfg, nil, slog.New(slog.DiscardHandler))
 
 	if len(got.Providers) != 1 {
 		t.Errorf("expected the model-less custom provider to be skipped, got %d providers: %+v", len(got.Providers), got.Providers)

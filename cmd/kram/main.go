@@ -32,6 +32,7 @@ import (
 	"github.com/codexmark/kram/internal/credentials"
 	"github.com/codexmark/kram/internal/daemon"
 	"github.com/codexmark/kram/internal/gateway"
+	"github.com/codexmark/kram/internal/gatewayconfig"
 	"github.com/codexmark/kram/internal/kramhome"
 	"github.com/codexmark/kram/internal/onboarding"
 	"github.com/codexmark/kram/internal/permission"
@@ -151,7 +152,7 @@ func run(opts runOptions) error {
 	var wizardResult app.WizardResult
 
 	// Loaded once and threaded through everywhere a credential might be
-	// needed for the rest of run(): detectGatewayConfig (to notice an
+	// needed for the rest of run(): gatewayconfig.Detect (to notice an
 	// OAuth-only-connected account with no env var to autodetect from),
 	// and gateway.Run (to actually resolve/refresh that account's token
 	// on every request). nil on failure is fine — every use site already
@@ -170,15 +171,15 @@ func run(opts runOptions) error {
 		wizardResult = result
 		if !result.Cancelled {
 			workspace = result.Workspace
-			loadStoredCredentials() // pick up whatever the wizard's provider step just saved, before building the config below
+			gatewayconfig.LoadStoredCredentials() // pick up whatever the wizard's provider step just saved, before building the config below
 
-			cfgToSave, err := detectGatewayConfig(result.Strategy, credStore, nil) // no logger yet this early in run() — see the one further down for why nil is safe here
+			cfgToSave, err := gatewayconfig.Detect(result.Strategy, credStore, nil) // no logger yet this early in run() — see the one further down for why nil is safe here
 			if err != nil {
 				return fmt.Errorf("building config after setup: %w", err)
 			}
 			// A safe default for a brand-new install, not something to
 			// silently retrofit onto an existing hand-written config —
-			// detectGatewayConfig never sets this on its own.
+			// gatewayconfig.Detect never sets this on its own.
 			for i := range cfgToSave.Combos {
 				cfgToSave.Combos[i].Response = config.ResponseGateConfig{RejectEmpty: true, RequireTerminal: true}
 			}
@@ -245,7 +246,7 @@ func run(opts runOptions) error {
 	// overwritten), so this only fills gaps rather than overriding what
 	// the user explicitly set in their shell. Harmless to repeat if the
 	// wizard already called this above.
-	loadStoredCredentials()
+	gatewayconfig.LoadStoredCredentials()
 
 	gwCfg, err := loadOrDetectGatewayConfig(opts.gatewayConfigPath, opts.gatewayPort, opts.strategy, absWorkspace, credStore, logger)
 	if err != nil {
@@ -271,7 +272,7 @@ func run(opts runOptions) error {
 	}()
 
 	// credStore (loaded once, above) is passed straight through to
-	// gateway.Run — not merged into os.Setenv like loadStoredCredentials'
+	// gateway.Run — not merged into os.Setenv like gatewayconfig.LoadStoredCredentials'
 	// plain keys — because an oauth-authed provider's config entry
 	// (auth_mode: oauth) needs the gateway to resolve and refresh its
 	// credential live on every request, since a short-lived OAuth token
@@ -445,12 +446,12 @@ func newDaemonAuthToken() (string, error) {
 // its own strategy per combo.
 //
 // Every branch that loads an existing file (explicit -config, workspace-
-// local, or global) runs it through reconcileLiveProviders first: a
+// local, or global) runs it through gatewayconfig.Reconcile first: a
 // config.yaml written once by an earlier wizard run would otherwise stay
 // frozen forever — a provider or account added via the Accounts UI
 // afterward is invisible until the file is hand-edited or deleted. The
 // pure-autodetect fallback below doesn't need this: it already calls
-// detectGatewayConfig fresh on every boot, so there's nothing stale to
+// gatewayconfig.Detect fresh on every boot, so there's nothing stale to
 // reconcile against.
 func loadOrDetectGatewayConfig(path string, port int, strategyOverride string, workspace string, credStore *credentials.Store, logger *slog.Logger) (*config.Config, error) {
 	if path != "" {
@@ -458,7 +459,7 @@ func loadOrDetectGatewayConfig(path string, port int, strategyOverride string, w
 		if err != nil {
 			return nil, fmt.Errorf("loading gateway config: %w", err)
 		}
-		cfg = reconcileLiveProviders(cfg, credStore, logger)
+		cfg = gatewayconfig.Reconcile(cfg, credStore, logger)
 		if port != 0 {
 			cfg.Port = port
 		}
@@ -476,17 +477,17 @@ func loadOrDetectGatewayConfig(path string, port int, strategyOverride string, w
 	if workspaceCfg, ok, err := loadConfigIfExists(filepath.Join(workspace, ".kram", "config.yaml")); err != nil {
 		return nil, err
 	} else if ok {
-		return finalizeFileConfig(reconcileLiveProviders(workspaceCfg, credStore, logger), port)
+		return finalizeFileConfig(gatewayconfig.Reconcile(workspaceCfg, credStore, logger), port)
 	}
 	if globalPath, err := kramhome.Path("config.yaml"); err == nil {
 		if globalCfg, ok, err := loadConfigIfExists(globalPath); err != nil {
 			return nil, err
 		} else if ok {
-			return finalizeFileConfig(reconcileLiveProviders(globalCfg, credStore, logger), port)
+			return finalizeFileConfig(gatewayconfig.Reconcile(globalCfg, credStore, logger), port)
 		}
 	}
 
-	cfg, err := detectGatewayConfig(strategyOverride, credStore, logger)
+	cfg, err := gatewayconfig.Detect(strategyOverride, credStore, logger)
 	if err != nil {
 		return nil, err
 	}

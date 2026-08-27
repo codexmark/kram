@@ -19,6 +19,14 @@ fi
 echo "==> go vet"
 go vet ./...
 
+echo "==> architecture boundary check"
+# Fail fast on a layering breach (CLI reaching into daemon/gateway/router
+# internals, or the daemon importing the gateway) before the slow test
+# sweep runs. The same test also runs inside the coverage step below; this
+# early, named invocation just surfaces a boundary regression immediately
+# with a clear message. See internal/archcheck.
+go test ./internal/archcheck/ -run TestKramLayeringHolds -count=1
+
 echo "==> go test -race with global coverage"
 coverage_profile="$tmp_dir/coverage.out"
 # devtools/ is intentionally gitignored local scratch space, so it must not
