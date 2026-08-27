@@ -296,6 +296,11 @@ func run(opts runOptions) error {
 		Model:      opts.combo, Workspace: absWorkspace, MaxTurns: opts.maxTurns,
 		PreferStreaming: opts.stream,
 		AuthToken:       daemonToken,
+		// Derive the daemon→gateway timeout from the gateway's own provider
+		// timeout and longest fallback chain, so a legitimate multi-provider
+		// fallback round is never cut off client-side (see
+		// config.Tunables.ResolvedGatewayClientTimeout).
+		GatewayClientTimeout: gwCfg.Tunables.ResolvedGatewayClientTimeout(gwCfg.MaxComboLength()),
 	}
 	daemonRun := kramDaemonRun
 	go func() { errCh <- daemonRun(ctx, daemonCfg, logger) }()

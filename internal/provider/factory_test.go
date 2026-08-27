@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/codexmark/kram/internal/config"
 	"github.com/codexmark/kram/internal/openai"
@@ -29,7 +30,7 @@ func TestBuildStaticAuthByKind(t *testing.T) {
 
 	for _, tc := range cases {
 		cfg := config.ProviderConfig{ID: "p", Kind: tc.kind, BaseURL: tc.baseURL, APIKeyEnv: "FACTORY_TEST_KEY"}
-		p, err := Build(cfg, nil)
+		p, err := Build(cfg, nil, 0)
 		if tc.wantErr {
 			if err == nil {
 				t.Errorf("kind=%q base_url=%q: expected an error, got provider %+v", tc.kind, tc.baseURL, p)
@@ -51,7 +52,7 @@ func TestBuildStaticAuthByKind(t *testing.T) {
 
 func TestBuildPropagatesAPIKeyError(t *testing.T) {
 	cfg := config.ProviderConfig{ID: "p", Kind: "anthropic", APIKeyEnv: "FACTORY_TEST_KEY_UNSET_XYZ"}
-	_, err := Build(cfg, nil)
+	_, err := Build(cfg, nil, 0)
 	if err == nil {
 		t.Fatal("expected an error for a required, unset API key env var")
 	}
@@ -60,7 +61,7 @@ func TestBuildPropagatesAPIKeyError(t *testing.T) {
 func TestBuildPropagatesCapabilities(t *testing.T) {
 	t.Setenv("FACTORY_TEST_KEY", "sk-test")
 	cfg := config.ProviderConfig{ID: "p", Kind: "anthropic", APIKeyEnv: "FACTORY_TEST_KEY", SupportsImages: true, SupportsTools: true}
-	p, err := Build(cfg, nil)
+	p, err := Build(cfg, nil, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -87,7 +88,7 @@ func TestBuildThreadsTemperatureForOpenAICompat(t *testing.T) {
 
 	pinned := 0.2
 	cfg := config.ProviderConfig{ID: "p", Kind: "openai-compat", BaseURL: srv.URL, APIKeyEnv: "FACTORY_TEST_KEY", Temperature: &pinned}
-	p, err := Build(cfg, nil)
+	p, err := Build(cfg, nil, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -103,9 +104,34 @@ func TestBuildThreadsTemperatureForOpenAICompat(t *testing.T) {
 	}
 }
 
+// TestBuildAppliesTimeout confirms the resolved provider timeout actually
+// reaches the built adapter's HTTP client — Build is the one real
+// construction site, so this is the end-to-end proof the tunable does
+// something. A zero timeout keeps the adapter's DefaultTimeout.
+func TestBuildAppliesTimeout(t *testing.T) {
+	t.Setenv("FACTORY_TEST_KEY", "sk-test")
+	cfg := config.ProviderConfig{ID: "p", Kind: "anthropic", APIKeyEnv: "FACTORY_TEST_KEY"}
+
+	p, err := Build(cfg, nil, 42*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := p.(*Anthropic).client.Timeout; got != 42*time.Second {
+		t.Errorf("built client timeout = %v, want 42s", got)
+	}
+
+	def, err := Build(cfg, nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := def.(*Anthropic).client.Timeout; got != DefaultTimeout {
+		t.Errorf("client timeout with 0 override = %v, want DefaultTimeout %v", got, DefaultTimeout)
+	}
+}
+
 func TestBuildOAuthRequiresResolver(t *testing.T) {
 	cfg := config.ProviderConfig{ID: "p", Kind: "openai-responses", AuthMode: "oauth"}
-	_, err := Build(cfg, nil)
+	_, err := Build(cfg, nil, 0)
 	if err == nil {
 		t.Fatal("expected an error when auth_mode is oauth but resolve is nil")
 	}
@@ -114,13 +140,13 @@ func TestBuildOAuthRequiresResolver(t *testing.T) {
 func TestBuildOAuthOnlySupportsOpenAIResponses(t *testing.T) {
 	resolve := func(context.Context) (string, error) { return "tok", nil }
 	cfg := config.ProviderConfig{ID: "p", Kind: "anthropic", AuthMode: "oauth"}
-	_, err := Build(cfg, resolve)
+	_, err := Build(cfg, resolve, 0)
 	if err == nil {
 		t.Fatal("expected an error: anthropic has no oauth-based adapter")
 	}
 
 	cfg2 := config.ProviderConfig{ID: "p", Kind: "openai-responses", AuthMode: "oauth"}
-	p, err := Build(cfg2, resolve)
+	p, err := Build(cfg2, resolve, 0)
 	if err != nil {
 		t.Fatalf("openai-responses with a resolver should build cleanly: %v", err)
 	}

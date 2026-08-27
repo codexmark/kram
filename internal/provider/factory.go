@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/codexmark/kram/internal/config"
 )
@@ -19,7 +20,23 @@ import (
 // connected via browser login ends up with a real, permanent API key
 // (see internal/oauthflow/anthropic.go), so it always takes the static
 // branch below like any pasted key.
-func Build(cfg config.ProviderConfig, resolve func(context.Context) (string, error)) (Provider, error) {
+// timeout is the per-request HTTP timeout to apply to the built adapter;
+// pass 0 to keep the adapter's DefaultTimeout (the gateway resolves the
+// configured value once and passes it here — see config.Tunables).
+func Build(cfg config.ProviderConfig, resolve func(context.Context) (string, error), timeout time.Duration) (Provider, error) {
+	p, err := build(cfg, resolve)
+	if err != nil {
+		return nil, err
+	}
+	if timeout > 0 {
+		if ts, ok := p.(timeoutSetter); ok {
+			ts.setTimeout(timeout)
+		}
+	}
+	return p, nil
+}
+
+func build(cfg config.ProviderConfig, resolve func(context.Context) (string, error)) (Provider, error) {
 	caps := capabilities{images: cfg.SupportsImages, tools: cfg.SupportsTools}
 
 	if cfg.AuthMode == "oauth" {

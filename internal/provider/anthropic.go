@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
-	"time"
 
 	"github.com/codexmark/kram/internal/openai"
 )
@@ -50,7 +49,7 @@ func NewAnthropic(id, baseURL, apiKey, model string, caps capabilities) *Anthrop
 		baseURL:      baseURL,
 		apiKey:       apiKey,
 		model:        model,
-		client:       &http.Client{Timeout: 120 * time.Second},
+		client:       &http.Client{Timeout: DefaultTimeout},
 	}
 }
 

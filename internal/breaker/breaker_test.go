@@ -16,17 +16,59 @@ func TestAllowClosedByDefault(t *testing.T) {
 	}
 }
 
+func TestNewRegistryWithConfigDefaultsOnZero(t *testing.T) {
+	r := NewRegistryWithConfig(Config{})
+	if r.failureThreshold != defaultFailureThreshold {
+		t.Errorf("failureThreshold = %d, want default %d", r.failureThreshold, defaultFailureThreshold)
+	}
+	if r.cooldown != defaultCooldown {
+		t.Errorf("cooldown = %v, want default %v", r.cooldown, defaultCooldown)
+	}
+}
+
+// TestNewRegistryWithConfigHonorsThreshold proves a tuned threshold actually
+// changes when the breaker trips — a threshold of 1 must trip open on the
+// first failure, where the default 3 would not.
+func TestNewRegistryWithConfigHonorsThreshold(t *testing.T) {
+	r := NewRegistryWithConfig(Config{FailureThreshold: 1})
+	r.ReportFailure("p")
+	if !r.IsOpen("p") {
+		t.Error("with FailureThreshold=1, one failure should trip the breaker open")
+	}
+}
+
+// TestNewRegistryWithConfigHonorsCooldown proves a tuned cooldown governs the
+// open→half-open transition: with a tiny cooldown, backdating openedAt past
+// it admits a half-open trial.
+func TestNewRegistryWithConfigHonorsCooldown(t *testing.T) {
+	r := NewRegistryWithConfig(Config{FailureThreshold: 1, Cooldown: time.Millisecond})
+	r.ReportFailure("p")
+	if !r.IsOpen("p") {
+		t.Fatal("setup: expected breaker open")
+	}
+	e := r.get("p")
+	e.mu.Lock()
+	e.openedAt = time.Now().Add(-time.Second) // well past the 1ms cooldown
+	e.mu.Unlock()
+	if !r.Allow("p") {
+		t.Error("expected a half-open trial to be admitted once the tuned cooldown elapsed")
+	}
+	if !r.IsHalfOpen("p") {
+		t.Error("expected half-open state after the cooldown-elapsed Allow")
+	}
+}
+
 func TestTripsOpenAtFailureThreshold(t *testing.T) {
 	r := NewRegistry()
-	for i := 0; i < failureThreshold-1; i++ {
+	for i := 0; i < defaultFailureThreshold-1; i++ {
 		r.ReportFailure("p")
 		if r.IsOpen("p") {
-			t.Fatalf("tripped open after only %d failures, want %d", i+1, failureThreshold)
+			t.Fatalf("tripped open after only %d failures, want %d", i+1, defaultFailureThreshold)
 		}
 	}
 	r.ReportFailure("p")
 	if !r.IsOpen("p") {
-		t.Error("expected breaker to be open after failureThreshold consecutive failures")
+		t.Error("expected breaker to be open after defaultFailureThreshold consecutive failures")
 	}
 	if r.Allow("p") {
 		t.Error("an open breaker within its cooldown must not allow a request")
@@ -52,7 +94,7 @@ func TestReportSuccessResetsToClosedAndClearsFailCount(t *testing.T) {
 func TestOpenTransitionsToHalfOpenAfterCooldown(t *testing.T) {
 	r := NewRegistry()
 	e := r.get("p")
-	for i := 0; i < failureThreshold; i++ {
+	for i := 0; i < defaultFailureThreshold; i++ {
 		r.ReportFailure("p")
 	}
 	if !r.IsOpen("p") {
@@ -61,7 +103,7 @@ func TestOpenTransitionsToHalfOpenAfterCooldown(t *testing.T) {
 	// Backdate openedAt instead of sleeping — cooldown is 30s, too slow
 	// for a unit test to wait out for real.
 	e.mu.Lock()
-	e.openedAt = time.Now().Add(-cooldown - time.Second)
+	e.openedAt = time.Now().Add(-defaultCooldown - time.Second)
 	e.mu.Unlock()
 
 	if !r.Allow("p") {
@@ -116,7 +158,7 @@ func TestHalfOpenFailureReopensImmediately(t *testing.T) {
 
 	r.ReportFailure("p")
 	if !r.IsOpen("p") {
-		t.Error("a half-open trial's failure should reopen the breaker immediately, not wait for failureThreshold")
+		t.Error("a half-open trial's failure should reopen the breaker immediately, not wait for defaultFailureThreshold")
 	}
 	if r.Allow("p") {
 		t.Error("freshly reopened breaker should not allow a request within cooldown")
@@ -148,10 +190,10 @@ func TestHalfOpenTrialTimeoutAdmitsFreshTrial(t *testing.T) {
 	e := r.get("p")
 	e.mu.Lock()
 	e.state = halfOpen
-	e.trialAt = time.Now().Add(-halfOpenTrialTimeout - time.Second) // simulate a trial whose outcome was never reported
+	e.trialAt = time.Now().Add(-defaultCooldown - time.Second) // simulate a trial whose outcome was never reported
 	e.mu.Unlock()
 
 	if !r.Allow("p") {
-		t.Error("expected a fresh trial to be admitted once halfOpenTrialTimeout elapses with no reported outcome")
+		t.Error("expected a fresh trial to be admitted once defaultCooldown elapses with no reported outcome")
 	}
 }

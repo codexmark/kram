@@ -53,7 +53,7 @@ func NewOpenAICompatible(id, baseURL, apiKey, model string, temperature *float64
 		apiKey:       apiKey,
 		model:        model,
 		temperature:  temperature,
-		client:       &http.Client{Timeout: 120 * time.Second},
+		client:       &http.Client{Timeout: DefaultTimeout},
 	}
 }
 

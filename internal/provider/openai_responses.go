@@ -8,7 +8,6 @@ import (
 	"io"
 	"net/http"
 	"strings"
-	"time"
 
 	"github.com/codexmark/kram/internal/openai"
 )
@@ -52,7 +51,7 @@ func NewOpenAIResponses(id, baseURL string, resolve func(context.Context) (strin
 		baseURL:      baseURL,
 		model:        model,
 		resolve:      resolve,
-		client:       &http.Client{Timeout: 120 * time.Second},
+		client:       &http.Client{Timeout: DefaultTimeout},
 	}
 }
 

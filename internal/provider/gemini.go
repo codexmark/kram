@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
-	"time"
 
 	"github.com/codexmark/kram/internal/openai"
 )
@@ -39,7 +38,7 @@ func NewGemini(id, baseURL, apiKey, model string, caps capabilities) *Gemini {
 		baseURL:      baseURL,
 		apiKey:       apiKey,
 		model:        model,
-		client:       &http.Client{Timeout: 120 * time.Second},
+		client:       &http.Client{Timeout: DefaultTimeout},
 	}
 }
 
