@@ -309,6 +309,13 @@ func (m Model) View() string {
 		return m.renderPicker()
 	}
 	if m.phase == phaseAccounts {
+		if m.wizardMode {
+			// Step 3 of the wizard reuses the accounts screen; wrap it in
+			// the shared chrome so the flow keeps one continuous identity.
+			// No static key bar — the screen carries context-sensitive
+			// hints of its own (connect, oauth, recheck, continue).
+			return m.renderWizardFrame(3, wizardTitleProviders, m.renderAccounts(), nil, wizardWideCardMaxWidth)
+		}
 		return m.renderAccounts()
 	}
 	if m.phase == phaseTools {

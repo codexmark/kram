@@ -5497,3 +5497,45 @@ deliberate: a plain letter would also type into the still-focused composer,
 whereas Ctrl+S is already intercepted, and "open the panel, drill in, press the
 same key to commit" is the muscle-memory the shortcut already trains. Esc steps
 back a level before it closes, so the two levels feel like one panel, not two.
+
+---
+
+## Wizard chrome: one designed surface instead of eight text blocks
+
+The 8-step first-run wizard was functionally complete but visually raw — every
+step rendered as an ad-hoc string at the terminal's top-left corner, almost all
+copy in the muted or near-invisible faint styles, progress reduced to a "· 4/8"
+header, option lists cramming label and description into one `%-14s` line, and
+esc meaning "cancel" on one step but "back" on others (and nothing at all on
+System Check). For the single surface every new user is guaranteed to see, that
+was the wrong place to be austere.
+
+All eight steps now render through one shared frame (`wizard_chrome.go`):
+a small KRAM wordmark in the identity gradient (foreground-only — the banner's
+background-block treatment stays the banner's), a step trail showing
+done/current/upcoming states (full names on wide terminals, dots plus
+"step N/8 · Name" below 100 columns), the step body inside a rounded-border
+card capped at a comfortable reading measure (72 columns; 100 for the
+list-heavy Providers step) and centered with lipgloss.Place whenever a real
+WindowSizeMsg has arrived (tests and pre-size renders fall back to a plain
+block), and a key bar with one ordering learned once — accent keys, muted
+labels, deliberately *not* the faint style, because the key bar is how a
+first-time user learns to drive the wizard.
+
+Step-level changes follow the same logic. The greeting leads step 1 in a
+readable color (it used to be a faint afterthought under an environment dump).
+Choice lists (Routing, Permissions, Tools) render as two-line mini-cards — the
+selected option gets an accent bar and bold label, every description gets its
+own readable line. Projects gets visible field focus. Esc now goes back on
+every step: System Check gained back-to-Tools, Ready gained back-to-Check, and
+step 1's esc (quit setup) says so in its key bar. The Providers step reuses the
+accounts screen as before, wrapped in the frame at the view.go call site with
+no static key bar — that screen's hints are context-sensitive (connect, oauth,
+recheck) and a fixed bar would lie.
+
+Found while verifying, fixed separately (#102): the daemon/agent tools-overview
+tests built real registries without isolating XDG_CONFIG_HOME, so the suite's
+outcome depended on the developer's own ~/.config/kram-gateway/permissions.json
+— the fresh Recommended preset this machine's wizard had just written flipped
+TestCompileToolsOverviewExcludesPermissionFullyDeniedTool red. The wipe-and-
+reinstall that preceded this feature is exactly what exposed it.

@@ -140,9 +140,11 @@ func accountByID(id string) *providercatalog.Account {
 func (m Model) renderAccounts() string {
 	var b strings.Builder
 	if m.wizardMode {
-		b.WriteString(renderWizardHeader(3, "Providers") + "\n\n")
-		b.WriteString(styleHint.Render(accountsWizardIntro) + "\n")
-		b.WriteString(styleHint.Render(accountsWizardFastest) + "\n\n")
+		// The wizard frame (view.go) supplies the header/trail chrome; the
+		// intro copy stays here, in a readable color rather than faint —
+		// it's the instruction a first-time user actually needs.
+		b.WriteString(styleMeta.Render(accountsWizardIntro) + "\n")
+		b.WriteString(styleMeta.Render(accountsWizardFastest) + "\n\n")
 	} else {
 		b.WriteString(styleBody.Render(accountsTitle) + "\n\n")
 	}
