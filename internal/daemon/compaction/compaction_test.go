@@ -25,6 +25,28 @@ func TestEstimateTokensCountsContentAndToolCallChars(t *testing.T) {
 	}
 }
 
+// TestEstimateTokensCountsImages is the regression test for the zero-cost
+// image bug: images are resent every turn and never pruned, so each must add
+// a real per-image cost to the budget, not nothing.
+func TestEstimateTokensCountsImages(t *testing.T) {
+	base := []store.Message{{Content: strings.Repeat("a", 40)}}
+	withImages := []store.Message{{
+		Content: strings.Repeat("a", 40),
+		Images:  []string{"data:image/png;base64,AAAA", "data:image/png;base64,BBBB"},
+	}}
+	baseTokens := EstimateTokens(base)
+	imgTokens := EstimateTokens(withImages)
+	if want := baseTokens + 2*imageTokenEstimate; imgTokens != want {
+		t.Errorf("EstimateTokens with 2 images = %d, want %d (base %d + 2×%d)", imgTokens, want, baseTokens, imageTokenEstimate)
+	}
+	// The base64 length must NOT be what's counted — a tiny data URL and a
+	// huge one cost the same fixed per-image estimate.
+	huge := []store.Message{{Images: []string{"data:image/png;base64," + strings.Repeat("Z", 100000)}}}
+	if got := EstimateTokens(huge); got != imageTokenEstimate {
+		t.Errorf("EstimateTokens of one image = %d, want the flat %d (not len(base64))", got, imageTokenEstimate)
+	}
+}
+
 func TestEffectiveHistoryReturnsAllWhenNoMarker(t *testing.T) {
 	all := []store.Message{{Role: "user", Content: "hi"}, {Role: "assistant", Content: "hello"}}
 	got := EffectiveHistory(all)

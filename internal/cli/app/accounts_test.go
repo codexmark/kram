@@ -149,7 +149,7 @@ func TestDeleteKeyRemovesCustomProvider(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cp, err := customStore.Add("lab", "http://192.168.0.4:20128/v1", "omni.codexmark", true)
+	cp, err := customStore.Add("lab", "http://192.168.0.4:20128/v1", "omni.codexmark", true, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -190,7 +190,7 @@ func TestDeleteKeyOnAddRowIsANoOp(t *testing.T) {
 	isolateAccountsTest(t)
 	credStore, _ := credentials.Load()
 	customStore, _ := customprovider.Load()
-	cp, _ := customStore.Add("lab", "http://x", "m", true)
+	cp, _ := customStore.Add("lab", "http://x", "m", true, 0)
 	_ = credStore.Set(cp.EnvVar, "sk-lab")
 
 	staticCount := len(providercatalog.Accounts)
@@ -240,7 +240,7 @@ func TestDeleteKeyOnCustomProviderWorksDuringWizardSetup(t *testing.T) {
 	isolateAccountsTest(t)
 	credStore, _ := credentials.Load()
 	customStore, _ := customprovider.Load()
-	cp, _ := customStore.Add("lab", "http://x", "m", true)
+	cp, _ := customStore.Add("lab", "http://x", "m", true, 0)
 	_ = credStore.Set(cp.EnvVar, "sk-lab")
 
 	staticCount := len(providercatalog.Accounts)

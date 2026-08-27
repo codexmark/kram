@@ -48,18 +48,34 @@ const (
 	// pruneContentThresholdChars is how large an old tool result has to be
 	// before pruning replaces it with a placeholder.
 	pruneContentThresholdChars = 2000
+
+	// imageTokenEstimate is the flat per-image cost added for every attached
+	// image. An image is a base64 data URL in store.Message.Images, resent to
+	// the provider on every turn as part of history and never pruned, so it
+	// must not cost the budget zero (the bug this fixes). The real cost is a
+	// provider- and resolution-dependent tile count — order of hundreds to a
+	// couple thousand tokens (Anthropic ~1600 for a large image, OpenAI
+	// ~765–1105, Gemini ~258) — that we can't compute here without the pixel
+	// dimensions or a real tokenizer. This single figure is deliberately on
+	// the higher side: overestimating makes compaction fire a little early,
+	// far safer than a session quietly overflowing the real window because a
+	// handful of images counted as nothing. NOT len(base64), which would
+	// wildly overcount the actual token cost.
+	imageTokenEstimate = 1200
 )
 
 // EstimateTokens is a rough size estimate for a slice of messages.
 func EstimateTokens(msgs []store.Message) int {
 	chars := 0
+	images := 0
 	for _, m := range msgs {
 		chars += len(m.Content)
 		for _, tc := range m.ToolCalls {
 			chars += len(tc.Function.Name) + len(tc.Function.Arguments)
 		}
+		images += len(m.Images)
 	}
-	return chars / charsPerTokenEstimate
+	return chars/charsPerTokenEstimate + images*imageTokenEstimate
 }
 
 // EffectiveHistory returns what the model should actually see: everything

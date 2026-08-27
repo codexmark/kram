@@ -71,6 +71,12 @@ type ProviderConfig struct {
 	// tool/function definitions. Kram's agent loop skips providers that
 	// don't when a request requires tool calling.
 	SupportsTools bool `yaml:"supports_tools,omitempty"`
+	// ContextWindow is the model's total token window, used to size the
+	// compaction budget (see Config.ComboContextWindow). 0 means "unknown"
+	// and is ignored when taking a combo's minimum window. Populated from
+	// the provider catalog / custom-provider registration, and overridable
+	// by editing this field in config.yaml.
+	ContextWindow int `yaml:"context_window,omitempty"`
 	// QualityHint is an optional, explicitly user-configured 0..1 signal
 	// feeding the "quality" scoring factor (see internal/router) —
 	// deliberately never inferred or fabricated by Kram itself, since
@@ -207,6 +213,36 @@ func Save(cfg *Config, path string) error {
 		return fmt.Errorf("encoding config: %w", err)
 	}
 	return localstore.AtomicWrite(path, append([]byte(generatedHeader), data...), 0o644)
+}
+
+// ComboContextWindow returns the effective context-window token budget for
+// the named combo: the minimum ContextWindow across its providers, ignoring
+// providers whose window is unknown (0). Returns 0 if the combo is unknown
+// or none of its providers declare a window — the caller then falls back to
+// the compiled-in default. The minimum is the right aggregate: a fallback
+// chain can route to any provider in the combo, so the budget must fit the
+// smallest window, or a fallback to that provider would overflow it.
+func (c *Config) ComboContextWindow(comboID string) int {
+	windows := make(map[string]int, len(c.Providers))
+	for _, p := range c.Providers {
+		windows[p.ID] = p.ContextWindow
+	}
+	min := 0
+	for _, combo := range c.Combos {
+		if combo.ID != comboID {
+			continue
+		}
+		for _, pid := range combo.Providers {
+			w := windows[pid]
+			if w <= 0 {
+				continue
+			}
+			if min == 0 || w < min {
+				min = w
+			}
+		}
+	}
+	return min
 }
 
 func (c *Config) validate() error {

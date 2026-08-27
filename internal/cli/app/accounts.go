@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"strconv"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/textinput"
@@ -273,7 +274,7 @@ func (m Model) renderAccounts() string {
 
 // customFormLabels are the fields of the "add custom provider" form, in
 // cursor order.
-var customFormLabels = []string{customFormLabelName, customFormLabelURL, customFormLabelAPIKey, customFormLabelModel, customFormLabelTools}
+var customFormLabels = []string{customFormLabelName, customFormLabelURL, customFormLabelAPIKey, customFormLabelModel, customFormLabelTools, customFormLabelContextWindow}
 
 // customFormModelListMaxRows bounds how many fetched model options render
 // at once — a LAN router can advertise hundreds (real example seen this
@@ -610,7 +611,7 @@ func (m Model) currentCredentialTarget() (envVar, label string, ok bool) {
 	return "", "", false
 }
 
-// newCustomProviderFormInputs builds the four fields of the "add custom
+// newCustomProviderFormInputs builds the fields of the "add custom
 // provider" form, in the same order as customFormLabels.
 func newCustomProviderFormInputs() []textinput.Model {
 	name := textinput.New()
@@ -632,14 +633,37 @@ func newCustomProviderFormInputs() []textinput.Model {
 
 	// SupportsTools defaults to true (most OpenAI-compat local servers —
 	// llama.cpp, LM Studio, vLLM, Ollama — do support tool calling), so
-	// this field starts pre-filled "s" (sim) rather than empty — a user
-	// who wants the common case just tabs past it.
+	// this field starts pre-filled "y" rather than empty — a user who wants
+	// the common case just tabs past it.
 	tools := textinput.New()
 	tools.SetValue(customFormToolsDefault)
 	tools.CharLimit = 3
 	tools.Prompt = "› "
 
-	return []textinput.Model{name, url, key, model, tools}
+	// Context window is optional; blank leaves it unknown (0), which keeps
+	// the model out of the combo's min-window computation. Sizing it right
+	// matters most for a small local model — see customprovider.Provider.
+	contextWindow := textinput.New()
+	contextWindow.Placeholder = customFormContextWindowPlaceholder
+	contextWindow.CharLimit = 12
+	contextWindow.Prompt = "› "
+
+	return []textinput.Model{name, url, key, model, tools, contextWindow}
+}
+
+// parseContextWindowInput reads the custom-provider form's optional context-
+// window field: a blank or unparseable value is 0 ("unknown"), a negative is
+// clamped to 0, so a typo never produces a nonsense budget.
+func parseContextWindowInput(s string) int {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0
+	}
+	n, err := strconv.Atoi(s)
+	if err != nil || n < 0 {
+		return 0
+	}
+	return n
 }
 
 // parseSupportsToolsInput reads the custom-provider form's "aceita tool
@@ -727,12 +751,13 @@ func (m Model) handleCustomProviderFormKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) 
 		key := strings.TrimSpace(m.customFormInputs[2].Value())
 		model := strings.TrimSpace(m.customFormInputs[3].Value())
 		supportsTools := parseSupportsToolsInput(m.customFormInputs[4].Value())
+		contextWindow := parseContextWindowInput(m.customFormInputs[5].Value())
 
 		if m.customStore == nil {
 			m.accountsStatus = customFormStatusNoStore
 			return m, nil
 		}
-		cp, err := m.customStore.Add(name, url, model, supportsTools)
+		cp, err := m.customStore.Add(name, url, model, supportsTools, contextWindow)
 		if err != nil {
 			m.accountsStatus = err.Error()
 			return m, nil

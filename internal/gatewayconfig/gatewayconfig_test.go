@@ -74,7 +74,7 @@ func TestDetectGatewayConfigErrorsWithoutProviderAndIncludesCustom(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	provider, err := store.Add("local", "http://127.0.0.1:9999/v1", "local-model", true)
+	provider, err := store.Add("local", "http://127.0.0.1:9999/v1", "local-model", true, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,7 +128,7 @@ func TestReconcileLiveProvidersAddsNewCustomProvider(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cp, err := customStore.Add("lab", "http://127.0.0.1:9999/v1", "some-model", true)
+	cp, err := customStore.Add("lab", "http://127.0.0.1:9999/v1", "some-model", true, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -238,6 +238,19 @@ func TestCustomProviderConfigSkipsEmptyModel(t *testing.T) {
 	}
 }
 
+// TestCustomProviderConfigPropagatesContextWindow confirms a custom
+// provider's declared window reaches the built config.ProviderConfig, so a
+// local model's real window can feed the compaction budget.
+func TestCustomProviderConfigPropagatesContextWindow(t *testing.T) {
+	pc, ok := customProviderConfig(customprovider.Provider{ID: "lab", Name: "lab", BaseURL: "http://x", Model: "qwen", ContextWindow: 32768})
+	if !ok {
+		t.Fatal("expected a valid custom provider to build")
+	}
+	if pc.ContextWindow != 32768 {
+		t.Errorf("ContextWindow = %d, want 32768", pc.ContextWindow)
+	}
+}
+
 // TestReconcileLiveProvidersSkipsCustomProviderWithNoModel confirms the
 // same defense-in-depth skip applies through the reconciliation path,
 // not just the fresh-build path — with a warning, not a fatal error.
@@ -250,7 +263,7 @@ func TestReconcileLiveProvidersSkipsCustomProviderWithNoModel(t *testing.T) {
 	// Add a valid entry, then hand-corrupt it to simulate a pre-validation
 	// legacy record with no model — Store.Add itself no longer allows
 	// creating one.
-	if _, err := customStore.Add("legacy", "http://x", "placeholder", true); err != nil {
+	if _, err := customStore.Add("legacy", "http://x", "placeholder", true, 0); err != nil {
 		t.Fatal(err)
 	}
 	entries := customStore.All()

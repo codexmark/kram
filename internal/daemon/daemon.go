@@ -79,6 +79,13 @@ type Config struct {
 	// longest fallback chain (config.Tunables.ResolvedGatewayClientTimeout),
 	// so the client never cuts off a legitimate multi-provider round.
 	GatewayClientTimeout time.Duration
+	// MaxContextTokens is the model context-window budget that governs when
+	// the agent loop compacts history. Zero falls back to
+	// compaction.DefaultMaxTokens (via agent.Config). cmd/kram derives it
+	// from the active combo's smallest provider context window
+	// (config.Config.ComboContextWindow), or the --max-context-tokens flag
+	// overrides both.
+	MaxContextTokens int
 }
 
 // Run opens the store, builds the agent loop, and serves the daemon's
@@ -153,7 +160,8 @@ func Run(ctx context.Context, cfg Config, logger *slog.Logger) error {
 		// See this file's own Config.PreferStreaming doc comment for why
 		// this is caller-controlled rather than hardcoded, and
 		// agent.Config.PreferStreaming's for the tradeoff it accepts.
-		PreferStreaming: cfg.PreferStreaming,
+		PreferStreaming:  cfg.PreferStreaming,
+		MaxContextTokens: cfg.MaxContextTokens,
 	})
 	if err != nil {
 		return fmt.Errorf("building agent service: %w", err)

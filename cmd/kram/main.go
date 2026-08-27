@@ -92,6 +92,7 @@ func runMain(args []string, stdout, stderr io.Writer) error {
 	stream := fs.Bool("stream", true, "prefer the streaming gateway path (see daemon.Config.PreferStreaming's doc comment for the tradeoff); disable for a slow local model whose server sends nothing during prompt prefill, which can trip the streaming peek's idle timeout and fail every turn")
 	prompt := fs.String("p", "", "headless mode: run this single prompt to completion, print the answer to stdout, and exit — no TUI (for CI, scripting, evals)")
 	jsonOut := fs.Bool("json", false, "with -p, emit one JSON event object per line on stdout instead of plain text")
+	maxContextTokens := fs.Int("max-context-tokens", 0, "override the model context-window budget that triggers history compaction (0 = derive from the active combo's smallest provider window, falling back to a conservative built-in default)")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
@@ -112,7 +113,7 @@ func runMain(args []string, stdout, stderr io.Writer) error {
 		workspace: *workspace, workspaceExplicit: workspaceExplicit, gatewayConfigPath: *gatewayConfigPath, combo: *combo,
 		sessionID: *sessionID, title: *title, maxTurns: *maxTurns,
 		gatewayPort: *gatewayPort, daemonPort: *daemonPort, strategy: *strategy, setup: *setup, stream: *stream,
-		prompt: *prompt, jsonOut: *jsonOut, stdout: stdout,
+		prompt: *prompt, jsonOut: *jsonOut, stdout: stdout, maxContextTokens: *maxContextTokens,
 	})
 }
 
@@ -135,6 +136,9 @@ type runOptions struct {
 	jsonOut bool
 	stdout  io.Writer
 	stream  bool
+	// maxContextTokens overrides the compaction budget when > 0; otherwise
+	// it's derived from the active combo's smallest provider context window.
+	maxContextTokens int
 }
 
 func run(opts runOptions) error {
@@ -302,6 +306,11 @@ func run(opts runOptions) error {
 		// fallback round is never cut off client-side (see
 		// config.Tunables.ResolvedGatewayClientTimeout).
 		GatewayClientTimeout: gwCfg.Tunables.ResolvedGatewayClientTimeout(gwCfg.MaxComboLength()),
+		// Size the compaction budget to the active combo's smallest provider
+		// context window (a fallback can route to any of them), unless the
+		// user pinned an explicit --max-context-tokens. 0 either way falls
+		// back to compaction.DefaultMaxTokens inside the agent.
+		MaxContextTokens: resolveMaxContextTokens(opts.maxContextTokens, gwCfg, opts.combo),
 	}
 	daemonRun := kramDaemonRun
 	go func() { errCh <- daemonRun(ctx, daemonCfg, logger) }()
@@ -506,6 +515,25 @@ func loadConfigIfExists(path string) (cfg *config.Config, ok bool, err error) {
 		return nil, false, fmt.Errorf("loading gateway config %s: %w", path, err)
 	}
 	return cfg, true, nil
+}
+
+// resolveMaxContextTokens picks the compaction budget for the daemon: an
+// explicit --max-context-tokens override wins; otherwise the active combo's
+// smallest provider context window (a fallback chain can route to any of
+// them, so the budget must fit the smallest), trying the requested combo
+// first and the config's default_combo as a fallback. Returns 0 when nothing
+// is known, which the agent turns into compaction.DefaultMaxTokens.
+func resolveMaxContextTokens(override int, cfg *config.Config, combo string) int {
+	if override > 0 {
+		return override
+	}
+	if w := cfg.ComboContextWindow(combo); w > 0 {
+		return w
+	}
+	if cfg.DefaultCombo != "" && cfg.DefaultCombo != combo {
+		return cfg.ComboContextWindow(cfg.DefaultCombo)
+	}
+	return 0
 }
 
 func finalizeFileConfig(cfg *config.Config, port int) (*config.Config, error) {
