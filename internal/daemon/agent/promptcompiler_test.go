@@ -136,6 +136,7 @@ func TestCompileToolsOverviewNilRegistryReturnsEmptyPart(t *testing.T) {
 // entirely, and a tool with no curated metadata still appears via the
 // Description()-derived fallback.
 func TestCompileToolsOverviewListsEnabledToolsAndSkipsDisabled(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir()) // isolate from any real global permissions.json
 	reg := tools.NewRegistry(t.TempDir(), nil, map[string]bool{"bash": true})
 
 	p := compileToolsOverview(reg, nil)
@@ -171,6 +172,12 @@ func TestCompileToolsOverviewListsEnabledToolsAndSkipsDisabled(t *testing.T) {
 // the one difference from TestCompileToolsOverviewListsEnabledToolsAnd
 // SkipsDisabled above and the reason that test alone didn't catch this.
 func TestCompileToolsOverviewExcludesPermissionFullyDeniedTool(t *testing.T) {
+	// Isolate from any real global permissions.json: a machine whose wizard
+	// wrote the Recommended preset has a global "delete_file: ask" rule,
+	// which merges with this test's workspace deny and turns "fully
+	// denied" into a partial deny — flipping the test's outcome based on
+	// the developer's own config.
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	workspace := t.TempDir()
 	kramDir := filepath.Join(workspace, ".kram")
 	if err := os.MkdirAll(kramDir, 0o755); err != nil {

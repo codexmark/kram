@@ -20,6 +20,7 @@ import (
 
 func coverageService(t *testing.T) *Service {
 	t.Helper()
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir()) // isolate the registry's permission policy from the real machine
 	workspace := t.TempDir()
 	st, err := store.Open(filepath.Join(workspace, "agent.db"))
 	if err != nil {
