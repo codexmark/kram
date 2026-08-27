@@ -56,7 +56,11 @@ func backoffWithJitter(round int, minRetryAfter time.Duration) time.Duration {
 // that tripped open mid-round-1 or came off cooldown is automatically
 // reflected in round 2's ranking with zero round-retry-specific gateway
 // code.
-func (s *Service) callModelWithRetry(ctx context.Context, model string, messages []openai.ChatMessage, toolDefs []openai.Tool, onEvent EventFunc) (gatewayclient.Result, error) {
+// sessionID and sentEstimate feed the token-estimate calibrator: on the
+// first successful round, the calibrator learns from this call's own real
+// prompt_tokens (result.Usage before it's summed with any failed rounds'
+// usage below — summing would double-count the prompt across attempts).
+func (s *Service) callModelWithRetry(ctx context.Context, sessionID string, sentEstimate int, model string, messages []openai.ChatMessage, toolDefs []openai.Tool, onEvent EventFunc) (gatewayclient.Result, error) {
 	var lastErr error
 	var failedUsage openai.Usage
 	for round := 0; round < s.cfg.MaxGatewayRounds; round++ {
@@ -79,6 +83,9 @@ func (s *Service) callModelWithRetry(ctx context.Context, model string, messages
 
 		result, err := s.callModel(ctx, model, messages, toolDefs, onEvent)
 		if err == nil {
+			// Calibrate from this successful call's own prompt_tokens, before
+			// folding in any failed rounds' usage below.
+			s.calibrator.observe(sessionID, sentEstimate, result.Usage.PromptTokens)
 			result.Usage = openai.AddUsage(failedUsage, result.Usage)
 			return result, nil
 		}
