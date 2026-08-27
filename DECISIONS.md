@@ -5295,3 +5295,65 @@ mislabeled, `~` expansion, MIME by sniff) and the full composer flow (stage
 without sending, bad path errors without staging, send attaches and clears,
 image-only send). README's composer section documents the command (and its
 stale pt-BR activity labels from #74 were corrected in the same pass).
+
+---
+
+## A unified diff before approving an edit (post-audit #67)
+
+The central trust gap of a coding agent: when policy marks an `edit_file`/
+`write_file` as `Ask`, the prompt showed only `tool: path` — the user
+approved a change **without ever seeing what would change**, and a blind
+"always" persisted a per-path grant. That friction pushes people to
+autonomous mode (approve everything), the worst security outcome. Every
+2026 peer (Claude Code, Codex, opencode) shows a unified diff first. This
+adds one.
+
+**Diff computed at the tool layer, before applying.** A new
+`internal/daemon/tools.diffForToolCall(workspace, name, args)` produces the
+would-be-new content *in memory* and returns a git-style unified diff,
+mirroring each tool's own apply logic exactly so the preview matches what
+the subsequent `Execute` does: for `edit_file`, the same
+`strings.Count`/`Replace`/`ReplaceAll` and the same count==0 /
+count>1&&!replace_all "no clean apply → no preview" cases; for `write_file`,
+the current content (or `/dev/null` for a created file) vs the new. It reuses
+the tools' own `resolvePath` (so the preview targets the same file the apply
+will), and returns `""` — falling back to the old path-only prompt — for a
+non-diffable tool, a workspace escape, a binary or >256 KiB file, or no net
+change. Diffing is via `go-udiff` (gopls' Myers diff, already transitively
+vendored — promoted to a direct dep, zero new transitive deps). The
+adversarial review's diff-fidelity pass — the property that matters most,
+since a preview that disagrees with the apply is worse than none — found
+nothing.
+
+**Threaded through as data, not re-derived.** `Approver.Approve` gained a
+`diff` param; it rides `agent.Event.ApprovalDiff` → the SSE `"diff"` field
+→ `daemonclient.StreamEvent.Diff` → the TUI. The decision comes back on the
+same `{approval_id, decision}` POST, unchanged. Headless `--json` emits the
+diff for free (the whole `StreamEvent` is encoded). Subagents (nil event
+sink) still deny immediately — they never surface an approval to compute a
+diff for that matters.
+
+**TUI: a scrollable colored diff.** `renderApproval` shows the diff in a
+`bubbles/viewport` sized to the diff and capped at 16 rows (so a large edit
+scrolls in place — pgup/pgdn/home/end — instead of pushing the
+once/always/deny buttons off screen; a small edit reserves only the rows it
+needs). `colorizeUnifiedDiff` classifies each line by *position*, not prefix
+width: only the `---`/`+++` file headers before the first `@@` are headers,
+and inside a hunk a line is add/del by its single leading character — so a
+deleted `--i;` (emitted as `---i;`) colors red, not as a header (the
+review's one substantive TUI finding, fixed with a `classifyDiffLine`
+helper that's unit-tested on exactly that case).
+
+**Grant semantics: per-path, made honest.** "always" still persists a
+per-path grant (`grants.go` unchanged — its exact-subject design is
+deliberate, and per-content would re-ask on every whitespace change). The
+fix is the copy: for a file tool, the "always" option now reads "allow all
+future edits to <path>", so the user knows they're whitelisting the file,
+not just this diff. The decision string sent on Enter stays the literal
+`"always"` — only the displayed label is decorated.
+
+Tests cover the fidelity of `diffForToolCall` against each apply path
+(edit/overwrite/create/not-found/ambiguous/replace_all/binary/escape/
+identical), the SSE round-trip of the diff field, the line classifier
+(including the `--`/`++` trap), viewport sizing (small vs capped), the
+"always" copy, and that a diffless approval renders exactly as before.

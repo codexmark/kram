@@ -19,7 +19,10 @@ const (
 // sign-off first." Conflating the two would make a policy-driven pause look
 // to the model (and the user) like the agent being unsure, which it isn't.
 type Approver interface {
-	Approve(ctx context.Context, toolName, subject string) (ApprovalDecision, error)
+	// diff is a unified diff previewing an edit_file/write_file change so
+	// the user can review it before approving; "" for tools with no
+	// reviewable change (see diffForToolCall).
+	Approve(ctx context.Context, toolName, subject, diff string) (ApprovalDecision, error)
 }
 
 type approverContextKey struct{}

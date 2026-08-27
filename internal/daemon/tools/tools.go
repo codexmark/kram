@@ -294,7 +294,7 @@ func (r *Registry) Execute(ctx context.Context, name string, args json.RawMessag
 		if approver == nil {
 			return fmt.Sprintf("error: %q requires approval, but approval isn't available in this context", name), nil
 		}
-		decision, err := approver.Approve(ctx, name, subject)
+		decision, err := approver.Approve(ctx, name, subject, diffForToolCall(r.workspace, name, args))
 		if err != nil {
 			return fmt.Sprintf("error: approval failed: %v", err), nil
 		}

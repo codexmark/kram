@@ -219,6 +219,47 @@ func writeSSE(w http.ResponseWriter, lines ...string) {
 	}
 }
 
+// TestSendMessageStreamParsesApprovalDiff confirms the approval frame's diff
+// field survives the SSE round trip into StreamEvent.Diff, so the TUI can
+// render it (issue #67).
+func TestSendMessageStreamParsesApprovalDiff(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		writeSSE(w,
+			`{"type":"approval","approval_id":"a1","tool":"edit_file","subject":"f.txt","diff":"--- a/f.txt\n+++ b/f.txt\n@@ -1 +1 @@\n-old\n+new\n","options":["once","always","deny"]}`,
+			`{"type":"done","message":{"id":1,"content":""}}`)
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "")
+	stream, err := c.SendMessageStream(context.Background(), "ses_1", "hi", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stream.Close()
+
+	var approval StreamEvent
+	for {
+		evt, done, err := stream.Next()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if evt.Type == "approval" {
+			approval = evt
+		}
+		if done {
+			break
+		}
+	}
+	if approval.Type != "approval" || approval.Tool != "edit_file" {
+		t.Fatalf("approval event not parsed: %+v", approval)
+	}
+	if !strings.Contains(approval.Diff, "-old") || !strings.Contains(approval.Diff, "+new") {
+		t.Errorf("approval Diff not parsed from SSE: %q", approval.Diff)
+	}
+}
+
 func TestSendMessageStreamParsesDeltasAndDoneEvent(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/sessions/ses_1/messages" {

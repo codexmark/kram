@@ -26,4 +26,7 @@ const (
 	// approval.go / ask.go — footer hints for the option pickers.
 	approvalHint    = "↑↓ choose · enter confirm"
 	askQuestionHint = "↑↓ choose · enter answer"
+	// approvalDiffScrollHint is appended to approvalHint when the approval
+	// carries a diff, so the scroll keys are discoverable.
+	approvalDiffScrollHint = " · pgup/pgdn/home/end scroll diff"
 )

@@ -362,7 +362,7 @@ type sessionApprover struct {
 	onEvent EventFunc
 }
 
-func (a *sessionApprover) Approve(ctx context.Context, toolName, subject string) (tools.ApprovalDecision, error) {
+func (a *sessionApprover) Approve(ctx context.Context, toolName, subject, diff string) (tools.ApprovalDecision, error) {
 	// No live event sink means no human is watching this run's stream —
 	// the subagent case (RunTask passes onEvent: nil). Emitting an
 	// approval prompt nobody can see and then blocking on a channel
@@ -386,7 +386,7 @@ func (a *sessionApprover) Approve(ctx context.Context, toolName, subject string)
 		a.svc.pendingApprovalsMu.Unlock()
 	}()
 
-	emit(a.onEvent, Event{Kind: EventApproval, ApprovalID: id, ApprovalTool: toolName, ApprovalSubject: subject})
+	emit(a.onEvent, Event{Kind: EventApproval, ApprovalID: id, ApprovalTool: toolName, ApprovalSubject: subject, ApprovalDiff: diff})
 
 	select {
 	case dec := <-ch:
