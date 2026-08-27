@@ -37,26 +37,26 @@ import (
 	"github.com/codexmark/kram/internal/toolsettings"
 )
 
-func renderWizardHeader(step int, title string) string {
-	return styleMeta.Render(fmt.Sprintf("KRAM SETUP · %d/8 %s", step, title))
-}
-
-// ---- Step 1: Environment ----
+// ---- Step 1: Welcome (environment overview) ----
 
 func (m Model) renderWizardEnvironment() string {
 	var b strings.Builder
-	b.WriteString(renderWizardHeader(1, "Environment") + "\n\n")
-	b.WriteString(fmt.Sprintf("%-16s %s\n", wizardEnvSystemLabel, styleBody.Render(runtime.GOOS)))
-	b.WriteString(fmt.Sprintf("%-16s %s\n", wizardEnvCurrentDirLabel, styleBody.Render(m.wizardCWD)))
-	git := styleBadgeIdle.Render(wizardEnvGitNotFound)
-	if m.wizardHasGit {
-		git = styleBadgeOK.Render(wizardEnvGitFound)
+	// The greeting leads, in a readable color — it's the most human moment
+	// of onboarding and used to be a faint afterthought under an env dump.
+	b.WriteString(styleBody.Render(wizardEnvWelcome) + "\n\n")
+	row := func(label, value string) {
+		b.WriteString(styleMeta.Render(fmt.Sprintf("%-12s", label)) + styleBody.Render(value) + "\n")
 	}
-	b.WriteString(fmt.Sprintf("%-16s %s\n", "Git", git))
-	b.WriteString(fmt.Sprintf("%-16s %s\n\n", "Home", styleBody.Render(m.wizardHomeDir)))
-	b.WriteString(styleHint.Render(wizardEnvWelcome) + "\n\n")
-	b.WriteString(styleHint.Render(wizardEnvFooter))
-	return b.String()
+	row(wizardEnvSystemLabel, runtime.GOOS)
+	row(wizardEnvCurrentDirLabel, m.wizardCWD)
+	git := styleBadgeIdle.Render("● "+wizardEnvGitNotFound) + "  " + styleWizardDim.Render(wizardEnvGitOptionalNote)
+	if m.wizardHasGit {
+		git = styleBadgeOK.Render("● " + wizardEnvGitFound)
+	}
+	b.WriteString(styleMeta.Render(fmt.Sprintf("%-12s", "Git")) + git + "\n")
+	row("Home", m.wizardHomeDir)
+	return m.renderWizardFrame(1, wizardTitleWelcome, b.String(),
+		[]wizardKey{{"enter", "start"}, {"esc", "quit setup"}}, 0)
 }
 
 func (m Model) handleWizardEnvironmentKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -82,16 +82,22 @@ func (m Model) handleWizardEnvironmentKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m Model) renderWizardProjects() string {
 	var b strings.Builder
-	b.WriteString(renderWizardHeader(2, "Projects") + "\n\n")
-	b.WriteString(styleMeta.Render("Projects Root") + styleHint.Render(wizardProjectsRootHint) + "\n")
-	b.WriteString(m.wizardProjectsRootInput.View() + "\n\n")
-	b.WriteString(styleMeta.Render("Workspace") + styleHint.Render(wizardProjectsWorkspaceHint) + "\n")
-	b.WriteString(m.wizardWorkspaceInput.View() + "\n\n")
-	if m.wizardWorkspaceErr != nil {
-		b.WriteString(styleErrBadge.Render(wizardErrPrefix+m.wizardWorkspaceErr.Error()) + "\n\n")
+	field := func(label, hint, view string, focused bool) {
+		rendered := styleMeta.Render(label)
+		if focused {
+			rendered = styleBadgeAccent.Bold(true).Render(label)
+		}
+		b.WriteString(rendered + "\n")
+		b.WriteString(styleWizardDim.Render(hint) + "\n")
+		b.WriteString(view + "\n\n")
 	}
-	b.WriteString(styleHint.Render(wizardProjectsFooter))
-	return b.String()
+	field("Projects root", wizardProjectsRootHint, m.wizardProjectsRootInput.View(), m.wizardProjectsField == 0)
+	field("Workspace", wizardProjectsWorkspaceHint, m.wizardWorkspaceInput.View(), m.wizardProjectsField == 1)
+	if m.wizardWorkspaceErr != nil {
+		b.WriteString(styleErrBadge.Render(wizardErrPrefix+m.wizardWorkspaceErr.Error()) + "\n")
+	}
+	return m.renderWizardFrame(2, wizardTitleProjects, b.String(),
+		[]wizardKey{{"tab", "switch field"}, {"enter", "continue"}, {"esc", "back"}}, 0)
 }
 
 func (m Model) handleWizardProjectsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -159,27 +165,22 @@ var wizardRoutingOptions = []wizardRoutingOption{
 }
 
 func (m Model) renderWizardRouting() string {
-	var b strings.Builder
-	b.WriteString(renderWizardHeader(4, "Routing") + "\n\n")
+	labels := make([]string, len(wizardRoutingOptions))
+	descs := make([]string, len(wizardRoutingOptions))
 	for i, opt := range wizardRoutingOptions {
-		line := fmt.Sprintf("%-22s %s", opt.label, styleHint.Render(opt.desc))
-		if i == m.wizardRoutingCursor {
-			b.WriteString(styleYouTag.Render("▸ ") + styleBody.Render(line) + "\n")
-		} else {
-			b.WriteString("  " + line + "\n")
-		}
+		labels[i], descs[i] = opt.label, opt.desc
 	}
-	b.WriteString("\n")
+	var b strings.Builder
+	b.WriteString(renderWizardOptions(labels, descs, m.wizardRoutingCursor) + "\n")
 	if wizardRoutingOptions[m.wizardRoutingCursor].strategy == "" {
 		resolved := "SMART"
 		if m.wizardConfiguredProviderCount() <= 1 {
 			resolved = "SINGLE PROVIDER"
 		}
-		b.WriteString(styleHint.Render("Auto currently resolves to: "+resolved) + "\n\n")
+		b.WriteString(styleMeta.Render(wizardRoutingAutoPreviewPrefix) + styleBadgeOK.Render(resolved) + "\n\n")
 	}
-	b.WriteString(styleHint.Render(wizardRoutingHint) + "\n\n")
-	b.WriteString(styleHint.Render(wizardFooterChooseContinueBack))
-	return b.String()
+	b.WriteString(styleWizardDim.Render(wizardRoutingHint))
+	return m.renderWizardFrame(4, wizardTitleRouting, b.String(), wizardKeysChoose, 0)
 }
 
 func (m Model) handleWizardRoutingKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -243,18 +244,13 @@ var wizardPermOptions = []wizardPermOption{
 }
 
 func (m Model) renderWizardPermissions() string {
-	var b strings.Builder
-	b.WriteString(renderWizardHeader(5, "Permissions") + "\n\n")
+	labels := make([]string, len(wizardPermOptions))
+	descs := make([]string, len(wizardPermOptions))
 	for i, opt := range wizardPermOptions {
-		line := fmt.Sprintf("%-14s %s", opt.label, styleHint.Render(opt.desc))
-		if i == m.wizardPermCursor {
-			b.WriteString(styleYouTag.Render("▸ ") + styleBody.Render(line) + "\n")
-		} else {
-			b.WriteString("  " + line + "\n")
-		}
+		labels[i], descs[i] = opt.label, opt.desc
 	}
-	b.WriteString("\n" + styleHint.Render(wizardFooterChooseContinueBack))
-	return b.String()
+	body := renderWizardOptions(labels, descs, m.wizardPermCursor)
+	return m.renderWizardFrame(5, wizardTitlePermissions, body, wizardKeysChoose, 0)
 }
 
 func (m Model) handleWizardPermissionsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -439,27 +435,23 @@ var wizardMinimalSafeTools = map[string]bool{
 }
 
 func (m Model) renderWizardToolsPreset() string {
-	var b strings.Builder
-	b.WriteString(renderWizardHeader(6, "Tools & Skills") + "\n\n")
 	if m.toolsLoading {
-		b.WriteString(styleMeta.Render(m.spin.View()+wizardToolsLoading) + "\n\n")
-		return b.String()
+		return m.renderWizardFrame(6, wizardTitleTools,
+			styleMeta.Render(m.spin.View()+wizardToolsLoading), nil, 0)
 	}
-	items := m.toolToggleItems()
-	b.WriteString(styleHint.Render(fmt.Sprintf(wizardToolsRegisteredFmt, len(items))) + "\n\n")
+	labels := make([]string, len(wizardToolsPresetOptions))
+	descs := make([]string, len(wizardToolsPresetOptions))
 	for i, opt := range wizardToolsPresetOptions {
-		line := fmt.Sprintf("%-14s %s", opt.label, styleHint.Render(opt.desc))
-		if i == m.wizardToolsPresetCursor {
-			b.WriteString(styleYouTag.Render("▸ ") + styleBody.Render(line) + "\n")
-		} else {
-			b.WriteString("  " + line + "\n")
-		}
+		labels[i], descs[i] = opt.label, opt.desc
 	}
+	var b strings.Builder
+	b.WriteString(styleMeta.Render(fmt.Sprintf(wizardToolsRegisteredFmt, len(m.toolToggleItems()))) + "\n\n")
+	b.WriteString(renderWizardOptions(labels, descs, m.wizardToolsPresetCursor))
 	if m.toolsStatus != "" {
-		b.WriteString("\n" + styleHint.Render(m.toolsStatus) + "\n")
+		b.WriteString("\n" + styleMeta.Render(m.toolsStatus) + "\n")
 	}
-	b.WriteString("\n" + styleHint.Render(wizardToolsFooter))
-	return b.String()
+	return m.renderWizardFrame(6, wizardTitleTools, b.String(),
+		[]wizardKey{{"↑↓", "choose"}, {"enter", "apply"}}, 0)
 }
 
 func (m Model) handleWizardToolsPresetKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -545,15 +537,14 @@ func lookPath(name string) (string, bool) {
 func (m Model) renderWizardSystemCheck() string {
 	r := m.wizardComputeSystemCheck()
 	var b strings.Builder
-	b.WriteString(renderWizardHeader(7, "System Check") + "\n\n")
 	line := func(label string, ok bool, extra string) string {
 		dot := styleBadgeIdle.Render("●")
 		if ok {
 			dot = styleBadgeOK.Render("●")
 		}
-		s := fmt.Sprintf("%s %-20s", dot, label)
+		s := dot + " " + styleBody.Render(fmt.Sprintf("%-20s", label))
 		if extra != "" {
-			s += "  " + styleHint.Render(extra)
+			s += "  " + styleMeta.Render(extra)
 		}
 		return s
 	}
@@ -563,15 +554,21 @@ func (m Model) renderWizardSystemCheck() string {
 	b.WriteString(line("Workspace writable", true, m.workspace) + "\n")
 	b.WriteString(line("Providers", r.providersConfigured > 0, fmt.Sprintf(wizardCheckProvidersFmt, r.providersConfigured)) + "\n")
 	b.WriteString(line("MCP", true, fmt.Sprintf(wizardCheckMCPFmt, r.mcpServers)) + "\n\n")
-	b.WriteString(styleHint.Render(wizardCheckHint) + "\n\n")
-	b.WriteString(styleHint.Render(wizardCheckFooter))
-	return b.String()
+	b.WriteString(styleWizardDim.Render(wizardCheckHint))
+	return m.renderWizardFrame(7, wizardTitleCheck, b.String(),
+		[]wizardKey{{"enter", "continue"}, {"esc", "back"}}, 0)
 }
 
 func (m Model) handleWizardSystemCheckKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	if msg.String() == "enter" {
+	switch msg.String() {
+	case "enter":
 		m.phase = phaseWizardSummary
 		m.wizardStep = 8
+	case "esc":
+		// Back is available on every step — Check included, which used to
+		// be the one screen with no way to revisit the Tools preset.
+		m.phase = phaseWizardToolsPreset
+		m.wizardStep = 6
 	}
 	return m, nil
 }
@@ -580,11 +577,10 @@ func (m Model) handleWizardSystemCheckKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m Model) renderWizardSummary() string {
 	var b strings.Builder
-	b.WriteString(renderWizardHeader(8, "Ready") + "\n\n")
-	b.WriteString(styleBadgeOK.Bold(true).Render("KRAM IS READY") + "\n\n")
+	b.WriteString(styleBadgeOK.Bold(true).Render(wizardSummaryHeadline) + "\n\n")
 
 	row := func(label, value string) string {
-		return fmt.Sprintf("%-16s %s\n", label, styleBody.Render(value))
+		return styleMeta.Render(fmt.Sprintf("%-14s", label)) + styleBody.Render(value) + "\n"
 	}
 	strategy := m.wizardChosenStrategy
 	if strategy == "" {
@@ -604,12 +600,17 @@ func (m Model) renderWizardSummary() string {
 	if m.wizardCompletionErr != nil {
 		b.WriteString("\n" + styleErrBadge.Render(wizardErrCompletionPrefix+m.wizardCompletionErr.Error()) + "\n")
 	}
-	b.WriteString("\n")
-	b.WriteString(styleHint.Render(wizardSummaryFooter))
-	return b.String()
+	b.WriteString("\n" + styleWizardDim.Render(wizardSummaryNote))
+	return m.renderWizardFrame(8, wizardTitleReady, b.String(),
+		[]wizardKey{{"enter", "open your first session"}, {"esc", "back"}}, 0)
 }
 
 func (m Model) handleWizardSummaryKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if msg.String() == "esc" {
+		m.phase = phaseWizardSystemCheck
+		m.wizardStep = 7
+		return m, nil
+	}
 	if msg.String() == "enter" {
 		if err := onboarding.Save(onboarding.State{ProjectsRoot: m.wizardProjectsRoot, LastWorkspace: m.workspace}); err != nil {
 			m.wizardCompletionErr = err
