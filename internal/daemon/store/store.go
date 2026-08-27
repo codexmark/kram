@@ -118,6 +118,21 @@ func Open(path string) (*Store, error) {
 	}
 	db.SetMaxOpenConns(1)
 
+	// WAL lets a reader and the single writer proceed without blocking
+	// each other, and survives a crash mid-transaction cleanly; busy_timeout
+	// makes a second kram instance in the same workspace wait for the lock
+	// briefly instead of failing outright with SQLITE_BUSY (an easy thing
+	// to hit — two terminals in one project). Applied before the schema so
+	// every write below already runs under WAL. A PRAGMA that errors here
+	// means the durability guarantees this store is built on aren't in
+	// effect, so fail loudly rather than run degraded.
+	for _, pragma := range []string{`PRAGMA journal_mode=WAL`, `PRAGMA busy_timeout=5000`} {
+		if _, err := db.Exec(pragma); err != nil {
+			db.Close()
+			return nil, fmt.Errorf("applying %q: %w", pragma, err)
+		}
+	}
+
 	if _, err := db.Exec(schema); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("applying schema: %w", err)
@@ -313,7 +328,18 @@ func (s *Store) AppendMessage(sessionID string, msg Message) (Message, error) {
 		providerItemsJSON = string(b)
 	}
 
-	res, err := s.db.Exec(
+	// Insert the message and touch the session's updated_at in one
+	// transaction, so a crash between the two can't leave a session whose
+	// timestamp disagrees with its latest message — and, more importantly,
+	// so the write is a single atomic unit rather than two separate
+	// autocommits.
+	tx, err := s.db.Begin()
+	if err != nil {
+		return Message{}, fmt.Errorf("beginning message transaction: %w", err)
+	}
+	defer tx.Rollback() // no-op after a successful Commit; rolls back on any early return
+
+	res, err := tx.Exec(
 		`INSERT INTO messages (session_id, role, content, provider, tool_calls, tool_call_id, name, images, provider_items, created_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		sessionID, msg.Role, msg.Content, msg.Provider, toolCallsJSON, msg.ToolCallID, msg.Name, imagesJSON, providerItemsJSON, now,
@@ -326,8 +352,12 @@ func (s *Store) AppendMessage(sessionID string, msg Message) (Message, error) {
 		return Message{}, fmt.Errorf("reading inserted message id: %w", err)
 	}
 
-	if _, err := s.db.Exec(`UPDATE sessions SET updated_at = ? WHERE id = ?`, now, sessionID); err != nil {
+	if _, err := tx.Exec(`UPDATE sessions SET updated_at = ? WHERE id = ?`, now, sessionID); err != nil {
 		return Message{}, fmt.Errorf("touching session: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return Message{}, fmt.Errorf("committing message: %w", err)
 	}
 
 	msg.ID = id

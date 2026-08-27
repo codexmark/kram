@@ -4902,3 +4902,68 @@ runs covered the real end-to-end path. Deliberately deferred: `SIGINT`→
 graceful-cancel in headless (the connection close on process exit already
 tears the turn down; a `POST /cancel` endpoint pairs naturally with this
 later, as the interrupt entry noted).
+
+---
+
+## Local-store durability: one atomic writer + SQLite WAL (post-audit #73)
+
+The audit found Kram's six on-disk stores under `kramhome` split across
+**two durability strategies**, with the split falling exactly the wrong
+way. `config` and `permission` wrote atomically (temp file + rename);
+`credentials`, `toolsettings`, `onboarding` and `customprovider` used a
+raw `os.WriteFile` that truncates the target in place. So the file whose
+corruption hurts most — `credentials.json`, holding API keys and OAuth
+tokens — was among the *least* protected: a crash mid-`Set`/`SetOAuth`
+could leave it truncated and unparseable, i.e. credentials lost. This was
+durability held "by convention", and the convention had already diverged.
+
+**`internal/localstore.AtomicWrite`** makes the safe path the only path by
+construction rather than by each store remembering to reimplement it: it
+writes a sibling `.tmp`, **fsyncs it**, then renames it into place. The
+fsync is the part a plain write-then-rename misses — without it the rename
+can become visible before the data blocks reach disk, so a power cut (not
+just a process crash) can leave a file that exists but is empty/truncated;
+fsync forces the bytes down first. The Windows pre-rename `os.Remove` and
+its "brief window where neither file exists" reasoning moved here verbatim
+from the old `config.Save` — a missing file is the normal first-run state
+every store already handles, whereas a truncated one bricks the store. All
+six stores now call it: `config.Save` and `permission.SavePolicy` lost
+their duplicated inline temp-file dance, and the four raw-write stores
+switched over (keeping their `MkdirAll(0o700)` so the secret dir's
+tighter perms are preserved — `AtomicWrite` only guarantees the file, not
+that its parent is private).
+
+**SQLite (`internal/daemon/store`)** now enables `journal_mode=WAL` and
+`busy_timeout=5000` at `Open`, before the schema runs, so every write is
+under WAL from the first statement. WAL lets a reader and the single
+writer proceed without blocking each other and recovers cleanly from a
+crash mid-transaction; `busy_timeout` makes a second kram instance in the
+same workspace (two terminals in one project — easy to hit) wait briefly
+for the lock instead of failing outright with `SQLITE_BUSY`. These PRAGMAs
+fail loudly rather than best-effort: if the durability guarantees the
+store is built on aren't actually in effect, that's a startup error worth
+seeing, not something to run degraded past.
+
+`AppendMessage` wrapped its two writes — INSERT into `messages`, then the
+`sessions.updated_at` touch — in a **single transaction** (`Begin` /
+`Commit`, `defer tx.Rollback()` as the belt-and-suspenders cleanup that
+no-ops after a successful commit). Two separate autocommits could leave a
+session whose timestamp disagrees with its latest message, and widened the
+inconsistency window that the orphaned-tool_call repair (#65) also guards.
+
+Deliberately **not** enabling `PRAGMA foreign_keys=ON` here: the schema
+declares an FK from `messages.session_id` to `sessions(id)`, but Kram has
+never enforced it, and turning it on could reject writes against older
+databases with pre-existing rows that don't satisfy it — a behavior change
+well outside a durability fix. Left for a dedicated migration if it's ever
+wanted. Also still deferred (unchanged from the audit's own scoping):
+persisting breaker/telemetry state — re-learning a few failures after a
+restart stays acceptable.
+
+Tests pin the observable guarantees, not the mechanism: `AtomicWrite`
+creates parents, applies perms, overwrites cleanly, and leaves no `.tmp`
+behind on success; `Open` really lands the DB in `wal` mode with a
+5000ms busy_timeout (queried back via PRAGMA, not just issued); and a
+successful `AppendMessage` leaves the session's `updated_at` equal to the
+new message's `created_at`, the visible signature of the two writes
+committing as one unit.

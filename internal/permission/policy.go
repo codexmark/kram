@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/codexmark/kram/internal/kramhome"
+	"github.com/codexmark/kram/internal/localstore"
 )
 
 // Decision is the outcome of evaluating a rule against a tool call.
@@ -108,27 +109,14 @@ func LoadConfig(workspace string) PolicyFile {
 	return pf
 }
 
-// SavePolicy writes pf as JSON to path, creating parent directories as
-// needed and replacing any existing file atomically (temp file + rename,
-// same shape as config.Save — see its doc comment for why the pre-rename
-// os.Remove exists: os.Rename fails over an existing file on Windows).
+// SavePolicy writes pf as JSON to path, replacing any existing file
+// atomically via the shared localstore.AtomicWrite (temp file + rename).
 func SavePolicy(pf PolicyFile, path string) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
 	data, err := json.MarshalIndent(pf, "", "  ")
 	if err != nil {
 		return err
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
-		return err
-	}
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		os.Remove(tmp)
-		return err
-	}
-	return os.Rename(tmp, path)
+	return localstore.AtomicWrite(path, data, 0o644)
 }
 
 // RecommendedPolicy asks before the handful of operations that are

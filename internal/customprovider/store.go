@@ -24,6 +24,7 @@ import (
 	"strings"
 
 	"github.com/codexmark/kram/internal/kramhome"
+	"github.com/codexmark/kram/internal/localstore"
 )
 
 // Provider is one user-registered custom endpoint.
@@ -199,5 +200,5 @@ func (s *Store) save() error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(s.path, data, 0o600)
+	return localstore.AtomicWrite(s.path, data, 0o600)
 }

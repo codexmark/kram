@@ -11,6 +11,7 @@ import (
 	"sort"
 
 	"github.com/codexmark/kram/internal/kramhome"
+	"github.com/codexmark/kram/internal/localstore"
 )
 
 // Store is a set of disabled item names. Tools and skills share one
@@ -113,5 +114,5 @@ func (s *Store) save() error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(s.path, data, 0o600)
+	return localstore.AtomicWrite(s.path, data, 0o600)
 }
