@@ -5251,3 +5251,47 @@ exactly as before calibration existed. Tests pin the learned ratio,
 EMA smoothing, clamping, non-positive/​nil inputs, the LRU bound (a
 continuously-used session survives eviction), and the full end-to-end loop
 through a mock gateway (a 150/100 response teaches a 1.5× factor).
+
+---
+
+## Activating image input in the composer (post-audit #71)
+
+The README advertised image input and the whole stack already carried it —
+`daemonclient.SendMessageStream` takes `images`, the daemon forwards them, the
+agent loop capability-gates them (emitting `imageNotice` when no provider in
+the combo accepts images), and the provider adapters decode data URLs. The one
+gap: the composer's send path passed `nil` for images (`commands.go`), so an
+advertised feature was unreachable — worse than absent, because it breaks
+trust. This was pure TUI wiring, no backend change.
+
+`/image <path>` stages an image for the next message (a leading `~` is
+expanded). A path was chosen over clipboard-image paste because most
+terminals can't hand a TUI raw image bytes, and over auto-detecting a path in
+message text because that would misfire on ordinary prose mentioning a
+filename — an explicit command is unambiguous and discoverable. Staged files
+show above the composer and, once sent, as a 📎 row under the user message;
+the queue clears on send. An image-only message (staged image, no text) is
+allowed. Decoding to base64 data URLs happens *off* the Update loop, inside
+the send `tea.Cmd`, so reading a multi-MB file never blocks a keystroke; a
+file that can't be read at send time fails the whole send with a clear error
+rather than silently dropping the attachment. A 20 MiB cap bounds the
+worst case (images are history — resent every turn, and now counted by the
+budget thanks to #70).
+
+**The content check must sniff bytes, not trust the extension** — the fix for
+the one substantive finding of this change's adversarial review. The first cut
+resolved MIME from the file extension for known image suffixes, so a text file
+renamed `foo.png` sailed past the "is it really an image" guard and shipped
+base64 garbage to the model. Both `stageImageForAttachment` (reading only the
+leading 512 bytes, cheap enough for the keystroke) and `imageFileToDataURL`
+(defense in depth at send time) now run `http.DetectContentType` on the actual
+bytes and reject anything that isn't `image/*`. The review also caught that the
+test purporting to cover this case asserted nothing on it; it now asserts the
+mislabeled file is rejected. Deliberately left as-is: on a send-time read
+failure the optimistic user message stays in the transcript — the same
+phantom-message behavior text-only sends already have, not worth diverging
+here. Tests cover the helpers (valid image, blank/missing/dir/oversize/
+mislabeled, `~` expansion, MIME by sniff) and the full composer flow (stage
+without sending, bad path errors without staging, send attaches and clears,
+image-only send). README's composer section documents the command (and its
+stale pt-BR activity labels from #74 were corrected in the same pass).

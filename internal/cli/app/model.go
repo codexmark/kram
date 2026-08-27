@@ -87,6 +87,7 @@ type chatMessage struct {
 	Provider     string
 	ToolActivity []daemonclient.ToolActivity
 	Notices      []string // e.g. image capability fallback, compaction happened
+	Images       []string // base names of images attached to this (user) message, for the transcript
 	// streaming is true from the moment this assistant message's turn
 	// starts until its "done"/"error" event lands. While true, content
 	// renders as plain text (deltas arriving mid-markdown would flicker
@@ -127,6 +128,9 @@ type Model struct {
 
 	messages []chatMessage
 	waiting  bool
+	// pendingImages holds file paths staged by /image, attached to (and
+	// cleared by) the next message the user sends.
+	pendingImages []string
 	// activeStream is the in-flight turn's SSE stream, held so Esc can
 	// close it to interrupt: closing the client connection cancels the
 	// daemon's r.Context(), which runLoop honors, stopping the turn
@@ -1182,12 +1186,32 @@ func (m Model) togglePanel(p panel) (tea.Model, tea.Cmd) {
 
 func (m Model) submit() (tea.Model, tea.Cmd) {
 	text := strings.TrimSpace(m.input.Value())
-	if text == "" || m.waiting {
+
+	// /image <path> stages an image for the next message rather than
+	// sending anything now — the composer's only attach affordance (most
+	// terminals can't paste image data, so a path is the portable path).
+	if rest, ok := strings.CutPrefix(text, imageCommandPrefix); ok {
+		m.input.SetValue("")
+		path, err := stageImageForAttachment(rest)
+		if err != nil {
+			m.err = fmt.Errorf("%s", err)
+			m.refreshTranscript()
+			return m, nil
+		}
+		m.pendingImages = append(m.pendingImages, path)
+		m.err = nil
+		return m, nil
+	}
+
+	// A message needs either text or at least one staged image.
+	if (text == "" && len(m.pendingImages) == 0) || m.waiting {
 		return m, nil
 	}
 	m.input.SetValue("")
+	images := m.pendingImages
+	m.pendingImages = nil
 	m.messages = append(m.messages,
-		chatMessage{Role: "user", Content: text},
+		chatMessage{Role: "user", Content: text, Images: imageDisplayNames(images)},
 		chatMessage{Role: "assistant", streaming: true}, // filled in live as streamEventMsg events arrive
 	)
 	m.waiting = true
@@ -1207,7 +1231,7 @@ func (m Model) submit() (tea.Model, tea.Cmd) {
 	m.activeStream = nil
 	m.refreshTranscript()
 	m.viewport.GotoBottom()
-	return m, tea.Batch(startSendMessageCmd(m.daemon, m.sessionID, text), animTickCmd(), m.spin.Tick)
+	return m, tea.Batch(startSendMessageCmd(m.daemon, m.sessionID, text, images), animTickCmd(), m.spin.Tick)
 }
 
 // dropStreamingPlaceholder removes the trailing empty assistant message

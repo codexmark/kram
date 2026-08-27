@@ -696,14 +696,14 @@ func TestCommandClosuresAgainstLocalHTTPServer(t *testing.T) {
 
 	for name, cmd := range map[string]tea.Cmd{
 		"list": listSessionsCmd(dc), "create": createSessionCmd(dc, "made"), "history": loadHistoryCmd(dc, "s"),
-		"send": startSendMessageCmd(dc, "s", "hi"), "status": fetchStatusCmd(sc), "context": fetchContextCmd(dc, "s"),
+		"send": startSendMessageCmd(dc, "s", "hi", nil), "status": fetchStatusCmd(sc), "context": fetchContextCmd(dc, "s"),
 		"tools": fetchToolsCmd(dc), "question": answerQuestionCmd(dc, "s", "q", "a"), "approval": answerApprovalCmd(dc, "s", "a", "once"),
 	} {
 		if msg := cmd(); msg == nil {
 			t.Errorf("%s command returned nil", name)
 		}
 	}
-	start := startSendMessageCmd(dc, "s", "hi")().(streamStartMsg)
+	start := startSendMessageCmd(dc, "s", "hi", nil)().(streamStartMsg)
 	if start.err != nil {
 		t.Fatal(start.err)
 	}
@@ -718,7 +718,7 @@ func TestCommandClosuresAgainstLocalHTTPServer(t *testing.T) {
 		{Type: "done", Message: daemonclient.Message{Content: "final", Provider: "p"}, Usage: openai.Usage{TotalTokens: 9}},
 		{Type: "error", Error: "failed"},
 	} {
-		stream := startSendMessageCmd(dc, "s", "hi")().(streamStartMsg).stream
+		stream := startSendMessageCmd(dc, "s", "hi", nil)().(streamStartMsg).stream
 		m := testModel(t)
 		m.waiting = true
 		m.messages = []chatMessage{{Role: "assistant", streaming: true}}
@@ -733,7 +733,7 @@ func TestCommandClosuresAgainstLocalHTTPServer(t *testing.T) {
 			t.Fatal("failed terminal event unexpectedly scheduled follow-up")
 		}
 	}
-	stream := startSendMessageCmd(dc, "s", "hi")().(streamStartMsg).stream
+	stream := startSendMessageCmd(dc, "s", "hi", nil)().(streamStartMsg).stream
 	mEOF := testModel(t)
 	mEOF.waiting = true
 	mEOF.messages = []chatMessage{{Role: "assistant", streaming: true, Content: "partial"}}

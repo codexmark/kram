@@ -1305,12 +1305,16 @@ It does not persist conversations itself and does not call providers directly.
 - Kram responses remain left-aligned and completed responses render Markdown;
 - user messages render as a compact right-aligned prompt block;
 - the composer is a 3-row word-wrapping textarea;
+- attach an image with `/image <path>` (a leading `~` is expanded); it stages
+  for your next message and clears once sent. The transcript notes the
+  attachment, and the daemon emits a notice if no provider in the active combo
+  accepts images (the message is then sent as text only);
 - assistant text streams incrementally;
 - tool calls appear while running and settle to result state;
 - notices, questions, and approval prompts appear inside the active turn;
 - mouse-wheel transcript scrolling is supported.
 - dragging text copies it through OSC 52 and leaves a short visual confirmation;
-- live activity labels (`MODELO ATIVO`, `EXECUTANDO`, `ESCREVENDO`) come from daemon events and consume no model tokens.
+- live activity labels (`MODEL ACTIVE`, `RUNNING`, `WRITING`) come from daemon events and consume no model tokens.
 
 ## Route bar
 
