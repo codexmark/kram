@@ -57,6 +57,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /sessions/{id}/messages", s.handleSendMessage)
 	mux.HandleFunc("GET /sessions/{id}/turn", s.handleAttachTurn)
 	mux.HandleFunc("POST /sessions/{id}/interrupt", s.handleInterrupt)
+	mux.HandleFunc("POST /sessions/{id}/steer", s.handleSteer)
 	mux.HandleFunc("POST /sessions/{id}/answer", s.handleAnswerQuestion)
 	mux.HandleFunc("POST /sessions/{id}/approve", s.handleAnswerApproval)
 	mux.HandleFunc("GET /tools", s.handleListTools)
@@ -296,6 +297,36 @@ func (s *Server) handleAttachTurn(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.streamTurn(w, r, t)
+}
+
+type steerRequest struct {
+	Content string `json:"content"`
+}
+
+// handleSteer queues a user message for the session's *running* turn —
+// the agent drains it at the next model-call boundary. 409 when no turn
+// is active: the client should send a normal message instead.
+func (s *Server) handleSteer(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	var req steerRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
+		return
+	}
+	if req.Content == "" {
+		writeError(w, http.StatusBadRequest, "content must not be empty")
+		return
+	}
+	t := s.turns.get(id)
+	if t == nil || t.isDone() {
+		writeError(w, http.StatusConflict, "no turn is running — send a normal message instead")
+		return
+	}
+	s.agent.QueueSteering(id, req.Content)
+	// Let every attached subscriber (including a future reattach's replay)
+	// see the user's queued words in the turn's own stream.
+	t.publish(mustFrame(map[string]any{"type": "steered", "content": req.Content}))
+	writeJSON(w, http.StatusOK, map[string]string{"status": "queued"})
 }
 
 // handleInterrupt cancels the session's active turn — the explicit

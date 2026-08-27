@@ -287,6 +287,13 @@ func (c *Client) AttachTurn(ctx context.Context, sessionID string) (*MessageStre
 	return &MessageStream{resp: resp, scanner: scanner}, nil
 }
 
+// Steer queues a user message for the session's running turn — picked
+// up at the agent's next model-call boundary. Errors (including "no turn
+// running") mean nothing was queued; send a normal message instead.
+func (c *Client) Steer(ctx context.Context, sessionID, content string) error {
+	return c.doJSON(ctx, http.MethodPost, "/sessions/"+sessionID+"/steer", map[string]string{"content": content}, nil)
+}
+
 // Interrupt cancels the session's active turn server-side. Closing the
 // SSE stream alone no longer cancels anything (a detached turn keeps
 // running — see the daemon's turn registry); this is the explicit stop.

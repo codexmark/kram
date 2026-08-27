@@ -232,11 +232,20 @@ func TestQuestionApprovalAndChatKeys(t *testing.T) {
 	if !m.waiting || cmd == nil {
 		t.Fatal("message not submitted")
 	}
-	m.input.SetValue("ignored")
+	// Mid-turn steering (#110): submitting while waiting queues the text
+	// server-side and shows it optimistically with a "queued" notice.
+	m.input.SetValue("also do X")
 	beforeMessages := len(m.messages)
 	m, cmd = modelResult(m.submit())
-	if cmd != nil || len(m.messages) != beforeMessages {
-		t.Fatal("submit while waiting should be ignored")
+	if cmd == nil || len(m.messages) != beforeMessages+1 {
+		t.Fatal("submit while waiting should queue a steering message")
+	}
+	queued := m.messages[len(m.messages)-1]
+	if queued.Role != "user" || queued.Content != "also do X" || len(queued.Notices) == 0 {
+		t.Fatalf("queued steering entry = %+v", queued)
+	}
+	if m.input.Value() != "" {
+		t.Fatal("composer should clear after queueing")
 	}
 }
 
