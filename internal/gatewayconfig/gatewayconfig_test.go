@@ -28,12 +28,38 @@ func TestLoadStoredCredentialsAndAutodetectionStrategies(t *testing.T) {
 	if got := os.Getenv("ANTHROPIC_API_KEY"); got != "stored-key" {
 		t.Fatalf("loaded key = %q", got)
 	}
+	// A single detected provider (anthropic, via the stored key) yields a
+	// single-provider combo: strategy left empty (routing is moot).
 	cfg, err := Detect("", nil, slog.New(slog.DiscardHandler))
-	if err != nil || cfg.Combos[0].Strategy != "" {
-		t.Fatalf("paid-provider strategy = %q err=%v", cfg.Combos[0].Strategy, err)
+	if err != nil || len(cfg.Combos[0].Providers) != 1 || cfg.Combos[0].Strategy != "" {
+		t.Fatalf("single-provider strategy = %q (providers %v) err=%v", cfg.Combos[0].Strategy, cfg.Combos[0].Providers, err)
 	}
-	if autoStrategy(true) != "" || autoStrategy(false) != "round-robin" {
-		t.Fatal("automatic strategy did not distinguish paid and free tiers")
+}
+
+// TestAutoStrategyByProviderCount pins the count-based default: one provider
+// is moot ("", a trivial single-candidate no-op), two or more default to
+// smart (auto-aligns on health/reliability).
+func TestAutoStrategyByProviderCount(t *testing.T) {
+	if autoStrategy(0) != "" || autoStrategy(1) != "" {
+		t.Errorf("<=1 provider should give empty strategy, got %q/%q", autoStrategy(0), autoStrategy(1))
+	}
+	if autoStrategy(2) != "smart" || autoStrategy(5) != "smart" {
+		t.Errorf(">=2 providers should give smart, got %q/%q", autoStrategy(2), autoStrategy(5))
+	}
+}
+
+// TestDetectMultiProviderDefaultsToSmart confirms that once two providers
+// are detected, the auto-built combo routes with smart.
+func TestDetectMultiProviderDefaultsToSmart(t *testing.T) {
+	isolateReconcileTest(t)
+	t.Setenv("ANTHROPIC_API_KEY", "k1")
+	t.Setenv("OPENAI_API_KEY", "k2")
+	cfg, err := Detect("", nil, slog.New(slog.DiscardHandler))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Combos[0].Providers) < 2 || cfg.Combos[0].Strategy != "smart" {
+		t.Fatalf("multi-provider strategy = %q (providers %v), want smart", cfg.Combos[0].Strategy, cfg.Combos[0].Providers)
 	}
 }
 
@@ -84,7 +110,12 @@ func TestDetectGatewayConfigErrorsWithoutProviderAndIncludesCustom(t *testing.T)
 	}
 }
 
-func TestDetectGatewayConfigUsesRoundRobinForFreeCatalogProvider(t *testing.T) {
+// TestDetectFreeCatalogProviderStrategyByCount replaces the old
+// "free tier ⇒ round-robin" rule: routing now keys on provider count, not
+// tier. Setting a free provider's env var detects however many catalog
+// entries share it, and the strategy follows that count (≥2 → smart,
+// 1 → "" / single).
+func TestDetectFreeCatalogProviderStrategyByCount(t *testing.T) {
 	isolateReconcileTest(t)
 	var free providercatalog.Provider
 	for _, provider := range providercatalog.Providers {
@@ -98,8 +129,15 @@ func TestDetectGatewayConfigUsesRoundRobinForFreeCatalogProvider(t *testing.T) {
 	}
 	t.Setenv(free.EnvVar, "test-key")
 	cfg, err := Detect("", nil, nil)
-	if err != nil || cfg.Combos[0].Strategy != "round-robin" {
-		t.Fatalf("free autodetection strategy = %+v err=%v", cfg, err)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := ""
+	if len(cfg.Combos[0].Providers) >= 2 {
+		want = "smart"
+	}
+	if cfg.Combos[0].Strategy != want {
+		t.Fatalf("strategy = %q for %d providers, want %q", cfg.Combos[0].Strategy, len(cfg.Combos[0].Providers), want)
 	}
 }
 

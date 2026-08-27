@@ -99,11 +99,14 @@ func TestLoadOrDetectGatewayConfigPrecedence(t *testing.T) {
 	if err := config.Save(minimalConfig(), explicit); err != nil {
 		t.Fatal(err)
 	}
-	got, err := loadOrDetectGatewayConfig(explicit, 4321, "round-robin", t.TempDir(), nil, logger)
+	got, gotPath, err := loadOrDetectGatewayConfig(explicit, 4321, "round-robin", t.TempDir(), nil, logger)
 	if err != nil || got.Port != 4321 || got.Combos[0].Strategy != "" {
 		t.Fatalf("explicit precedence = %+v err=%v", got, err)
 	}
-	if _, err := loadOrDetectGatewayConfig(filepath.Join(t.TempDir(), "missing"), 0, "", t.TempDir(), nil, logger); err == nil {
+	if gotPath != explicit {
+		t.Fatalf("explicit persist path = %q, want %q", gotPath, explicit)
+	}
+	if _, _, err := loadOrDetectGatewayConfig(filepath.Join(t.TempDir(), "missing"), 0, "", t.TempDir(), nil, logger); err == nil {
 		t.Fatal("missing explicit config unexpectedly loaded")
 	}
 
@@ -112,9 +115,12 @@ func TestLoadOrDetectGatewayConfigPrecedence(t *testing.T) {
 	if err := config.Save(minimalConfig(), workspacePath); err != nil {
 		t.Fatal(err)
 	}
-	got, err = loadOrDetectGatewayConfig("", 5555, "ignored", workspace, nil, logger)
+	got, gotPath, err = loadOrDetectGatewayConfig("", 5555, "ignored", workspace, nil, logger)
 	if err != nil || got.Port != 5555 {
 		t.Fatalf("workspace config = %+v err=%v", got, err)
+	}
+	if gotPath != workspacePath {
+		t.Fatalf("workspace persist path = %q, want %q", gotPath, workspacePath)
 	}
 
 	if err := os.Remove(workspacePath); err != nil {
@@ -124,9 +130,12 @@ func TestLoadOrDetectGatewayConfigPrecedence(t *testing.T) {
 	if err := config.Save(minimalConfig(), global); err != nil {
 		t.Fatal(err)
 	}
-	got, err = loadOrDetectGatewayConfig("", 6666, "ignored", workspace, nil, logger)
+	got, gotPath, err = loadOrDetectGatewayConfig("", 6666, "ignored", workspace, nil, logger)
 	if err != nil || got.Port != 6666 {
 		t.Fatalf("global config = %+v err=%v", got, err)
+	}
+	if gotPath != global {
+		t.Fatalf("global persist path = %q, want %q", gotPath, global)
 	}
 }
 
@@ -134,9 +143,15 @@ func TestLoadOrDetectFallsBackToLiveProvider(t *testing.T) {
 	isolateReconcileTest(t)
 	provider := providercatalog.Providers[0]
 	t.Setenv(provider.EnvVar, "test-key")
-	got, err := loadOrDetectGatewayConfig("", 7777, "smart", t.TempDir(), nil, slog.New(slog.DiscardHandler))
+	got, gotPath, err := loadOrDetectGatewayConfig("", 7777, "smart", t.TempDir(), nil, slog.New(slog.DiscardHandler))
 	if err != nil || got.Port != 7777 || got.Combos[0].Strategy != "smart" {
 		t.Fatalf("detected config = %+v err=%v", got, err)
+	}
+	// The fileless pure-autodetect tier still reports a persist target — the
+	// global config path — so a later in-app save has somewhere to land.
+	wantPath := filepath.Join(os.Getenv("XDG_CONFIG_HOME"), "kram-gateway", "config.yaml")
+	if gotPath != wantPath {
+		t.Fatalf("fallback persist path = %q, want %q", gotPath, wantPath)
 	}
 }
 
@@ -371,7 +386,7 @@ func TestRunThreadsStreamOptionIntoDaemonConfig(t *testing.T) {
 	t.Cleanup(func() { kramGatewayRun, kramDaemonRun = originalGateway, originalDaemon })
 
 	var got daemon.Config
-	kramGatewayRun = func(ctx context.Context, _ *config.Config, _ *slog.Logger, _ *credentials.Store) error {
+	kramGatewayRun = func(ctx context.Context, _ *config.Config, _ string, _ *slog.Logger, _ *credentials.Store) error {
 		<-ctx.Done()
 		return nil
 	}
@@ -404,13 +419,13 @@ func TestRunSurfacesServiceStartupFailures(t *testing.T) {
 		kramGatewayRun, kramDaemonRun = originalGateway, originalDaemon
 		kramWaitHealthy, kramFreePort = originalWait, originalPort
 	})
-	blockGateway := func(ctx context.Context, _ *config.Config, _ *slog.Logger, _ *credentials.Store) error {
+	blockGateway := func(ctx context.Context, _ *config.Config, _ string, _ *slog.Logger, _ *credentials.Store) error {
 		<-ctx.Done()
 		return nil
 	}
 	blockDaemon := func(ctx context.Context, _ daemon.Config, _ *slog.Logger) error { <-ctx.Done(); return nil }
 
-	kramGatewayRun = func(context.Context, *config.Config, *slog.Logger, *credentials.Store) error {
+	kramGatewayRun = func(context.Context, *config.Config, string, *slog.Logger, *credentials.Store) error {
 		return errors.New("gateway boom")
 	}
 	kramDaemonRun = blockDaemon

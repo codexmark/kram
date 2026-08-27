@@ -68,6 +68,7 @@ func TestStrategyPickerKeyboardAppliesRuntimeChoice(t *testing.T) {
 	m := strategyPickerModel(t)
 	m.gateway = statusclient.New(srv.URL)
 	m.active = panelStrategyPicker
+	m.routePickerLevel = routeLevelStrategy
 	next, cmd := modelResult(m.handleKey(keyMsg("down")))
 	if next.strategyPickerFocus != 1 || cmd != nil {
 		t.Fatalf("down focus=%d cmd=%v", next.strategyPickerFocus, cmd != nil)
@@ -90,6 +91,7 @@ func TestStrategyPickerKeyboardAppliesRuntimeChoice(t *testing.T) {
 func TestStrategyPickerMouseRowAppliesChoice(t *testing.T) {
 	m := strategyPickerModel(t)
 	m.active = panelStrategyPicker
+	m.routePickerLevel = routeLevelStrategy
 	panelStart := routeBarHeight + m.viewport.Height + inputHeight
 	next, cmd := modelResult(m.handleMouse(tea.MouseMsg{
 		Action: tea.MouseActionPress, Button: tea.MouseButtonLeft,

@@ -29,7 +29,9 @@ import (
 // closure that refreshes and re-reads their credential on every request
 // instead of once at this function's own single call, which is long past
 // by the time a short-lived OAuth token would expire.
-func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, credStore *credentials.Store) error {
+// configPath is where a persisted routing change (POST /admin/strategy with
+// persist:true) is written back; "" disables persistence (no on-disk config).
+func Run(ctx context.Context, cfg *config.Config, configPath string, logger *slog.Logger, credStore *credentials.Store) error {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -78,7 +80,7 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, credStore
 		return fmt.Errorf("building router: %w", err)
 	}
 
-	srv := server.New(cfg, providers, rt, breakers, tel, logger)
+	srv := server.New(cfg, configPath, providers, rt, breakers, tel, logger)
 
 	addr := fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
 	httpServer := &http.Server{Addr: addr, Handler: srv.Handler()}

@@ -27,6 +27,22 @@ const (
 	strategyPickerActiveBadge    = "ACTIVE"
 	strategyPickerFailPrefix     = "failed: "
 	strategyPickerApplying       = "applying on the next call…"
-	strategyPickerHint           = "↑↓ choose · enter apply · esc cancel · click applies"
+	strategyPickerSaving         = "saving as default…"
+	strategyPickerHint           = "↑↓ choose · enter apply · ctrl+s save default · esc back"
 	strategyPickerNoComboErr     = "gateway hasn't reported combo and strategies yet"
+)
+
+// Combo picker chrome (the first level of the Ctrl+S routing panel — pick
+// which combo future messages route through before choosing its strategy).
+const (
+	comboPickerTitle          = "route · select combo"
+	comboPickerLoading        = "loading combos from the gateway…"
+	comboPickerActiveBadge    = "ACTIVE"
+	comboPickerHint           = "↑↓ choose · enter select · esc close"
+	comboPickerSingleProvider = "single provider — no routing to configure"
+	comboProvidersSingular    = "provider"
+	comboProvidersPlural      = "providers"
+	strategySavedPrefix       = "✓ saved default: "
+	comboSwitchedPrefix       = "✓ combo: "
+	comboSingleNoticeSuffix   = " (single provider — no routing)"
 )

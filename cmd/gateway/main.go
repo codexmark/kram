@@ -48,5 +48,5 @@ func run(ctx context.Context, configPath string, logger *slog.Logger) error {
 	if err != nil {
 		return fmt.Errorf("loading config: %w", err)
 	}
-	return gateway.Run(ctx, cfg, logger, nil)
+	return gateway.Run(ctx, cfg, configPath, logger, nil)
 }

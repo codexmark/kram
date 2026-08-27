@@ -205,7 +205,7 @@ func TestRunOrchestratesServicesAndReportsScenarios(t *testing.T) {
 	ports := []int{21001, 21002}
 	evalFreePort = func() (int, error) { p := ports[0]; ports = ports[1:]; return p, nil }
 	evalWaitHealthy = func(context.Context, string, time.Duration) error { return nil }
-	evalGatewayRun = func(ctx context.Context, _ *config.Config, _ *slog.Logger, _ *credentials.Store) error {
+	evalGatewayRun = func(ctx context.Context, _ *config.Config, _ string, _ *slog.Logger, _ *credentials.Store) error {
 		<-ctx.Done()
 		return nil
 	}
@@ -253,7 +253,7 @@ func TestRunInfrastructureFailureBranches(t *testing.T) {
 	}
 
 	evalFreePort = func() (int, error) { return 22002, nil }
-	evalGatewayRun = func(context.Context, *config.Config, *slog.Logger, *credentials.Store) error { return nil }
+	evalGatewayRun = func(context.Context, *config.Config, string, *slog.Logger, *credentials.Store) error { return nil }
 	evalDaemonRun = func(context.Context, daemon.Config, *slog.Logger) error { return nil }
 	evalWaitHealthy = func(context.Context, string, time.Duration) error { return errors.New("unhealthy") }
 	if code := run(); code != 1 {

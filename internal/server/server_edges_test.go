@@ -28,7 +28,7 @@ func statusTestServer(t *testing.T, logger *slog.Logger) *Server {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return New(cfg, ps, rt, br, tel, logger)
+	return New(cfg, "", ps, rt, br, tel, logger)
 }
 
 func TestHealthStatusAndNotFoundHandlers(t *testing.T) {
@@ -90,6 +90,67 @@ func TestSetStrategyIsLoopbackOnlyAndUpdatesStatus(t *testing.T) {
 	handler.ServeHTTP(badResult, bad)
 	if badResult.Code != http.StatusBadRequest {
 		t.Fatalf("bad strategy status=%d body=%s", badResult.Code, badResult.Body.String())
+	}
+}
+
+func TestSetStrategyPersistWritesConfigAndDefault(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/config.yaml"
+	cfg := &config.Config{
+		Host: "127.0.0.1", Port: 20999,
+		Providers:    []config.ProviderConfig{{ID: "p", Kind: "anthropic"}},
+		Combos:       []config.ComboConfig{{ID: "default", Strategy: "priority", Providers: []string{"p"}}},
+		DefaultCombo: "default",
+	}
+	if err := config.Save(cfg, path); err != nil {
+		t.Fatal(err)
+	}
+	// The live config the server holds carries an ephemeral runtime port (as
+	// finalizeFileConfig would have rewritten it), which persist must NOT
+	// clobber onto disk — the on-disk port is restored instead.
+	live := *cfg
+	live.Port = 41234
+	ps := map[string]provider.Provider{"p": scriptedProvider{id: "p"}}
+	br := breaker.NewRegistry()
+	tel := telemetry.New()
+	rt, err := router.New(&live, ps, br, tel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := New(&live, path, ps, rt, br, tel, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	req := httptest.NewRequest(http.MethodPost, "/admin/strategy", strings.NewReader(`{"combo":"default","strategy":"smart","persist":true,"make_default":true}`))
+	req.RemoteAddr = "127.0.0.1:5555"
+	res := httptest.NewRecorder()
+	s.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("persist status=%d body=%s", res.Code, res.Body.String())
+	}
+
+	saved, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved.Combos[0].Strategy != "smart" {
+		t.Fatalf("persisted strategy=%q, want smart", saved.Combos[0].Strategy)
+	}
+	if saved.DefaultCombo != "default" {
+		t.Fatalf("persisted default_combo=%q, want default", saved.DefaultCombo)
+	}
+	if saved.Port != 20999 {
+		t.Fatalf("persist clobbered the on-disk port: got %d, want 20999", saved.Port)
+	}
+}
+
+func TestSetStrategyPersistWithoutConfigFileIsUnavailable(t *testing.T) {
+	// statusTestServer builds a server with configPath "" (no on-disk config).
+	s := statusTestServer(t, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	req := httptest.NewRequest(http.MethodPost, "/admin/strategy", strings.NewReader(`{"combo":"default","strategy":"smart","persist":true}`))
+	req.RemoteAddr = "127.0.0.1:5556"
+	res := httptest.NewRecorder()
+	s.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusServiceUnavailable {
+		t.Fatalf("persist without config status=%d body=%s", res.Code, res.Body.String())
 	}
 }
 
@@ -196,7 +257,7 @@ func TestChatHandlerValidationResolutionRankingAndBufferedSuccess(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	noDefault := New(cfg, ps, rt, br, tel, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	noDefault := New(cfg, "", ps, rt, br, tel, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	r := httptest.NewRecorder()
 	noDefault.Handler().ServeHTTP(r, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"missing","messages":[{"role":"user","content":"hi"}]}`)))
 	if r.Code != 400 || !strings.Contains(r.Body.String(), "no combo matches") {
@@ -211,7 +272,7 @@ func TestChatHandlerValidationResolutionRankingAndBufferedSuccess(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	ineligible := New(cfg, ps, rt, br, tel, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	ineligible := New(cfg, "", ps, rt, br, tel, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	r = httptest.NewRecorder()
 	ineligible.Handler().ServeHTTP(r, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"only","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function","function":{"name":"x"}}]}`)))
 	if r.Code != 503 || !strings.Contains(r.Body.String(), "no eligible providers") {

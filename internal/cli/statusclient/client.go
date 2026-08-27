@@ -83,8 +83,19 @@ func (c *Client) Fetch(ctx context.Context) (Status, error) {
 
 // SetStrategy changes combo's runtime strategy for future model calls. The
 // gateway intentionally exposes this mutation only to loopback clients.
-func (c *Client) SetStrategy(ctx context.Context, combo, strategy string) (Combo, error) {
-	payload, err := json.Marshal(map[string]string{"combo": combo, "strategy": strategy})
+//
+// persist, when true, asks the gateway to write the change through to its
+// config.yaml so it survives a restart; makeDefault additionally persists
+// this combo as the config's default_combo. Both require the gateway to have
+// an on-disk config — the gateway returns 503 otherwise, surfaced here as an
+// error. A plain runtime switch passes false for both.
+func (c *Client) SetStrategy(ctx context.Context, combo, strategy string, persist, makeDefault bool) (Combo, error) {
+	payload, err := json.Marshal(struct {
+		Combo       string `json:"combo"`
+		Strategy    string `json:"strategy"`
+		Persist     bool   `json:"persist,omitempty"`
+		MakeDefault bool   `json:"make_default,omitempty"`
+	}{Combo: combo, Strategy: strategy, Persist: persist, MakeDefault: makeDefault})
 	if err != nil {
 		return Combo{}, fmt.Errorf("encoding strategy request: %w", err)
 	}

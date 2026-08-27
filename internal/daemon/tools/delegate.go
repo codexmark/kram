@@ -100,6 +100,12 @@ func (t *delegateTask) Execute(ctx context.Context, raw json.RawMessage) (string
 		go func(i int, goal, taskContext, model string) {
 			defer wg.Done()
 			defer func() { <-sem }()
+			// Default a subtask to the parent run's combo when the model
+			// didn't pin one, so a runtime combo switch on the parent is
+			// inherited rather than reset to the daemon's global default.
+			if model == "" {
+				model = runModelFromContext(ctx)
+			}
 			res, err := t.registry.delegator.RunTask(ctx, goal, taskContext, model, depth+1)
 			if err != nil {
 				results[i] = fmt.Sprintf("[subtask failed: %v]", err)

@@ -63,7 +63,6 @@ func Detect(strategyOverride string, credStore *credentials.Store, logger *slog.
 	var providers []config.ProviderConfig
 	var ids []string
 
-	havePaid := false
 	for _, p := range providercatalog.Providers {
 		pc, ok := catalogProviderConfig(p, credStore)
 		if !ok {
@@ -71,9 +70,6 @@ func Detect(strategyOverride string, credStore *credentials.Store, logger *slog.
 		}
 		providers = append(providers, pc)
 		ids = append(ids, pc.ID)
-		if !p.FreeTier {
-			havePaid = true
-		}
 	}
 
 	if customStore, err := customprovider.Load(); err == nil {
@@ -94,7 +90,7 @@ func Detect(strategyOverride string, credStore *credentials.Store, logger *slog.
 		return nil, fmt.Errorf("no LLM provider configured: export one of %v, pass -config with a gateway config.yaml, or add a key from the accounts screen (press \"a\" on the session picker)", providercatalog.EnvVars())
 	}
 
-	strategy := autoStrategy(havePaid)
+	strategy := autoStrategy(len(providers))
 	if strategyOverride != "" {
 		strategy = strategyOverride
 	}
@@ -227,24 +223,25 @@ func Reconcile(cfg *config.Config, credStore *credentials.Store, logger *slog.Lo
 	return &reconciled
 }
 
-// autoStrategy picks how the auto-built combo routes, and the two cases
-// genuinely want opposite things:
+// autoStrategy picks how the auto-built combo routes, keyed on how many
+// providers it actually has:
 //
-// With a paid provider present, the catalog order is a *priority* order —
-// it leads the chain — and the cheapest thing to do is simply keep using
-// it. Leaving the strategy empty means no rotation at all, so the same
-// provider serves every call in a turn and its server-side prompt cache
-// stays warm across the tool round-trips, where an agent resends a large
-// near-identical prefix over and over. Rotating there would re-pay full
-// price for the same prefix on every round-trip.
+// One provider: routing is moot — there is nothing to choose between — so
+// the strategy is left empty ("" maps to priority, whose rank of a single
+// candidate is a trivial no-op; see internal/router/priority.go). The UI
+// presents such a combo as "single provider", derived from the provider
+// count, never from this string.
 //
-// With only free tiers, the providers are interchangeable peers and the
-// binding constraint is not cost but rate limits, so round-robin's
-// proactive spreading is worth more than the cache — you can't benefit
-// from a warm cache on a provider that's answering 429.
-func autoStrategy(havePaid bool) string {
-	if havePaid {
+// Two or more: default to "smart", which auto-aligns on live health,
+// reliability and last-known-good rather than a fixed declared order — so a
+// provider that's down or degraded stops leading on its own. Smart is
+// sticky by default (see internal/router/options.go), so it still pins a
+// run to its winning provider across tool round-trips and keeps that
+// provider's prompt cache warm — the reason the old paid-provider default
+// left the strategy empty, now subsumed without giving up failover.
+func autoStrategy(providerCount int) string {
+	if providerCount <= 1 {
 		return ""
 	}
-	return "round-robin"
+	return "smart"
 }

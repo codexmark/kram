@@ -60,6 +60,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /tools/settings", s.handleUpdateToolSettings)
 	mux.HandleFunc("GET /processes", s.handleListProcesses)
 	mux.HandleFunc("GET /processes/{id}/output", s.handleProcessOutput)
+	mux.HandleFunc("POST /combo", s.handleSetCombo)
 	// Order matters: recover (outermost) → log → host/auth gate → mux.
 	return s.recoverMiddleware(s.logMiddleware(s.guardMiddleware(mux)))
 }
@@ -395,6 +396,26 @@ func (s *Server) handleUpdateToolSettings(w http.ResponseWriter, r *http.Request
 	}
 	s.agent.ReplaceDisabledTools(req.Disabled)
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+type setComboRequest struct {
+	Combo string `json:"combo"`
+}
+
+// handleSetCombo switches the combo future messages route to. Validated
+// against the gateway's advertised combos (see agent.SetActiveCombo);
+// in-flight turns keep the combo they started with.
+func (s *Server) handleSetCombo(w http.ResponseWriter, r *http.Request) {
+	var req setComboRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
+		return
+	}
+	if err := s.agent.SetActiveCombo(r.Context(), req.Combo); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "combo": req.Combo})
 }
 
 func (s *Server) handleListProcesses(w http.ResponseWriter, r *http.Request) {

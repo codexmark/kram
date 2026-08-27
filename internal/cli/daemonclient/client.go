@@ -308,6 +308,13 @@ func (c *Client) UpdateToolSettings(ctx context.Context, disabled []string) erro
 	return c.doJSON(ctx, http.MethodPut, "/tools/settings", map[string]any{"disabled": disabled}, nil)
 }
 
+// SetCombo switches the daemon's active combo — the combo ID future
+// messages route to. Takes effect on the next message; an in-flight turn
+// keeps the combo it started with.
+func (c *Client) SetCombo(ctx context.Context, combo string) error {
+	return c.doJSON(ctx, http.MethodPost, "/combo", map[string]string{"combo": combo}, nil)
+}
+
 // ContextCategory is one real contributor to a session's context-window usage.
 type ContextCategory struct {
 	Name   string `json:"name"`

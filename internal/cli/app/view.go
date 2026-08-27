@@ -367,7 +367,11 @@ func (m Model) View() string {
 	case panelStrategy:
 		b.WriteString(m.renderStrategyPanel())
 	case panelStrategyPicker:
-		b.WriteString(m.renderStrategyPicker())
+		if m.routePickerLevel == routeLevelCombo {
+			b.WriteString(m.renderComboPicker())
+		} else {
+			b.WriteString(m.renderStrategyPicker())
+		}
 	case panelContext:
 		b.WriteString(m.renderContextPanel())
 	case panelRoute:

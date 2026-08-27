@@ -17,12 +17,12 @@ func TestRunOAuthWithoutStoreAndRouterFailure(t *testing.T) {
 	cfg := localConfig()
 	cfg.Providers[0].AuthMode = "oauth"
 	cfg.Providers[0].APIKeyEnv = "token"
-	if err := Run(context.Background(), cfg, nil, nil); err == nil || !strings.Contains(err.Error(), "requires credentials") {
+	if err := Run(context.Background(), cfg, "", nil, nil); err == nil || !strings.Contains(err.Error(), "requires credentials") {
 		t.Fatalf("err=%v", err)
 	}
 	cfg = localConfig()
 	cfg.Combos[0].Strategy = "not-real"
-	if err := Run(context.Background(), cfg, discardLogger(), nil); err == nil || !strings.Contains(err.Error(), "building router") {
+	if err := Run(context.Background(), cfg, "", discardLogger(), nil); err == nil || !strings.Contains(err.Error(), "building router") {
 		t.Fatalf("err=%v", err)
 	}
 }
@@ -30,7 +30,7 @@ func TestRunOAuthWithoutStoreAndRouterFailure(t *testing.T) {
 func TestRunReturnsListenErrorAndAdapterUnknown(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cfg := localConfig()
-	err := Run(ctx, cfg, discardLogger(), nil)
+	err := Run(ctx, cfg, "", discardLogger(), nil)
 	cancel()
 	if err == nil {
 		t.Fatal("invalid negative port should fail ListenAndServe")

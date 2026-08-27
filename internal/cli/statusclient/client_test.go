@@ -43,20 +43,46 @@ func TestSetStrategySendsMutationAndDecodesCombo(t *testing.T) {
 		if r.Method != http.MethodPost || r.URL.Path != "/admin/strategy" {
 			t.Fatalf("request = %s %s", r.Method, r.URL.Path)
 		}
-		var body map[string]string
+		var body map[string]any
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			t.Fatal(err)
 		}
 		if body["combo"] != "default" || body["strategy"] != "round-robin" {
 			t.Fatalf("body=%v", body)
 		}
+		// A plain runtime switch omits the persistence flags entirely
+		// (omitempty), so the gateway never mistakes it for a save.
+		if _, ok := body["persist"]; ok {
+			t.Fatalf("runtime switch should not send persist: %v", body)
+		}
+		if _, ok := body["make_default"]; ok {
+			t.Fatalf("runtime switch should not send make_default: %v", body)
+		}
 		_ = json.NewEncoder(w).Encode(Combo{ID: "default", Strategy: "round-robin", Providers: []string{"a", "b"}})
 	}))
 	defer srv.Close()
 
-	updated, err := New(srv.URL).SetStrategy(context.Background(), "default", "round-robin")
+	updated, err := New(srv.URL).SetStrategy(context.Background(), "default", "round-robin", false, false)
 	if err != nil || updated.Strategy != "round-robin" {
 		t.Fatalf("updated=%+v err=%v", updated, err)
+	}
+}
+
+func TestSetStrategyPersistSendsFlags(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		if body["persist"] != true || body["make_default"] != true {
+			t.Fatalf("save should send persist and make_default: %v", body)
+		}
+		_ = json.NewEncoder(w).Encode(Combo{ID: "default", Strategy: "smart", Providers: []string{"a", "b"}})
+	}))
+	defer srv.Close()
+
+	if _, err := New(srv.URL).SetStrategy(context.Background(), "default", "smart", true, true); err != nil {
+		t.Fatalf("err=%v", err)
 	}
 }
 
@@ -67,7 +93,7 @@ func TestSetStrategyReturnsGatewayErrorMessage(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	if _, err := New(srv.URL).SetStrategy(context.Background(), "default", "bad"); err == nil || err.Error() != "gateway: unknown strategy" {
+	if _, err := New(srv.URL).SetStrategy(context.Background(), "default", "bad", false, false); err == nil || err.Error() != "gateway: unknown strategy" {
 		t.Fatalf("err=%v", err)
 	}
 }

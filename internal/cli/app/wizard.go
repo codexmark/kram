@@ -171,9 +171,9 @@ func (m Model) renderWizardRouting() string {
 	}
 	b.WriteString("\n")
 	if wizardRoutingOptions[m.wizardRoutingCursor].strategy == "" {
-		resolved := "PRIORITY"
-		if !m.wizardHavePaidProvider() {
-			resolved = "ROUND ROBIN"
+		resolved := "SMART"
+		if m.wizardConfiguredProviderCount() <= 1 {
+			resolved = "SINGLE PROVIDER"
 		}
 		b.WriteString(styleHint.Render("Auto currently resolves to: "+resolved) + "\n\n")
 	}
@@ -203,25 +203,31 @@ func (m Model) handleWizardRoutingKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// wizardHavePaidProvider mirrors cmd/kram's own autoStrategy heuristic
-// (a paid provider present favors stable priority order; free-tier-only
-// favors round-robin) so the "Auto currently resolves to" line is the
-// real answer, not a guess — it just can't call that unexported function
-// directly across the main/library boundary, so the tiny lookup is
-// duplicated here against the same providercatalog data it reads from.
-func (m Model) wizardHavePaidProvider() bool {
-	configured := make(map[string]bool)
-	for i, row := range m.accountRows() {
-		if row.envSet || row.storedSet {
-			configured[providercatalog.Accounts[i].EnvVar] = true
-		}
-	}
+// wizardConfiguredProviderCount counts how many gateway providers are
+// configured right now — every catalog entry backed by a real credential
+// (mirroring gatewayconfig.catalogProviderConfig, so one shared key like
+// OpenRouter's counts once per free model it fans out into) plus every
+// registered custom provider — so the "Auto currently resolves to" preview
+// matches what gatewayconfig.autoStrategy will pick from the same count (one
+// provider → single/no routing; two or more → smart).
+func (m Model) wizardConfiguredProviderCount() int {
+	n := 0
 	for _, p := range providercatalog.Providers {
-		if configured[p.EnvVar] && !p.FreeTier {
-			return true
+		if os.Getenv(p.EnvVar) != "" {
+			n++
+			continue
+		}
+		if m.credStore != nil {
+			if m.credStore.Get(p.EnvVar) != "" {
+				n++
+				continue
+			}
+			if _, ok := m.credStore.GetOAuth(p.EnvVar); ok {
+				n++
+			}
 		}
 	}
-	return false
+	return n + len(m.customProviders)
 }
 
 // ---- Step 5: Permissions ----
