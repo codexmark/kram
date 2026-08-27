@@ -5724,3 +5724,31 @@ is unproven — revisit deliberately), and all mcp__* tools (a remote
 server's semantics aren't Kram's to vouch for). runTool's heartbeat logic
 was extracted into heartbeatWhile + execTool so the parallel group and
 the single-call path share one implementation.
+
+---
+
+## Automatic checkpoints with one-key rewind (Ctrl+G)
+
+snapshot_create/restore existed but were manual — the model had to
+remember. Now runLoop takes exactly one automatic checkpoint per run,
+lazily: the first tool batch containing a mutating call (tools.IsReadOnly
+is the classifier) snapshots the workspace *before* running, so read-only
+turns never pay for it and rewinding undoes everything the turn changed.
+Failure to snapshot (no git, exotic workspace) is best-effort — a turn is
+never blocked by its own checkpoint.
+
+Rewind is Ctrl+G in the TUI, a deliberate two-press flow with the id
+pinned: the first press fetches and shows exactly which checkpoint would
+be restored (GET /rewind — only AutoCheckpointPrefix snapshots qualify,
+never one the model or user created deliberately), the second press
+restores that id specifically (POST /rewind), so a slow confirmation can
+never restore a different checkpoint than the one shown. Esc or the
+notice timeout disarms; a running turn refuses with "esc interrupts it
+first".
+
+Service.Rewind captures a "pre-rewind state" snapshot before restoring —
+two jobs at once: the rewind itself becomes undoable, and files the turn
+*created* come under the snapshot repository's knowledge, without which
+Restore (deliberately — see its doc) would leave them behind as orphans.
+The snapshot store's semantics are untouched; the layering is the
+caller's.

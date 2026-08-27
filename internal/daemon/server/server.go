@@ -61,6 +61,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /processes", s.handleListProcesses)
 	mux.HandleFunc("GET /processes/{id}/output", s.handleProcessOutput)
 	mux.HandleFunc("POST /combo", s.handleSetCombo)
+	mux.HandleFunc("GET /rewind", s.handleRewindInfo)
+	mux.HandleFunc("POST /rewind", s.handleRewind)
 	// Order matters: recover (outermost) → log → host/auth gate → mux.
 	return s.recoverMiddleware(s.logMiddleware(s.guardMiddleware(mux)))
 }
@@ -416,6 +418,47 @@ func (s *Server) handleSetCombo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "combo": req.Combo})
+}
+
+type rewindRequest struct {
+	ID string `json:"id"`
+}
+
+// handleRewindInfo reports the newest automatic pre-mutation checkpoint —
+// what a one-key rewind would restore to — so the client can show it and
+// confirm before the destructive POST below.
+func (s *Server) handleRewindInfo(w http.ResponseWriter, r *http.Request) {
+	snap, ok, err := s.agent.LatestAutoCheckpoint(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if !ok {
+		writeError(w, http.StatusNotFound, "no automatic checkpoint exists yet — one is taken before a turn's first file change")
+		return
+	}
+	writeJSON(w, http.StatusOK, snap)
+}
+
+// handleRewind restores the workspace to the given snapshot id — the id
+// is required (from a prior GET /rewind) so a slow confirmation can never
+// restore a different checkpoint than the one the user was shown.
+func (s *Server) handleRewind(w http.ResponseWriter, r *http.Request) {
+	var req rewindRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
+		return
+	}
+	if req.ID == "" {
+		writeError(w, http.StatusBadRequest, "id is required (from GET /rewind)")
+		return
+	}
+	res, snap, err := s.agent.Rewind(r.Context(), req.ID)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"restored": res, "snapshot": snap})
 }
 
 func (s *Server) handleListProcesses(w http.ResponseWriter, r *http.Request) {
