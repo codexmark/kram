@@ -5202,3 +5202,52 @@ provider's window round-trips through save/reload (and clamps negatives), and
 crashing. An adversarial review (budget wiring end-to-end, and the estimator /
 form-index integration, including a deliberate check for small-window
 compaction thrash) returned zero findings.
+
+---
+
+## Calibrating the token estimate with real prompt_tokens (post-audit #70, part 3)
+
+Parts 1 & 2 gave the budget a correct per-model *ceiling* and made images
+count. This closes the loop on the *estimate* itself: `chars/4` is
+systematically off — usually an underestimate for code, which tokenizes
+denser than prose — so the budget check could fire late relative to the
+model's real window even with the ceiling right. The gateway already returns
+the real `prompt_tokens` on every response (today only surfaced in the
+context icon); the audit's cheap alternative to a real per-provider tokenizer
+was to feed that back into the estimate.
+
+`internal/daemon/agent.tokenCalibrator` stores a per-session multiplier.
+After each successful call, `observe(sessionID, rawEstimate, realTokens)`
+records `real / estimate`, EMA-smoothed (weight 0.5, so a one-off outlier
+doesn't whipsaw) and clamped to `[0.5, 3.0]` (a garbage usage report can't
+break budgeting). Later budget checks multiply their `chars/4` estimates by
+`factor(sessionID)` (1.0 until the first response, so a session's first turn
+is unchanged). Direction: when the model tokenizes denser than the estimate,
+factor > 1, the scaled estimate rises, and compaction fires *sooner* — the
+correct direction, since we were underestimating.
+
+Two subtleties the design got right, both confirmed by adversarial review:
+- **The estimate/usage pairing.** `observe` is called inside
+  `callModelWithRetry` on the *first successful round*, using that call's own
+  `result.Usage.PromptTokens` **before** it's summed with any failed rounds'
+  usage — summing would double-count the prompt across retries and corrupt
+  the ratio. The paired `sentEstimate` is computed in `runLoop` as
+  `EstimateTokens(effective) + fixedTokens` *after* any prune, i.e. a faithful
+  raw estimate of exactly what went on the wire (history + fixed preamble +
+  tool defs, images included).
+- **Panel/trigger consistency.** `context_usage.go` scales the same figures by
+  the same factor (leaving the real-window `Budget` unscaled), preserving its
+  standing invariant that the context panel and the compaction trigger never
+  disagree.
+
+The per-session map is bounded (LRU, 256 entries) exactly like
+`router.stickyStore` — a daemon serving thousands of short-lived sessions
+over its lifetime can't grow it without limit; an evicted session simply
+re-learns its factor from its next response. (This was the one finding of the
+part-3 adversarial review — a slow unbounded-map leak — fixed by adopting the
+established in-repo bounded-LRU convention rather than leaving it.) The
+calibrator is nil-safe, so a `Service` built directly in a test behaves
+exactly as before calibration existed. Tests pin the learned ratio,
+EMA smoothing, clamping, non-positive/​nil inputs, the LRU bound (a
+continuously-used session survives eviction), and the full end-to-end loop
+through a mock gateway (a 150/100 response teaches a 1.5× factor).

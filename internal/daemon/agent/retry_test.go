@@ -13,6 +13,33 @@ import (
 	"github.com/codexmark/kram/internal/openai"
 )
 
+// TestCallModelWithRetryFeedsCalibrator proves the end-to-end calibration
+// loop: a successful call whose response reports 150 real prompt tokens,
+// against a supplied raw estimate of 100, teaches the session a 1.5×
+// correction factor.
+func TestCallModelWithRetryFeedsCalibrator(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(openai.ChatCompletionResponse{
+			Choices: []openai.ChatCompletionChoice{{Message: openai.ChatMessage{Role: "assistant", Content: "ok"}}},
+			Usage:   openai.Usage{PromptTokens: 150, CompletionTokens: 1, TotalTokens: 151},
+		})
+	}))
+	defer srv.Close()
+
+	s := &Service{
+		gateway:           gatewayclient.New(srv.URL),
+		heartbeatInterval: heartbeatInterval,
+		cfg:               Config{MaxGatewayRounds: 3},
+		calibrator:        newTokenCalibrator(),
+	}
+	if _, err := s.callModelWithRetry(context.Background(), "sess", 100, "default", nil, nil, nil); err != nil {
+		t.Fatalf("call failed: %v", err)
+	}
+	if got := s.calibrator.factor("sess"); got != 1.5 {
+		t.Errorf("calibration factor after a 150/100 call = %v, want 1.5", got)
+	}
+}
+
 func TestBackoffWithJitterGrowsAndCaps(t *testing.T) {
 	for round := 0; round < 6; round++ {
 		got := backoffWithJitter(round, 0)
@@ -76,7 +103,7 @@ func TestCallModelWithRetrySucceedsAfterRetryableFailures(t *testing.T) {
 			notices = append(notices, evt.Notice)
 		}
 	}
-	result, err := s.callModelWithRetry(context.Background(), "default", nil, nil, onEvent)
+	result, err := s.callModelWithRetry(context.Background(), "s", 0, "default", nil, nil, onEvent)
 	if err != nil {
 		t.Fatalf("expected eventual success, got error: %v", err)
 	}
@@ -109,7 +136,7 @@ func TestCallModelWithRetryStopsAfterNonRetryableFailure(t *testing.T) {
 			notices++
 		}
 	}
-	_, err := s.callModelWithRetry(context.Background(), "default", nil, nil, onEvent)
+	_, err := s.callModelWithRetry(context.Background(), "s", 0, "default", nil, nil, onEvent)
 	if err == nil {
 		t.Fatal("expected an error for a non-retryable failure, got success")
 	}
@@ -129,7 +156,7 @@ func TestCallModelWithRetryGivesUpAfterMaxRounds(t *testing.T) {
 
 	s := &Service{gateway: gatewayclient.New(srv.URL), heartbeatInterval: heartbeatInterval, cfg: Config{MaxGatewayRounds: 3}}
 
-	_, err := s.callModelWithRetry(context.Background(), "default", nil, nil, nil)
+	_, err := s.callModelWithRetry(context.Background(), "s", 0, "default", nil, nil, nil)
 	if err == nil {
 		t.Fatal("expected an error after exhausting every round")
 	}
@@ -145,7 +172,7 @@ func TestCallModelWithRetryGivesUpAfterMaxRounds(t *testing.T) {
 func TestCallModelWithRetryDoesNotRetryPlainNonGatewayError(t *testing.T) {
 	s := &Service{gateway: gatewayclient.New("http://127.0.0.1:1"), heartbeatInterval: heartbeatInterval, cfg: Config{MaxGatewayRounds: 3}}
 
-	_, err := s.callModelWithRetry(context.Background(), "default", nil, nil, nil)
+	_, err := s.callModelWithRetry(context.Background(), "s", 0, "default", nil, nil, nil)
 	if err == nil {
 		t.Fatal("expected an error for an unreachable gateway")
 	}

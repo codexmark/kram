@@ -244,6 +244,11 @@ type Service struct {
 	// test that wants bufferedCall's ticker on a testable timescale
 	// instead of waiting out the real interval.
 	heartbeatInterval time.Duration
+
+	// calibrator corrects the chars/4 token estimate toward each session's
+	// real prompt_tokens, so the compaction budget tracks the model's
+	// actual tokenizer instead of a fixed approximation — see calibration.go.
+	calibrator *tokenCalibrator
 }
 
 // New builds an agent Service.
@@ -268,6 +273,7 @@ func New(st *store.Store, gw *gatewayclient.Client, tr *tools.Registry, cfg Conf
 		store: st, gateway: gw, tools: tr, cfg: cfg.withDefaults(),
 		pending: make(map[string]chan string), pendingApprovals: make(map[string]chan tools.ApprovalDecision),
 		heartbeatInterval: heartbeatInterval,
+		calibrator:        newTokenCalibrator(),
 	}, nil
 }
 
@@ -583,9 +589,15 @@ func (s *Service) runLoop(ctx context.Context, sessionID, model string, depth in
 			toolDefs = nil
 		}
 		fixedTokens := estimatePromptPartTokens(append(append([]PromptPart{}, preambleParts...), postscriptParts...)) + estimateToolDefinitionTokens(toolDefs)
-		policy := contextpolicy.New(s.cfg.MaxContextTokens, fixedTokens)
+		// Correct the chars/4 estimates toward this session's real
+		// prompt_tokens before comparing against the budget — see
+		// calibration.go. Factor is 1.0 until the first response is observed,
+		// so the pre-calibration behavior is unchanged for a session's first
+		// call.
+		calibration := s.calibrator.factor(sessionID)
+		policy := contextpolicy.New(s.cfg.MaxContextTokens, scaleTokens(fixedTokens, calibration))
 		pruned := compaction.PruneForModel(effective)
-		switch policy.Action(compaction.EstimateTokens(effective), compaction.EstimateTokens(pruned)) {
+		switch policy.Action(scaleTokens(compaction.EstimateTokens(effective), calibration), scaleTokens(compaction.EstimateTokens(pruned), calibration)) {
 		case contextpolicy.Compact:
 			if compactions >= s.cfg.MaxCompactionsPerRun {
 				return RunResult{}, ErrContextOverflow
@@ -647,13 +659,19 @@ func (s *Service) runLoop(ctx context.Context, sessionID, model string, depth in
 		modelMessages := append(preamble, toModelMessages(effective)...)
 		modelMessages = append(modelMessages, partsToMessages(postscriptParts)...)
 
+		// Raw (uncalibrated) chars/4 estimate of exactly what we're about to
+		// send — history as finally pruned, plus the fixed preamble/tools.
+		// Paired with the real prompt_tokens the response reports, this is
+		// what the calibrator learns from (see callModelWithRetry).
+		sentEstimate := compaction.EstimateTokens(effective) + fixedTokens
+
 		// Soft landing (Hermes's pattern) on the final allowed turn: stop
 		// offering tools and ask directly for a wrap-up, rather than
 		// hard-cutting mid-tool-loop. Tool *visibility* is a runtime/policy
 		// concern, not prompt content — deliberately kept out of the
 		// compiler above.
 		emit(onEvent, Event{Kind: EventRouteStart})
-		callResult, err := s.callModelWithRetry(ctx, model, modelMessages, toolDefs, onEvent)
+		callResult, err := s.callModelWithRetry(ctx, sessionID, sentEstimate, model, modelMessages, toolDefs, onEvent)
 		if err != nil {
 			return RunResult{}, fmt.Errorf("gateway call failed: %w", err)
 		}

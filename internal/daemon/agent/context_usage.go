@@ -73,7 +73,19 @@ func (s *Service) ContextUsage(ctx context.Context, sessionID string) (ContextUs
 	for _, part := range parts {
 		partTokens[part.ID] = len(part.Content) / 4
 	}
-	fixedTokens := estimatePromptPartTokens(parts) + toolTokens
+	// Apply this session's token-estimate calibration to every chars/4
+	// figure, so the panel stays in lockstep with the compaction trigger,
+	// which calibrates the same way (see runLoop and calibration.go). The
+	// Budget below is the real model window and is deliberately NOT scaled.
+	calibration := s.calibrator.factor(sessionID)
+	rawFixed := estimatePromptPartTokens(parts) + toolTokens
+	summaryTokens = scaleTokens(summaryTokens, calibration)
+	messageTokens = scaleTokens(messageTokens, calibration)
+	toolTokens = scaleTokens(toolTokens, calibration)
+	for id, tok := range partTokens {
+		partTokens[id] = scaleTokens(tok, calibration)
+	}
+	fixedTokens := scaleTokens(rawFixed, calibration)
 	policy := contextpolicy.New(s.cfg.MaxContextTokens, fixedTokens)
 	used := summaryTokens + messageTokens + fixedTokens
 	free := policy.RemainingHistoryTokens(summaryTokens + messageTokens)
