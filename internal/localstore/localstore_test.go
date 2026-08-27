@@ -77,3 +77,43 @@ func TestAtomicWriteLeavesNoTempOnSuccess(t *testing.T) {
 		t.Fatalf("temp file still present after success (stat err = %v)", err)
 	}
 }
+
+// TestAtomicWriteErrorsWhenParentIsAFile exercises the MkdirAll failure
+// branch: a path whose parent component is an existing regular file can't
+// have its directory created, and the error must surface (not panic or
+// silently succeed).
+func TestAtomicWriteErrorsWhenParentIsAFile(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "afile")
+	if err := os.WriteFile(file, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// filepath.Dir here is file/sub, and `file` is not a directory.
+	if err := AtomicWrite(filepath.Join(file, "sub", "data"), []byte("y"), 0o644); err == nil {
+		t.Error("expected an error when a parent path component is a file")
+	}
+}
+
+// TestAtomicWriteErrorsWhenTempCannotBeWritten exercises the writeAndSync
+// failure branch and the temp cleanup that follows it: if the ".tmp" path is
+// already a directory, opening it for writing fails, AtomicWrite returns the
+// error, and it must not have clobbered any existing destination file.
+func TestAtomicWriteErrorsWhenTempCannotBeWritten(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "data")
+	if err := os.WriteFile(path, []byte("original"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Make the temp path a directory so OpenFile(tmp) fails.
+	if err := os.Mkdir(path+".tmp", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := AtomicWrite(path, []byte("new"), 0o644); err == nil {
+		t.Error("expected an error when the temp path can't be opened for writing")
+	}
+	// The original file must be untouched — the failed write never got to
+	// the destination-replacing steps.
+	if got, _ := os.ReadFile(path); string(got) != "original" {
+		t.Errorf("destination was modified despite a failed write: %q", got)
+	}
+}
