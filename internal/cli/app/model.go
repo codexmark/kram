@@ -192,6 +192,15 @@ type Model struct {
 	rewindArmed *daemonclient.RewindCheckpoint
 	rewindBusy  bool
 
+	// Directional-flow telemetry driving the activity rail (#132) — see
+	// flowrail.go for the semantics of each.
+	flowRxAt    time.Time
+	flowTxAt    time.Time
+	flowSending bool
+	flowBytes   int
+	flowRateAt  time.Time
+	flowRate    float64
+
 	contextData daemonclient.ContextUsage
 	contextErr  error
 	haveContext bool
@@ -1440,6 +1449,7 @@ func (m Model) handleStreamEvent(msg streamEventMsg) (tea.Model, tea.Cmd) {
 	switch msg.event.Type {
 	case "delta":
 		m.workState = workWriting
+		m.noteFlowRx(len(msg.event.Content))
 		m.reasoningPreview = "" // real answer content started; the indicator reverts to status-only
 		if lm := last(); lm != nil {
 			lm.Content += msg.event.Content
@@ -1452,9 +1462,11 @@ func (m Model) handleStreamEvent(msg streamEventMsg) (tea.Model, tea.Cmd) {
 		// the freshest fragment is kept, not an accumulating blob;
 		// thinkingLine truncates it further for display.
 		m.reasoningPreview = msg.event.Content
+		m.noteFlowRx(len(msg.event.Content))
 
 	case "tool_start":
 		m.workState = workToolActive
+		m.noteFlowTx(len(msg.event.Args))
 		m.reasoningPreview = ""
 		m.activeTool = msg.event.Name
 		m.toolStartedAt = time.Now()
@@ -1467,6 +1479,9 @@ func (m Model) handleStreamEvent(msg streamEventMsg) (tea.Model, tea.Cmd) {
 
 	case "tool_result":
 		m.workState = workAnalyzingResult
+		// The result is what the daemon sends back to the model on the
+		// next call — outbound data from the rail's point of view.
+		m.noteFlowTx(len(msg.event.Result))
 		m.activeTool = ""
 		if lm := last(); lm != nil {
 			for i := len(lm.ToolActivity) - 1; i >= 0; i-- {
@@ -1509,6 +1524,10 @@ func (m Model) handleStreamEvent(msg streamEventMsg) (tea.Model, tea.Cmd) {
 		// the known candidate count until route_done lands.
 		m.routeRunning = true
 		m.workState = workModelActive
+		// The call's prompt/history is going up now; sending stays active
+		// until the first byte comes back (see noteFlowRx).
+		m.flowSending = true
+		m.flowTxAt = time.Now()
 
 	case "heartbeat":
 		// A payload-free heartbeat is still a real fact: the buffered model
