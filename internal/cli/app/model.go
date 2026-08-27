@@ -197,9 +197,15 @@ type Model struct {
 	flowRxAt    time.Time
 	flowTxAt    time.Time
 	flowSending bool
-	flowBytes   int
-	flowRateAt  time.Time
-	flowRate    float64
+	// streamNewCall marks that the next delta belongs to a NEW model call
+	// (set on route_start): the model narrates each tool round ("checking
+	// files", "updating plan"), and appending those onto the previous
+	// call's text with no separator produced a live word-soup. The done
+	// event still replaces everything with the authoritative final text.
+	streamNewCall bool
+	flowBytes     int
+	flowRateAt    time.Time
+	flowRate      float64
 
 	contextData daemonclient.ContextUsage
 	contextErr  error
@@ -1471,6 +1477,10 @@ func (m Model) handleStreamEvent(msg streamEventMsg) (tea.Model, tea.Cmd) {
 		m.noteFlowRx(len(msg.event.Content))
 		m.reasoningPreview = "" // real answer content started; the indicator reverts to status-only
 		if lm := last(); lm != nil {
+			if m.streamNewCall && lm.Content != "" {
+				lm.Content += "\n\n"
+			}
+			m.streamNewCall = false
 			lm.Content += msg.event.Content
 		}
 		m.refreshLiveIndicator() // only the streaming tail changed — see #69/refreshTranscript doc
@@ -1543,6 +1553,7 @@ func (m Model) handleStreamEvent(msg streamEventMsg) (tea.Model, tea.Cmd) {
 		// the known candidate count until route_done lands.
 		m.routeRunning = true
 		m.workState = workModelActive
+		m.streamNewCall = true // this call's first delta starts a fresh paragraph
 		// The call's prompt/history is going up now; sending stays active
 		// until the first byte comes back (see noteFlowRx).
 		m.flowSending = true
