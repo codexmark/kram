@@ -82,9 +82,16 @@ func (s *Service) callModelWithRetry(ctx context.Context, sessionID string, sent
 			wait := backoffWithJitter(round-1, minWait)
 			notice := fmt.Sprintf("transient gateway failure, retrying (round %d/%d in %s)",
 				round+1, s.cfg.MaxGatewayRounds, wait.Round(time.Millisecond))
-			if salvaged.Len() > 0 {
+			switch {
+			case salvaged.Len() > 0:
 				notice = fmt.Sprintf("stream dropped mid-answer — resuming where it stopped (round %d/%d in %s)",
 					round+1, s.cfg.MaxGatewayRounds, wait.Round(time.Millisecond))
+			case ge != nil && ge.Cause == openai.ClassRateLimit:
+				// Name the real situation: a rate limit isn't a mysterious
+				// "gateway failure", and when the provider sent Retry-After
+				// the wait shown is exactly what it asked for.
+				notice = fmt.Sprintf("provider rate limited — retrying in %s (round %d/%d)",
+					wait.Round(time.Millisecond), round+1, s.cfg.MaxGatewayRounds)
 			}
 			emit(onEvent, Event{Kind: EventNotice, Notice: notice})
 			select {
@@ -137,6 +144,30 @@ func (s *Service) callModelWithRetry(ctx context.Context, sessionID string, sent
 		}
 	}
 	return gatewayclient.Result{}, lastErr
+}
+
+// humanizeGatewayFailure translates a final (post-retry) gateway failure
+// into a message a person can act on, instead of the raw upstream body.
+// The original error stays wrapped (%w) so errors.As/Is callers are
+// unaffected; anything that isn't a typed GatewayError with a cause worth
+// translating passes through untouched.
+func humanizeGatewayFailure(err error, rounds int) error {
+	var ge *gatewayclient.GatewayError
+	if !errors.As(err, &ge) {
+		return err
+	}
+	switch ge.Cause {
+	case openai.ClassRateLimit:
+		if ge.RetryAfter > 0 {
+			return fmt.Errorf("provider rate limit hit — it asked to wait %s and %d retries weren't enough; wait a moment and resend (%w)",
+				ge.RetryAfter.Round(time.Second), rounds, err)
+		}
+		return fmt.Errorf("provider rate limit hit — %d retries weren't enough; wait a moment and resend (%w)", rounds, err)
+	case openai.ClassAuth:
+		return fmt.Errorf("provider rejected the credential — reconnect the account on the accounts screen (%w)", err)
+	default:
+		return err
+	}
 }
 
 // continuationNudge tells the model, in its own conversation, exactly how

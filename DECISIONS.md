@@ -5688,3 +5688,19 @@ Three cheap guards now close the class rather than the exemplars:
   asymmetry (#105) and the untyped streaming error (#109) both lived
   exactly in the gap this closes; the two parallel paths can no longer
   drift apart silently.
+
+---
+
+## Rate limits say what they are and what to do
+
+A rate-limited round used to retry under the generic "transient gateway
+failure" notice and, when retries ran out, dump the raw upstream body into
+the transcript. The retry notice now names the situation ("provider rate
+limited — retrying in 34s"), with the wait already floored to the
+provider's own Retry-After (that floor predates this change; see
+backoffWithJitter). And a final rate-limit/auth failure is translated by
+humanizeGatewayFailure into something a person can act on — "provider rate
+limit hit — it asked to wait 30s and 3 retries weren't enough; wait a
+moment and resend" / "provider rejected the credential — reconnect the
+account" — with the typed original still wrapped for errors.As callers.
+Everything else passes through untouched.
