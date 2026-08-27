@@ -604,6 +604,25 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.refreshTranscript()
 		return m, readNextEventCmd(msg.stream)
 
+	case steerDoneMsg:
+		if msg.err != nil {
+			// Lost the race with the turn's end: nothing was queued. Put
+			// the text back in the composer for a normal send and drop the
+			// optimistic transcript entry.
+			for i := len(m.messages) - 1; i >= 0; i-- {
+				if m.messages[i].Role == "user" && m.messages[i].Content == msg.content {
+					m.messages = append(m.messages[:i], m.messages[i+1:]...)
+					break
+				}
+			}
+			m.input.SetValue(msg.content)
+			m.refreshTranscript()
+			m.strategyNoticeRev++
+			m.strategyNotice = steerRaceNotice
+			return m, clearStrategyNoticeCmd(m.strategyNoticeRev)
+		}
+		return m, nil
+
 	case interruptDoneMsg:
 		if msg.err != nil {
 			m.strategyNoticeRev++
@@ -1331,8 +1350,22 @@ func (m Model) submit() (tea.Model, tea.Cmd) {
 	}
 
 	// A message needs either text or at least one staged image.
-	if (text == "" && len(m.pendingImages) == 0) || m.waiting {
+	if text == "" && len(m.pendingImages) == 0 {
 		return m, nil
+	}
+	if m.waiting {
+		// Mid-turn steering (#110): the composer stays live during a turn.
+		// Text is queued server-side and picked up at the next model-call
+		// boundary; images can't be queued (they need a fresh turn).
+		if text == "" || len(m.pendingImages) > 0 {
+			m.strategyNoticeRev++
+			m.strategyNotice = steerImagesNotice
+			return m, clearStrategyNoticeCmd(m.strategyNoticeRev)
+		}
+		m.input.Reset()
+		m.messages = append(m.messages, chatMessage{Role: "user", Content: text, Notices: []string{steerQueuedNotice}})
+		m.refreshTranscript()
+		return m, steerCmd(m.daemon, m.sessionID, text)
 	}
 	m.input.SetValue("")
 	images := m.pendingImages

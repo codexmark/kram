@@ -251,6 +251,12 @@ type Service struct {
 	// actual tokenizer instead of a fixed approximation — see calibration.go.
 	calibrator *tokenCalibrator
 
+	// steerMu guards steering: user messages queued while a turn runs,
+	// drained into the session at the next model-call boundary — see
+	// QueueSteering and drainSteering.
+	steerMu  sync.Mutex
+	steering map[string][]string
+
 	// comboMu guards activeCombo — the gateway combo new top-level runs
 	// route to. Seeded from cfg.Model at startup and switched at runtime via
 	// SetActiveCombo (the in-app routing picker); a run captures it once at
@@ -284,6 +290,7 @@ func New(st *store.Store, gw *gatewayclient.Client, tr *tools.Registry, cfg Conf
 		heartbeatInterval: heartbeatInterval,
 		calibrator:        newTokenCalibrator(),
 		activeCombo:       resolved.Model,
+		steering:          make(map[string][]string),
 	}, nil
 }
 
@@ -327,6 +334,38 @@ func (s *Service) Tools() []tools.ToolInfo { return s.tools.AllTools() }
 // on it so one-key rewind only ever targets automatic checkpoints, never
 // a snapshot the model or user created deliberately.
 const AutoCheckpointPrefix = "auto checkpoint"
+
+// QueueSteering enqueues a mid-turn user message for sessionID. The
+// running turn drains the queue at its next model-call boundary — after
+// the current batch's tool results, or after a final answer (which then
+// keeps the turn going instead of ending it). Queued content survives a
+// lost race with the turn's end: the session's next run drains leftovers
+// before its first model call, so a steering message is never dropped.
+func (s *Service) QueueSteering(sessionID, content string) {
+	s.steerMu.Lock()
+	defer s.steerMu.Unlock()
+	s.steering[sessionID] = append(s.steering[sessionID], content)
+}
+
+// drainSteering persists any queued steering messages as real user
+// messages (so the next model call simply sees them in history) and
+// reports whether any were applied.
+func (s *Service) drainSteering(sessionID string, onEvent EventFunc) (bool, error) {
+	s.steerMu.Lock()
+	queued := s.steering[sessionID]
+	delete(s.steering, sessionID)
+	s.steerMu.Unlock()
+	if len(queued) == 0 {
+		return false, nil
+	}
+	for _, content := range queued {
+		if _, err := s.store.AppendMessage(sessionID, store.Message{Role: "user", Content: content}); err != nil {
+			return false, fmt.Errorf("persisting steering message: %w", err)
+		}
+	}
+	emit(onEvent, Event{Kind: EventNotice, Notice: fmt.Sprintf("picked up %d queued message(s) from you", len(queued))})
+	return true, nil
+}
 
 // LatestAutoCheckpoint returns the newest automatic pre-mutation
 // checkpoint, or ok=false when none exists yet.
@@ -654,6 +693,11 @@ func (s *Service) runLoop(ctx context.Context, sessionID, model string, depth in
 			segment := turn/s.cfg.MaxTurns + 1
 			emit(onEvent, Event{Kind: EventSegment, Segment: segment, Segments: s.cfg.MaxSegmentsPerRun})
 		}
+		// Steering queued while the previous batch ran (or left over from
+		// a prior run's final moments) becomes part of this call's history.
+		if _, err := s.drainSteering(sessionID, onEvent); err != nil {
+			return RunResult{}, err
+		}
 		all, err := s.store.ListMessages(sessionID)
 		if err != nil {
 			return RunResult{}, fmt.Errorf("loading history: %w", err)
@@ -830,6 +874,14 @@ func (s *Service) runLoop(ctx context.Context, sessionID, model string, depth in
 				return RunResult{}, fmt.Errorf("persisting assistant message: %w", err)
 			}
 			result.Message = assistantMsg
+			// The user redirected mid-answer: the finished answer stands,
+			// and the turn keeps going — the next iteration's history is
+			// this answer plus their new message.
+			if steered, err := s.drainSteering(sessionID, onEvent); err != nil {
+				return RunResult{}, err
+			} else if steered {
+				continue
+			}
 			return result, nil
 		}
 

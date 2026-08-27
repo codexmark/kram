@@ -142,6 +142,20 @@ func interruptTurnCmd(c *daemonclient.Client, sessionID string) tea.Cmd {
 	}
 }
 
+// steerDoneMsg reports whether a mid-turn queued message was accepted.
+type steerDoneMsg struct {
+	content string
+	err     error
+}
+
+func steerCmd(c *daemonclient.Client, sessionID, content string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		return steerDoneMsg{content: content, err: c.Steer(ctx, sessionID, content)}
+	}
+}
+
 // attachTurnMsg carries the result of trying to reattach to a turn that
 // kept running while no client was watching. err covers the common
 // "no active turn" case — simply nothing to do.

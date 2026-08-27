@@ -35,6 +35,13 @@ const (
 	rewindDoneNoticeFmt      = "✓ rewound %d file(s) to checkpoint %s"
 )
 
+// Mid-turn steering notices (see submit's waiting branch).
+const (
+	steerQueuedNotice = "queued mid-turn — the agent picks this up at its next step"
+	steerImagesNotice = "images can't be queued mid-turn — wait for the turn to finish"
+	steerRaceNotice   = "the turn just ended — press enter to send normally"
+)
+
 // Transcript and top-level view chrome.
 const (
 	transcriptErrPrefix    = "error: "

@@ -5802,3 +5802,26 @@ loading a session's history — walk away mid-task, reopen the session,
 and the live turn picks up where the replay ends. A slow subscriber gets
 frames dropped rather than ever stalling the run; the done frame's
 complete persisted message makes its transcript whole.
+
+---
+
+## Mid-turn steering: the composer stays live
+
+The only mid-turn control used to be Esc — redirecting the agent meant
+killing its work. The composer now stays usable during a turn: submitted
+text is queued (POST /sessions/{id}/steer, one of the detachable-turn
+registry's clients), shown optimistically with a "queued mid-turn"
+notice, and drained by the running loop at its next model-call boundary
+as a real persisted user message — so the model simply sees it in
+history, no special prompt shape.
+
+Two boundary decisions matter. A final answer with steering pending does
+not end the turn: the answer stands (persisted as-is) and the loop
+continues, so the next call sees the finished answer plus the user's
+redirect — "answer arrived but the user asked for more mid-flight" is a
+continuation, not a new conversation. And a message that loses the race
+with the turn's end is never dropped: queued content survives in the
+Service and drains before the *next* run's first model call; on the CLI
+side, a failed steer (turn just ended) puts the text back in the
+composer with a "press enter to send normally" notice. Images can't be
+queued — they need a fresh turn, and the composer says so.
