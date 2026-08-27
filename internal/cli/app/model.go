@@ -586,6 +586,30 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.messages = append(m.messages, chatMessage{Role: hm.Role, Content: hm.Content, Provider: hm.Provider})
 		}
 		m.refreshTranscript()
+		// A turn may have kept running while nobody watched (detachable
+		// turns, #112) — try to reattach; the common "no active turn"
+		// answer is simply ignored.
+		return m, attachTurnCmd(m.daemon, m.sessionID)
+
+	case attachTurnMsg:
+		if msg.err != nil || msg.stream == nil {
+			return m, nil // no live turn — the loaded history is the record
+		}
+		m.waiting = true
+		m.interrupting = false
+		m.waitStartedAt = time.Now()
+		m.lastEventAt = time.Now()
+		m.activeStream = msg.stream
+		m.messages = append(m.messages, chatMessage{Role: "assistant", streaming: true})
+		m.refreshTranscript()
+		return m, readNextEventCmd(msg.stream)
+
+	case interruptDoneMsg:
+		if msg.err != nil {
+			m.strategyNoticeRev++
+			m.strategyNotice = "interrupt failed: " + msg.err.Error()
+			return m, clearStrategyNoticeCmd(m.strategyNoticeRev)
+		}
 		return m, nil
 
 	case streamStartMsg:
@@ -927,12 +951,16 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			_ = m.activeStream.Close()
 			m.activeStream = nil
 			m.waiting = false
+			// Closing the stream only detaches now — the daemon keeps the
+			// turn running until the explicit interrupt below lands.
+			interrupt := interruptTurnCmd(m.daemon, m.sessionID)
 			if n := len(m.messages); n > 0 {
 				lm := &m.messages[n-1]
 				lm.streaming = false
 				lm.Notices = append(lm.Notices, interruptedByUser)
 			}
 			m.refreshTranscript()
+			return m, interrupt
 		}
 		return m, nil
 

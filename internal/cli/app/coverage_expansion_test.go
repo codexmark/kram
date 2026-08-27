@@ -489,7 +489,9 @@ func TestUpdateMessageMatrix(t *testing.T) {
 	}
 	next, cmd = m.Update(historyLoadedMsg{messages: []daemonclient.Message{{Role: "user", Content: "hi", Provider: "p"}}})
 	m = next.(Model)
-	if len(m.messages) != 1 || m.messages[0].Content != "hi" || m.messages[0].Provider != "p" || cmd != nil {
+	// cmd is the reattach attempt (#112): after loading history the client
+	// checks for a turn that kept running while nobody watched.
+	if len(m.messages) != 1 || m.messages[0].Content != "hi" || m.messages[0].Provider != "p" || cmd == nil {
 		t.Fatalf("history success state = %+v cmd=%v", m.messages, cmd != nil)
 	}
 	// "system"-role stored messages are internal prompt-compiler bookkeeping
@@ -502,7 +504,7 @@ func TestUpdateMessageMatrix(t *testing.T) {
 		{Role: "assistant", Content: "real reply"},
 	}})
 	m = next.(Model)
-	if len(m.messages) != 2 || m.messages[0].Content != "real turn" || m.messages[1].Content != "real reply" || cmd != nil {
+	if len(m.messages) != 2 || m.messages[0].Content != "real turn" || m.messages[1].Content != "real reply" || cmd == nil {
 		t.Fatalf("history with a system marker = %+v cmd=%v, want the system message dropped", m.messages, cmd != nil)
 	}
 

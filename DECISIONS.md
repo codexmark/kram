@@ -5778,3 +5778,27 @@ call's context shrinks, the session keeps its full history, the user sees
 context", and the next healthy compaction summarizes as usual. If
 emergency pruning can't drop anything (single huge turn), the original
 error still surfaces — there was nothing to fall back to.
+
+---
+
+## A running turn survives its client (detachable turns)
+
+The daemon/CLI split existed, but the turn's lifetime was still chained to
+one HTTP connection: the run executed under the SSE request's context, so
+closing the stream canceled it — which is exactly how Esc worked, and
+exactly why a terminal crash at minute 8 of a long task killed everything.
+
+Turns now run detached (internal/daemon/server/turns.go): one turn per
+session, its own context, every event frame published into a bounded
+replay buffer (4MB, oldest-first discard with an honest notice on
+reattach) with any number of SSE subscribers attaching and detaching
+freely. Closing a stream merely unsubscribes. The explicit contract
+replaces the implicit one: POST /sessions/{id}/interrupt cancels (the
+CLI's Esc now calls it in addition to closing its stream), GET
+/sessions/{id}/turn reattaches with full replay, and a finished turn is
+retained for 60s so a client that disconnected right before completion
+still finds the terminal frame. The CLI reattaches automatically after
+loading a session's history — walk away mid-task, reopen the session,
+and the live turn picks up where the replay ends. A slow subscriber gets
+frames dropped rather than ever stalling the run; the done frame's
+complete persisted message makes its transcript whole.
