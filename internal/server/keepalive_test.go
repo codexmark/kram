@@ -85,3 +85,18 @@ func TestStreamResponseEmitsKeepAliveWhileUpstreamIsQuiet(t *testing.T) {
 		t.Fatalf("stream did not finish normally after the quiet stretch:\n%s", out)
 	}
 }
+
+// TestPeekIdleForGivesTheLastCandidateTheProviderBudget: fast give-up is
+// only rational while another ranked candidate remains.
+func TestPeekIdleForGivesTheLastCandidateTheProviderBudget(t *testing.T) {
+	pt := 120 * time.Second
+	if got := peekIdleFor(1, 3, pt); got != 0 {
+		t.Errorf("first of three = %v, want 0 (router default)", got)
+	}
+	if got := peekIdleFor(3, 3, pt); got != pt {
+		t.Errorf("last of three = %v, want the provider timeout %v", got, pt)
+	}
+	if got := peekIdleFor(1, 1, pt); got != pt {
+		t.Errorf("single candidate = %v, want the provider timeout %v", got, pt)
+	}
+}

@@ -38,18 +38,14 @@ const (
 	// worse (rate-limited) candidates that then failed too, compounding
 	// into a fully failed turn (see DECISIONS.md). A genuine hard ceiling
 	// still exists one layer down, at the transport: every provider
-	// adapter's http.Client carries its own timeout (120s in
-	// internal/provider/openai_compat.go). Note what that ceiling
-	// actually bounds, though — Go's http.Client.Timeout covers the
-	// *entire* request lifetime (dial, headers, and reading the full
-	// response body), not idle gaps between reads; it does not reset each
-	// time a byte arrives. So it's a real backstop against a connection
-	// that goes fully dead or one that's simply slower overall than
-	// 120s — not a per-token idle timer the way this package's own
-	// streamPeekIdleTimeout is. A stream that's still genuinely, slowly
-	// producing tokens past 120s total would still get cut off there;
-	// that's a real, known limit of the current design, not a solved
-	// case.
+	// adapter arms a phase watchdog (internal/provider/timeout.go's
+	// newStreamWatchdog) that bounds connect+headers and then every idle
+	// stretch between body reads — a byte-level idle detector at the
+	// provider's configured timeout, so a fully dead connection still
+	// fails there while a slowly-flowing stream never does. This value
+	// here is only the *default*: BoundedPeek takes its idle budget as a
+	// parameter, because the right budget depends on whether fallback is
+	// even possible — see chat.go's peekIdleFor.
 	streamPeekIdleTimeout = 5 * time.Second
 )
 
@@ -83,11 +79,20 @@ type StreamPeekResult struct {
 // its own client — once that commitment is made (headers sent), no
 // further fallback is possible, which is exactly the problem this
 // exists to solve (see DECISIONS.md, "Bounded streaming peek").
-func BoundedPeek(ctx context.Context, src <-chan provider.StreamEvent) StreamPeekResult {
+// idleBudget is how long to wait between events before giving up; a
+// non-positive value uses the short streamPeekIdleTimeout default. The
+// caller chooses it per attempt: short while further ranked candidates
+// remain (give up fast, fall back), long on the last candidate, where
+// rejecting buys nothing — there is nobody left to fall back to, so the
+// only honest budget is the provider layer's own.
+func BoundedPeek(ctx context.Context, src <-chan provider.StreamEvent, idleBudget time.Duration) StreamPeekResult {
+	if idleBudget <= 0 {
+		idleBudget = streamPeekIdleTimeout
+	}
 	var buffered []provider.StreamEvent
 	noSignalEvents := 0
 
-	idle := time.NewTimer(streamPeekIdleTimeout)
+	idle := time.NewTimer(idleBudget)
 	defer idle.Stop()
 
 	for {
@@ -103,7 +108,7 @@ func BoundedPeek(ctx context.Context, src <-chan provider.StreamEvent) StreamPee
 				default:
 				}
 			}
-			idle.Reset(streamPeekIdleTimeout)
+			idle.Reset(idleBudget)
 
 			if evt.Err != nil {
 				return StreamPeekResult{Reason: "error before meaningful content: " + evt.Err.Error(), Buffered: buffered}

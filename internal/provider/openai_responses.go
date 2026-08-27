@@ -107,6 +107,17 @@ type responsesRequest struct {
 	Tools          []responsesTool `json:"tools,omitempty"`
 	Include        []string        `json:"include,omitempty"`
 	PromptCacheKey string          `json:"prompt_cache_key,omitempty"`
+	// Reasoning asks for streamed reasoning summaries. Without it the
+	// backend emits nothing at all during the thinking phase, so the
+	// stream is dead silent for tens of seconds — the router's peek and
+	// the CLI's liveness display both depend on the summary deltas this
+	// unlocks (forwarded as StreamEvent.Reasoning below). Every model
+	// this Codex-only adapter can serve is reasoning-capable.
+	Reasoning *responsesReasoning `json:"reasoning,omitempty"`
+}
+
+type responsesReasoning struct {
+	Summary string `json:"summary,omitempty"`
 }
 
 // buildResponsesInput translates Kram's normalized messages into the
@@ -231,6 +242,7 @@ func (p *OpenAIResponses) ChatCompletion(ctx context.Context, req openai.ChatCom
 		Tools:          buildResponsesTools(req.Tools, supportsHostedToolSearch(model)),
 		Include:        []string{"reasoning.encrypted_content"},
 		PromptCacheKey: req.PromptCacheKey,
+		Reasoning:      &responsesReasoning{Summary: "auto"},
 	}
 
 	payload, err := json.Marshal(body)
@@ -295,6 +307,18 @@ func (p *OpenAIResponses) ChatCompletion(ctx context.Context, req openai.ChatCom
 				if evt.Delta != "" {
 					select {
 					case events <- StreamEvent{Delta: evt.Delta}:
+					case <-ctx.Done():
+						return false
+					}
+				}
+			case "response.reasoning_summary_text.delta", "response.reasoning_text.delta":
+				// Forwarded as Reasoning — the liveness-but-not-committable
+				// signal router.BoundedPeek and the CLI's thinking preview
+				// both understand. Without this the thinking phase is dead
+				// silence on the event channel and gets misread as a stall.
+				if evt.Delta != "" {
+					select {
+					case events <- StreamEvent{Reasoning: evt.Delta}:
 					case <-ctx.Done():
 						return false
 					}

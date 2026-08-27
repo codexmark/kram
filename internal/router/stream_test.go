@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/codexmark/kram/internal/openai"
 	"github.com/codexmark/kram/internal/provider"
@@ -12,7 +13,7 @@ import (
 func TestBoundedPeekNoBytesFallsBack(t *testing.T) {
 	ch := make(chan provider.StreamEvent)
 	close(ch) // closed immediately, no events at all
-	res := BoundedPeek(context.Background(), ch)
+	res := BoundedPeek(context.Background(), ch, 0)
 	if res.Committed {
 		t.Error("a stream that closes with zero events should not commit")
 	}
@@ -23,7 +24,7 @@ func TestBoundedPeekEmptyStreamFallsBack(t *testing.T) {
 	ch <- provider.StreamEvent{Delta: ""} // an empty delta — not meaningful signal
 	ch <- provider.StreamEvent{Done: true}
 	close(ch)
-	res := BoundedPeek(context.Background(), ch)
+	res := BoundedPeek(context.Background(), ch, 0)
 	if res.Committed {
 		t.Error("a stream that finishes Done with no text and no tool calls should not commit")
 	}
@@ -36,7 +37,7 @@ func TestBoundedPeekErrorBeforeMeaningfulContentFallsBack(t *testing.T) {
 	ch := make(chan provider.StreamEvent, 1)
 	ch <- provider.StreamEvent{Err: errors.New("upstream reset")}
 	close(ch)
-	res := BoundedPeek(context.Background(), ch)
+	res := BoundedPeek(context.Background(), ch, 0)
 	if res.Committed {
 		t.Error("an error before any meaningful content must not commit")
 	}
@@ -50,7 +51,7 @@ func TestBoundedPeekFirstTextDeltaCommits(t *testing.T) {
 	ch <- provider.StreamEvent{Delta: ""} // role-only opening chunk, not meaningful
 	ch <- provider.StreamEvent{Delta: "Hello"}
 	ch <- provider.StreamEvent{Done: true}
-	res := BoundedPeek(context.Background(), ch)
+	res := BoundedPeek(context.Background(), ch, 0)
 	if !res.Committed {
 		t.Fatalf("a real text delta should commit, got rejection: %s", res.Reason)
 	}
@@ -62,7 +63,7 @@ func TestBoundedPeekFirstTextDeltaCommits(t *testing.T) {
 func TestBoundedPeekToolCallCommits(t *testing.T) {
 	ch := make(chan provider.StreamEvent, 1)
 	ch <- provider.StreamEvent{Done: true, ToolCalls: []openai.ToolCall{{ID: "1", Function: openai.ToolCallFunction{Name: "grep"}}}}
-	res := BoundedPeek(context.Background(), ch)
+	res := BoundedPeek(context.Background(), ch, 0)
 	if !res.Committed {
 		t.Fatalf("a terminal event carrying tool calls should commit, got rejection: %s", res.Reason)
 	}
@@ -74,7 +75,7 @@ func TestBoundedPeekBufferIsActuallyBounded(t *testing.T) {
 		ch <- provider.StreamEvent{Delta: ""} // never meaningful, keeps peeking
 	}
 	close(ch)
-	res := BoundedPeek(context.Background(), ch)
+	res := BoundedPeek(context.Background(), ch, 0)
 	if res.Committed {
 		t.Error("an endless stream of non-meaningful deltas should never commit")
 	}
@@ -87,7 +88,7 @@ func TestBoundedPeekContextCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	ch := make(chan provider.StreamEvent) // never sends anything
-	res := BoundedPeek(ctx, ch)
+	res := BoundedPeek(ctx, ch, 0)
 	if res.Committed {
 		t.Error("a canceled context should never result in a commit")
 	}
@@ -105,7 +106,7 @@ func TestBoundedPeekReasoningDoesNotCountAgainstMaxEvents(t *testing.T) {
 		ch <- provider.StreamEvent{Reasoning: "thinking..."}
 	}
 	ch <- provider.StreamEvent{Delta: "the real answer"}
-	res := BoundedPeek(context.Background(), ch)
+	res := BoundedPeek(context.Background(), ch, 0)
 	if !res.Committed {
 		t.Fatalf("real content after many reasoning fragments should still commit, got rejection: %s", res.Reason)
 	}
@@ -120,7 +121,7 @@ func TestBoundedPeekReasoningOnlyStillFallsBackEventually(t *testing.T) {
 	ch <- provider.StreamEvent{Reasoning: "thinking one"}
 	ch <- provider.StreamEvent{Reasoning: "thinking two"}
 	close(ch)
-	res := BoundedPeek(context.Background(), ch)
+	res := BoundedPeek(context.Background(), ch, 0)
 	if res.Committed {
 		t.Error("a stream that only ever reasons and then closes should not commit")
 	}
@@ -141,7 +142,7 @@ func TestBoundedPeekToolCallProgressDoesNotCountAgainstMaxEvents(t *testing.T) {
 		ch <- provider.StreamEvent{ToolCallProgress: true}
 	}
 	ch <- provider.StreamEvent{Done: true, ToolCalls: []openai.ToolCall{{ID: "1", Type: "function"}}}
-	res := BoundedPeek(context.Background(), ch)
+	res := BoundedPeek(context.Background(), ch, 0)
 	if !res.Committed {
 		t.Fatalf("a real tool call after many tool-call-progress-only events should still commit, got rejection: %s", res.Reason)
 	}
@@ -157,7 +158,7 @@ func TestBoundedPeekPlainSilentEventsStillCountAgainstMaxEvents(t *testing.T) {
 		ch <- provider.StreamEvent{}
 	}
 	close(ch)
-	res := BoundedPeek(context.Background(), ch)
+	res := BoundedPeek(context.Background(), ch, 0)
 	if res.Committed {
 		t.Error("a stream of only plain, uninformative events should not commit")
 	}
@@ -171,8 +172,32 @@ func TestBoundedPeekToolCallProgressOnlyStillFallsBackEventually(t *testing.T) {
 	ch <- provider.StreamEvent{ToolCallProgress: true}
 	ch <- provider.StreamEvent{ToolCallProgress: true}
 	close(ch)
-	res := BoundedPeek(context.Background(), ch)
+	res := BoundedPeek(context.Background(), ch, 0)
 	if res.Committed {
 		t.Error("a stream that only ever reports tool-call progress and then closes should not commit")
+	}
+}
+
+// TestBoundedPeekHonorsCustomIdleBudget: the idle budget is a parameter
+// because the right value depends on whether fallback is possible — a
+// last-candidate caller passes a large one so a slow-starting (thinking)
+// model isn't rejected with nobody left to fall back to.
+func TestBoundedPeekHonorsCustomIdleBudget(t *testing.T) {
+	slowStart := func() <-chan provider.StreamEvent {
+		ch := make(chan provider.StreamEvent, 2)
+		go func() {
+			defer close(ch)
+			time.Sleep(60 * time.Millisecond) // silent thinking, longer than the short budget below
+			ch <- provider.StreamEvent{Delta: "answer"}
+			ch <- provider.StreamEvent{Done: true}
+		}()
+		return ch
+	}
+
+	if res := BoundedPeek(context.Background(), slowStart(), 20*time.Millisecond); res.Committed {
+		t.Fatal("a short budget must still reject a start slower than it")
+	}
+	if res := BoundedPeek(context.Background(), slowStart(), 300*time.Millisecond); !res.Committed {
+		t.Fatalf("a large last-candidate budget must survive the same slow start, got: %+v", res)
 	}
 }

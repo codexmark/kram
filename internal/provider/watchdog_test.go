@@ -108,3 +108,46 @@ func TestStreamWatchdogBoundsHeadersPhase(t *testing.T) {
 		t.Fatalf("headers-phase hang error = %v, want an idle-timeout-labeled failure", err)
 	}
 }
+
+// TestResponsesForwardsReasoningSummaryAsLiveness: the Codex adapter must
+// request reasoning summaries and forward their deltas as
+// StreamEvent.Reasoning — the signal BoundedPeek treats as "working, keep
+// waiting" and the CLI shows as the thinking preview. Without it the
+// thinking phase is dead silence on the event channel.
+func TestResponsesForwardsReasoningSummaryAsLiveness(t *testing.T) {
+	var gotBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b := make([]byte, 1<<16)
+		n, _ := r.Body.Read(b)
+		gotBody = string(b[:n])
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Write([]byte("data: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"weighing options\"}\n\n"))
+		w.Write([]byte("data: {\"type\":\"response.output_text.delta\",\"delta\":\"answer\"}\n\n"))
+		w.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\n"))
+	}))
+	defer srv.Close()
+
+	p := NewOpenAIResponses("codex", srv.URL, func(context.Context) (string, error) { return "tok", nil }, "gpt-5.5", capabilities{})
+	events, err := p.ChatCompletion(context.Background(), openai.ChatCompletionRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sawReasoning, sawDelta bool
+	for e := range events {
+		if e.Reasoning == "weighing options" {
+			sawReasoning = true
+		}
+		if e.Delta == "answer" {
+			sawDelta = true
+		}
+	}
+	if !sawReasoning {
+		t.Fatal("reasoning summary delta was not forwarded as StreamEvent.Reasoning")
+	}
+	if !sawDelta {
+		t.Fatal("answer delta lost")
+	}
+	if !strings.Contains(gotBody, `"reasoning":{"summary":"auto"}`) {
+		t.Fatalf("request must ask for reasoning summaries, body = %s", gotBody)
+	}
+}
