@@ -314,10 +314,39 @@ func TestRunToolAndImageCapability(t *testing.T) {
 	}))
 	defer server.Close()
 	s.gateway = gatewayclient.New(server.URL)
-	s.cfg.Model = "combo"
-	ok, err := s.comboSupportsImages(context.Background())
+	ok, err := s.comboSupportsImages(context.Background(), "combo")
 	if err != nil || !ok {
 		t.Fatalf("comboSupportsImages = %v, %v", ok, err)
+	}
+}
+
+func TestSetActiveComboSwitchesOnlyKnownCombos(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(gatewayclient.Status{Combos: []gatewayclient.ComboStatus{{ID: "default"}, {ID: "lab"}}})
+	}))
+	defer server.Close()
+
+	s := &Service{gateway: gatewayclient.New(server.URL), activeCombo: "default"}
+	if got := s.activeModel(); got != "default" {
+		t.Fatalf("seed activeModel = %q, want default", got)
+	}
+	// A known combo switches.
+	if err := s.SetActiveCombo(context.Background(), "lab"); err != nil {
+		t.Fatalf("switch to lab: %v", err)
+	}
+	if got := s.activeModel(); got != "lab" {
+		t.Errorf("after switch activeModel = %q, want lab", got)
+	}
+	// An unknown combo errors and leaves the active combo unchanged.
+	if err := s.SetActiveCombo(context.Background(), "nope"); err == nil {
+		t.Error("expected an error for an unknown combo")
+	}
+	if got := s.activeModel(); got != "lab" {
+		t.Errorf("a rejected switch changed the active combo to %q", got)
+	}
+	// Empty is rejected without a gateway round-trip.
+	if err := s.SetActiveCombo(context.Background(), ""); err == nil {
+		t.Error("expected an error for an empty combo")
 	}
 }
 

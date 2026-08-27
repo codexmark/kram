@@ -28,14 +28,20 @@ type Server struct {
 	breakers  *breaker.Registry
 	telemetry *telemetry.Registry
 	logger    *slog.Logger
+	// configPath is where a persisted routing change (POST /admin/strategy
+	// with persist:true) is written back. Empty means the gateway has no
+	// on-disk config (a pure-autodetect run) — persist requests are then
+	// rejected rather than silently dropped.
+	configPath string
 }
 
-// New builds a Server from already-constructed dependencies.
-func New(cfg *config.Config, providers map[string]provider.Provider, rt *router.Router, breakers *breaker.Registry, tel *telemetry.Registry, logger *slog.Logger) *Server {
+// New builds a Server from already-constructed dependencies. configPath is
+// the gateway's config.yaml (may be "" when none exists on disk).
+func New(cfg *config.Config, configPath string, providers map[string]provider.Provider, rt *router.Router, breakers *breaker.Registry, tel *telemetry.Registry, logger *slog.Logger) *Server {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Server{cfg: cfg, providers: providers, router: rt, breakers: breakers, telemetry: tel, logger: logger}
+	return &Server{cfg: cfg, configPath: configPath, providers: providers, router: rt, breakers: breakers, telemetry: tel, logger: logger}
 }
 
 // Handler returns the fully wired HTTP handler, including panic recovery.
@@ -125,6 +131,12 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 type setStrategyRequest struct {
 	Combo    string `json:"combo"`
 	Strategy string `json:"strategy"`
+	// Persist, when true, writes the change through to config.yaml so it
+	// survives a gateway restart (the runtime change alone is lost on
+	// restart). MakeDefault additionally persists this combo as the config's
+	// default_combo. Both require the gateway to have an on-disk config.
+	Persist     bool `json:"persist,omitempty"`
+	MakeDefault bool `json:"make_default,omitempty"`
 }
 
 // handleSetStrategy changes routing for future model calls without
@@ -153,6 +165,19 @@ func (s *Server) handleSetStrategy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if req.Persist || req.MakeDefault {
+		if s.configPath == "" {
+			writeError(w, http.StatusServiceUnavailable, "gateway has no config file to persist to")
+			return
+		}
+		// The runtime change already applied; a persist failure is a partial
+		// success, so say so explicitly rather than pretend nothing changed.
+		if err := s.persistLiveConfig(req.MakeDefault, req.Combo); err != nil {
+			writeError(w, http.StatusInternalServerError, "strategy changed at runtime but failed to persist: "+err.Error())
+			return
+		}
+	}
+
 	var updated statusCombo
 	for _, c := range s.router.Combos() {
 		if c.ID == req.Combo {
@@ -160,9 +185,41 @@ func (s *Server) handleSetStrategy(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 	}
-	s.logger.Info("routing strategy changed", "combo", req.Combo, "strategy", req.Strategy)
+	s.logger.Info("routing strategy changed", "combo", req.Combo, "strategy", req.Strategy, "persisted", req.Persist, "made_default", req.MakeDefault)
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(updated)
+}
+
+// persistLiveConfig writes the gateway's live config to disk. Provider and
+// combo *membership* come from s.cfg — the full, unsanitized live config,
+// which includes providers that failed to build this boot and any reconciled
+// additions — so persisting never silently drops them (unlike s.router.Combos(),
+// which is sanitized). Only the per-combo Strategy is taken from the router,
+// the authority for the current live strategy (capturing every prior runtime
+// change, not just this one). Host/Port are restored from the on-disk file,
+// because finalizeFileConfig rewrites them to an ephemeral runtime port for
+// auto-discovered configs — writing s.cfg's port verbatim would clobber the
+// file's real one.
+func (s *Server) persistLiveConfig(makeDefault bool, defaultCombo string) error {
+	toSave := *s.cfg
+	toSave.Combos = append([]config.ComboConfig(nil), s.cfg.Combos...)
+	for i := range toSave.Combos {
+		if name := s.router.StrategyName(toSave.Combos[i].ID); name != "" {
+			toSave.Combos[i].Strategy = name
+		}
+	}
+	if makeDefault && defaultCombo != "" {
+		toSave.DefaultCombo = defaultCombo
+	}
+	if onDisk, err := config.Load(s.configPath); err == nil {
+		toSave.Host, toSave.Port = onDisk.Host, onDisk.Port
+	} else {
+		// No readable file yet (first write): use the documented default
+		// port rather than the ephemeral runtime one so the saved config is
+		// stable across boots.
+		toSave.Host, toSave.Port = "", 0
+	}
+	return config.Save(&toSave, s.configPath)
 }
 
 func isLoopbackRequest(r *http.Request) bool {

@@ -104,13 +104,18 @@ func runMain(args []string, stdout, stderr io.Writer) error {
 		return nil
 	}
 	workspaceExplicit := false
+	comboExplicit := false
 	fs.Visit(func(f *flag.Flag) {
-		if f.Name == "workspace" {
+		switch f.Name {
+		case "workspace":
 			workspaceExplicit = true
+		case "model":
+			comboExplicit = true
 		}
 	})
 	return runKram(runOptions{
-		workspace: *workspace, workspaceExplicit: workspaceExplicit, gatewayConfigPath: *gatewayConfigPath, combo: *combo,
+		workspace: *workspace, workspaceExplicit: workspaceExplicit, gatewayConfigPath: *gatewayConfigPath,
+		combo: *combo, comboExplicit: comboExplicit,
 		sessionID: *sessionID, title: *title, maxTurns: *maxTurns,
 		gatewayPort: *gatewayPort, daemonPort: *daemonPort, strategy: *strategy, setup: *setup, stream: *stream,
 		prompt: *prompt, jsonOut: *jsonOut, stdout: stdout, maxContextTokens: *maxContextTokens,
@@ -122,13 +127,18 @@ type runOptions struct {
 	workspaceExplicit bool
 	gatewayConfigPath string
 	combo             string
-	sessionID         string
-	title             string
-	maxTurns          int
-	gatewayPort       int
-	daemonPort        int
-	strategy          string
-	setup             bool
+	// comboExplicit is true only when the user passed -model explicitly.
+	// When false, run() lets the gateway config's default_combo (which a
+	// persisted in-app routing change writes) pick the active combo, so a
+	// saved choice takes effect on the next boot without a flag.
+	comboExplicit bool
+	sessionID     string
+	title         string
+	maxTurns      int
+	gatewayPort   int
+	daemonPort    int
+	strategy      string
+	setup         bool
 	// prompt/jsonOut/stdout drive headless mode (-p): when prompt is
 	// non-empty, run() runs one turn to completion and writes to stdout
 	// instead of launching the TUI.
@@ -252,9 +262,19 @@ func run(opts runOptions) error {
 	// wizard already called this above.
 	gatewayconfig.LoadStoredCredentials()
 
-	gwCfg, err := loadOrDetectGatewayConfig(opts.gatewayConfigPath, opts.gatewayPort, opts.strategy, absWorkspace, credStore, logger)
+	gwCfg, persistPath, err := loadOrDetectGatewayConfig(opts.gatewayConfigPath, opts.gatewayPort, opts.strategy, absWorkspace, credStore, logger)
 	if err != nil {
 		return err
+	}
+
+	// Unless the user pinned -model explicitly, let the config's own
+	// default_combo choose the active combo — that's the field a persisted
+	// in-app routing change (Ctrl+S → save) writes, so a saved combo takes
+	// effect on the next boot with no flag. opts.combo drives the daemon's
+	// Model, the compaction budget, and the TUI's active-combo display, so
+	// updating it here keeps all three consistent.
+	if !opts.comboExplicit && gwCfg.DefaultCombo != "" {
+		opts.combo = gwCfg.DefaultCombo
 	}
 
 	daemonPort := opts.daemonPort
@@ -283,7 +303,7 @@ func run(opts runOptions) error {
 	// would otherwise go stale long before the gateway process exits.
 	errCh := make(chan error, 2)
 	gatewayRun := kramGatewayRun
-	go func() { errCh <- gatewayRun(ctx, gwCfg, logger, credStore) }()
+	go func() { errCh <- gatewayRun(ctx, gwCfg, persistPath, logger, credStore) }()
 
 	// One auth token, generated here and shared between the in-process
 	// daemon and the in-process CLI that talks to it — so the CLI is
@@ -462,17 +482,23 @@ func newDaemonAuthToken() (string, error) {
 // pure-autodetect fallback below doesn't need this: it already calls
 // gatewayconfig.Detect fresh on every boot, so there's nothing stale to
 // reconcile against.
-func loadOrDetectGatewayConfig(path string, port int, strategyOverride string, workspace string, credStore *credentials.Store, logger *slog.Logger) (*config.Config, error) {
+// loadOrDetectGatewayConfig returns the resolved config plus the path a
+// runtime routing change should be persisted back to (so a save round-trips
+// to where the config is read next boot). The persist path is the file that
+// was actually loaded; for the fileless pure-autodetect tier it falls back
+// to the global kramhome config.yaml — the same target the wizard writes, so
+// the choice survives and the global tier picks it up next boot.
+func loadOrDetectGatewayConfig(path string, port int, strategyOverride string, workspace string, credStore *credentials.Store, logger *slog.Logger) (*config.Config, string, error) {
 	if path != "" {
 		cfg, err := config.Load(path)
 		if err != nil {
-			return nil, fmt.Errorf("loading gateway config: %w", err)
+			return nil, "", fmt.Errorf("loading gateway config: %w", err)
 		}
 		cfg = gatewayconfig.Reconcile(cfg, credStore, logger)
 		if port != 0 {
 			cfg.Port = port
 		}
-		return cfg, nil
+		return cfg, path, nil
 	}
 
 	// Two auto-discovered file tiers between an explicit -config and pure
@@ -483,24 +509,32 @@ func loadOrDetectGatewayConfig(path string, port int, strategyOverride string, w
 	// (freePort) whenever -gateway-port wasn't explicitly given — reusing
 	// whatever port happens to be written in the file would let two
 	// workspace-local kram instances collide trying to bind the same one.
-	if workspaceCfg, ok, err := loadConfigIfExists(filepath.Join(workspace, ".kram", "config.yaml")); err != nil {
-		return nil, err
+	workspacePath := filepath.Join(workspace, ".kram", "config.yaml")
+	if workspaceCfg, ok, err := loadConfigIfExists(workspacePath); err != nil {
+		return nil, "", err
 	} else if ok {
-		return finalizeFileConfig(gatewayconfig.Reconcile(workspaceCfg, credStore, logger), port)
+		cfg, err := finalizeFileConfig(gatewayconfig.Reconcile(workspaceCfg, credStore, logger), port)
+		return cfg, workspacePath, err
 	}
-	if globalPath, err := kramhome.Path("config.yaml"); err == nil {
+	globalPath, globalErr := kramhome.Path("config.yaml")
+	if globalErr == nil {
 		if globalCfg, ok, err := loadConfigIfExists(globalPath); err != nil {
-			return nil, err
+			return nil, "", err
 		} else if ok {
-			return finalizeFileConfig(gatewayconfig.Reconcile(globalCfg, credStore, logger), port)
+			cfg, err := finalizeFileConfig(gatewayconfig.Reconcile(globalCfg, credStore, logger), port)
+			return cfg, globalPath, err
 		}
 	}
 
 	cfg, err := gatewayconfig.Detect(strategyOverride, credStore, logger)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
-	return finalizeFileConfig(cfg, port)
+	cfg, err = finalizeFileConfig(cfg, port)
+	// No file on disk yet; a save should create the global config (globalErr
+	// may be non-nil if kramhome can't be resolved, in which case persistence
+	// is simply unavailable — the server rejects persist requests on "").
+	return cfg, globalPath, err
 }
 
 // loadConfigIfExists loads path if it exists, reporting ok=false (not an

@@ -337,20 +337,21 @@ func TestWizardProviderNormalContinueAcceptsDegraded(t *testing.T) {
 	}
 }
 
-func TestWizardHavePaidProviderFalseForFreeTierOnly(t *testing.T) {
+func TestWizardConfiguredProviderCountCountsProviders(t *testing.T) {
 	clearAllCatalogProviderEnvVars(t)
-	t.Setenv("OPENROUTER_API_KEY", "sk-or-test") // every openrouter-* entry is FreeTier
-	m := Model{}
-	if m.wizardHavePaidProvider() {
-		t.Error("expected false: only a free-tier provider is configured")
+	// One shared OpenRouter key fans out to every openrouter-* catalog entry,
+	// so the count reflects gateway providers, not distinct keys — matching
+	// what Detect actually builds (and thus what autoStrategy sees).
+	t.Setenv("OPENROUTER_API_KEY", "sk-or-test")
+	if got := (Model{}).wizardConfiguredProviderCount(); got < 2 {
+		t.Errorf("OpenRouter key should count as its several free providers, got %d", got)
 	}
 }
 
-func TestWizardHavePaidProviderTrueForPaidProvider(t *testing.T) {
+func TestWizardConfiguredProviderCountSingleProvider(t *testing.T) {
 	clearAllCatalogProviderEnvVars(t)
-	t.Setenv("ANTHROPIC_API_KEY", "sk-ant-test") // not FreeTier
-	m := Model{}
-	if !m.wizardHavePaidProvider() {
-		t.Error("expected true: a non-free-tier provider is configured")
+	t.Setenv("ANTHROPIC_API_KEY", "sk-ant-test") // a single, distinct provider
+	if got := (Model{}).wizardConfiguredProviderCount(); got != 1 {
+		t.Errorf("a single Anthropic key should count as 1 provider, got %d", got)
 	}
 }

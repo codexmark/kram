@@ -145,14 +145,39 @@ func fetchStatusCmd(c *statusclient.Client) tea.Cmd {
 type strategySetMsg struct {
 	combo statusclient.Combo
 	err   error
+	// persisted is true when the change was written through to config.yaml
+	// (persist or make_default), so the view can confirm it survives a
+	// restart rather than reporting a runtime-only switch.
+	persisted bool
 }
 
-func setStrategyCmd(c *statusclient.Client, combo, strategy string) tea.Cmd {
+type comboSetMsg struct {
+	combo string
+	err   error
+}
+
+// setComboCmd switches the daemon's active combo — the combo future messages
+// route through. Takes effect on the next message; an in-flight turn keeps the
+// combo it started with.
+func setComboCmd(c *daemonclient.Client, combo string) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		updated, err := c.SetStrategy(ctx, combo, strategy)
-		return strategySetMsg{combo: updated, err: err}
+		err := c.SetCombo(ctx, combo)
+		return comboSetMsg{combo: combo, err: err}
+	}
+}
+
+// setStrategyCmd applies a combo's strategy at runtime. persist asks the
+// gateway to write the change back to config.yaml (survives restart);
+// makeDefault additionally persists the combo as the config's default_combo.
+// A plain apply passes false for both — the change is live but ephemeral.
+func setStrategyCmd(c *statusclient.Client, combo, strategy string, persist, makeDefault bool) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		updated, err := c.SetStrategy(ctx, combo, strategy, persist, makeDefault)
+		return strategySetMsg{combo: updated, err: err, persisted: persist || makeDefault}
 	}
 }
 

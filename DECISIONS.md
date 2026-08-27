@@ -5434,3 +5434,66 @@ Fixed in passing: `internal/providerping/ping.go` still carried Brazilian-
 Portuguese `Detail` strings the #74 sweep missed (it only covered
 `internal/cli/app`), even though these surface in the accounts screen next to
 the dot. Translated to English alongside the fix.
+
+---
+
+## In-app routing config: strategies that auto-align to the providers you have
+
+The `priority` strategy kept erratically dialing a dead local-lab provider even
+for a user who only had one real account connected. The root cause was
+structural, not a bug in `priority`: routing strategy was decided once, at
+autodetect time, from a rule (`havePaid`) that had nothing to do with *how many*
+providers were actually configured — and once chosen it was invisible and
+unchangeable from inside the running app. A single-provider setup has no routing
+decision to make, yet it was still being funneled through a multi-provider
+strategy that assumed a fallback chain existed.
+
+Three things changed, in one PR because they're one idea (routing should follow
+the providers you actually have, and you should be able to steer it live):
+
+**1 — Autodetected strategy follows provider count, not a paid/free flag.**
+`gatewayconfig.autoStrategy` now returns `""` (declared-order, the coherent
+"there's nothing to balance" default) for a single provider and `smart` for two
+or more. `smart` is the right multi-provider default — it balances health,
+quality, latency and affinity — and there's no reason a lone provider should
+pay for any of that machinery. The old `havePaid` heuristic is gone.
+
+**2 — The daemon has a live "active combo", switchable per session.**
+The combo the daemon routes through was previously fixed at boot
+(`daemon.Config.Model`). It's now a guarded, mutable field (`activeCombo`) with
+a `POST /combo` endpoint and a `SetActiveCombo` that validates the target
+against the gateway's own combo list before switching. This is what lets a
+single-provider setup "fall into" its combo while a multi-provider one picks a
+different combo without a restart — and it's plumbed through the run so a
+subtask inherits the run's active model via context (`tools.WithRunModel`),
+not a stale boot-time constant.
+
+**3 — Ctrl+S is now a two-level routing panel, and saves persist.**
+The old Ctrl+S opened a flat strategy picker for whatever combo happened to be
+active. It now opens on a **combo level** (pick which combo future messages
+route through — each row shows its provider count and current strategy) and only
+advances to the **strategy level** for a combo that actually fans across two or
+more providers; a single-provider combo has no routing to configure, so the
+panel says so and just confirms the switch. On the strategy level, Enter applies
+at runtime (ephemeral, as before) and Ctrl+S *saves* — persisting the strategy
+to `config.yaml` and making that combo the config's `default_combo`, so the
+choice survives a restart. Persistence goes through a new `persist`/`make_default`
+pair on `POST /admin/strategy`; the gateway writes membership from its live
+config (never the sanitized router view, so a provider that failed to build this
+boot isn't silently dropped from the file) and restores the on-disk host/port so
+a persisted save can't clobber the file's real port with the ephemeral runtime
+one. A gateway with no on-disk config (pure-autodetect) returns 503 rather than
+pretending to save.
+
+Closing the loop: `loadOrDetectGatewayConfig` now also returns the *persist
+path* — the exact file each config tier was loaded from (explicit, workspace,
+global), or the global path for the fileless autodetect tier so a first save has
+somewhere to land — and `cmd/kram` lets the config's `default_combo` choose the
+active combo unless `-model` was passed explicitly. So a combo saved as default
+in one session is the active combo the next time kram boots, with no flag.
+
+Reusing Ctrl+S as "save" on the strategy level (rather than a new key) is
+deliberate: a plain letter would also type into the still-focused composer,
+whereas Ctrl+S is already intercepted, and "open the panel, drill in, press the
+same key to commit" is the muscle-memory the shortcut already trains. Esc steps
+back a level before it closes, so the two levels feel like one panel, not two.

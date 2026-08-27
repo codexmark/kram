@@ -81,6 +81,17 @@ const (
 	panelProcesses
 )
 
+// routeLevel is which step the two-level Ctrl+S routing panel is on. The
+// panel opens on the combo level; picking a combo with two or more providers
+// advances to the strategy level, while a single-provider combo has no
+// routing to configure and the panel just confirms the switch.
+type routeLevel int
+
+const (
+	routeLevelCombo routeLevel = iota
+	routeLevelStrategy
+)
+
 type chatMessage struct {
 	Role         string
 	Content      string
@@ -164,9 +175,17 @@ type Model struct {
 	strategyFocus       int
 	strategyPickerFocus int
 	strategySwitching   bool
+	strategySaving      bool
 	strategyPickerErr   error
 	strategyNotice      string
 	strategyNoticeRev   int
+	// routePickerLevel selects which of the two levels the Ctrl+S routing
+	// panel is showing: routeLevelCombo (pick which combo to route through)
+	// or routeLevelStrategy (pick that combo's strategy, and optionally save
+	// it as the boot default). comboPickerFocus is the highlighted row on the
+	// combo level.
+	routePickerLevel routeLevel
+	comboPickerFocus int
 
 	contextData daemonclient.ContextUsage
 	contextErr  error
@@ -583,13 +602,28 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err == nil {
 			m.strategyData = msg.status
 			if m.active == panelStrategyPicker {
-				m.syncStrategyPickerFocus()
+				if m.routePickerLevel == routeLevelCombo {
+					m.syncComboPickerFocus()
+				} else {
+					m.syncStrategyPickerFocus()
+				}
 			}
 		}
 		return m, nil
 
+	case comboSetMsg:
+		if msg.err != nil {
+			m.strategyPickerErr = msg.err
+			return m, nil
+		}
+		m.strategyPickerErr = nil
+		m.routeCall = nil // the old call's label no longer describes the active combo
+		return m, nil
+
 	case strategySetMsg:
 		m.strategySwitching = false
+		saving := m.strategySaving
+		m.strategySaving = false
 		if msg.err != nil {
 			m.strategyPickerErr = msg.err
 			return m, nil
@@ -602,8 +636,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.routeCall = nil // an old completed call must not overwrite the new label
 		m.strategyPickerErr = nil
 		m.strategyNoticeRev++
-		m.strategyNotice = strategyNoticePrefix + strings.ToUpper(msg.combo.Strategy)
+		if saving && msg.persisted {
+			m.strategyNotice = strategySavedPrefix + strings.ToUpper(msg.combo.Strategy)
+		} else {
+			m.strategyNotice = strategyNoticePrefix + strings.ToUpper(msg.combo.Strategy)
+		}
 		m.active = panelNone
+		m.routePickerLevel = routeLevelCombo
 		m.syncViewportSize()
 		m.syncTranscriptRenderer()
 		return m, clearStrategyNoticeCmd(m.strategyNoticeRev)
@@ -818,6 +857,12 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	switch msg.String() {
 	case "ctrl+s":
+		// On the strategy level, Ctrl+S is the "save as default" action
+		// rather than a toggle — the panel is already open, and the natural
+		// second press after drilling into a combo persists the choice.
+		if m.active == panelStrategyPicker && m.routePickerLevel == routeLevelStrategy {
+			return m.saveFocusedStrategy()
+		}
 		return m.togglePanel(panelStrategyPicker)
 
 	case "ctrl+p":
@@ -835,6 +880,15 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "esc":
 		if m.active == panelProcesses {
 			return m.closeProcessPanel()
+		}
+		// The routing panel is two levels deep: Esc on the strategy level
+		// steps back to the combo level rather than closing outright, so the
+		// user can reselect a combo without reopening.
+		if m.active == panelStrategyPicker && m.routePickerLevel == routeLevelStrategy {
+			m.routePickerLevel = routeLevelCombo
+			m.strategyPickerErr = nil
+			m.syncComboPickerFocus()
+			return m, nil
 		}
 		if m.active != panelNone {
 			m.active = panelNone
@@ -912,7 +966,11 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if m.active == panelStrategyPicker {
-			if m.strategyPickerFocus > 0 {
+			if m.routePickerLevel == routeLevelCombo {
+				if m.comboPickerFocus > 0 {
+					m.comboPickerFocus--
+				}
+			} else if m.strategyPickerFocus > 0 {
 				m.strategyPickerFocus--
 			}
 			return m, nil
@@ -934,7 +992,11 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if m.active == panelStrategyPicker {
-			if n := len(m.availableStrategies()); m.strategyPickerFocus < n-1 {
+			if m.routePickerLevel == routeLevelCombo {
+				if n := len(m.availableCombos()); m.comboPickerFocus < n-1 {
+					m.comboPickerFocus++
+				}
+			} else if n := len(m.availableStrategies()); m.strategyPickerFocus < n-1 {
 				m.strategyPickerFocus++
 			}
 			return m, nil
@@ -947,6 +1009,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if m.active == panelStrategyPicker {
+			if m.routePickerLevel == routeLevelCombo {
+				return m.selectFocusedCombo()
+			}
 			return m.applyFocusedStrategy()
 		}
 		if m.active != panelNone {
@@ -1042,7 +1107,12 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	if msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft && m.active == panelStrategyPicker {
-		if index, ok := m.strategyPickerIndexAtRow(msg.Y); ok {
+		if m.routePickerLevel == routeLevelCombo {
+			if index, ok := m.comboPickerIndexAtRow(msg.Y); ok {
+				m.comboPickerFocus = index
+				return m.selectFocusedCombo()
+			}
+		} else if index, ok := m.strategyPickerIndexAtRow(msg.Y); ok {
 			m.strategyPickerFocus = index
 			return m.applyFocusedStrategy()
 		}
@@ -1178,7 +1248,11 @@ func (m Model) togglePanel(p panel) (tea.Model, tea.Cmd) {
 		m.strategyFocus = 0
 		return m, fetchStatusCmd(m.gateway)
 	case panelStrategyPicker:
+		// The routing panel always opens on the combo level; a combo pick
+		// then advances to the strategy level (see selectFocusedCombo).
+		m.routePickerLevel = routeLevelCombo
 		m.strategyPickerErr = nil
+		m.syncComboPickerFocus()
 		m.syncStrategyPickerFocus()
 		return m, fetchStatusCmd(m.gateway)
 	case panelContext:

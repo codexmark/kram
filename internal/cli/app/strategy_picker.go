@@ -107,11 +107,14 @@ func (m Model) renderStrategyPicker() string {
 		description = strategyDescFallback
 	}
 	lines = append(lines, "", styleMeta.Render(description))
-	if m.strategyPickerErr != nil {
+	switch {
+	case m.strategyPickerErr != nil:
 		lines = append(lines, styleErrBadge.Render(strategyPickerFailPrefix+m.strategyPickerErr.Error()))
-	} else if m.strategySwitching {
+	case m.strategySaving:
+		lines = append(lines, styleBadgeWarn.Render(strategyPickerSaving))
+	case m.strategySwitching:
 		lines = append(lines, styleBadgeWarn.Render(strategyPickerApplying))
-	} else {
+	default:
 		lines = append(lines, styleHint.Render(strategyPickerHint))
 	}
 	return padLines(lines, h, m.width)
@@ -144,7 +147,30 @@ func (m Model) applyFocusedStrategy() (tea.Model, tea.Cmd) {
 	}
 	m.strategySwitching = true
 	m.strategyPickerErr = nil
-	return m, setStrategyCmd(m.gateway, combo.ID, selected)
+	return m, setStrategyCmd(m.gateway, combo.ID, selected, false, false)
+}
+
+// saveFocusedStrategy applies the highlighted strategy and persists it to the
+// gateway's config.yaml, making this combo the boot default — the "save"
+// action of the strategy level (Ctrl+S). Unlike applyFocusedStrategy it always
+// sends even when the strategy is unchanged, because make_default is a
+// meaningful write on its own (the combo may not be the default yet).
+func (m Model) saveFocusedStrategy() (tea.Model, tea.Cmd) {
+	if m.strategySwitching {
+		return m, nil
+	}
+	strategies := m.availableStrategies()
+	combo := m.currentCombo()
+	if combo == nil || len(strategies) == 0 {
+		m.strategyPickerErr = fmt.Errorf(strategyPickerNoComboErr)
+		return m, nil
+	}
+	index := clampInt(m.strategyPickerFocus, 0, len(strategies)-1)
+	selected := strategies[index]
+	m.strategySwitching = true
+	m.strategySaving = true
+	m.strategyPickerErr = nil
+	return m, setStrategyCmd(m.gateway, combo.ID, selected, true, true)
 }
 
 // strategyPickerIndexAtRow maps an absolute terminal row to the visible

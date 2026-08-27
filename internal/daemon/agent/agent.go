@@ -249,6 +249,13 @@ type Service struct {
 	// real prompt_tokens, so the compaction budget tracks the model's
 	// actual tokenizer instead of a fixed approximation — see calibration.go.
 	calibrator *tokenCalibrator
+
+	// comboMu guards activeCombo — the gateway combo new top-level runs
+	// route to. Seeded from cfg.Model at startup and switched at runtime via
+	// SetActiveCombo (the in-app routing picker); a run captures it once at
+	// start, so an in-flight turn is never rerouted mid-stream.
+	comboMu     sync.RWMutex
+	activeCombo string
 }
 
 // New builds an agent Service.
@@ -269,12 +276,45 @@ func New(st *store.Store, gw *gatewayclient.Client, tr *tools.Registry, cfg Conf
 			return nil, fmt.Errorf("ToolOrder names unregistered tool(s): %v", unknown)
 		}
 	}
+	resolved := cfg.withDefaults()
 	return &Service{
-		store: st, gateway: gw, tools: tr, cfg: cfg.withDefaults(),
+		store: st, gateway: gw, tools: tr, cfg: resolved,
 		pending: make(map[string]chan string), pendingApprovals: make(map[string]chan tools.ApprovalDecision),
 		heartbeatInterval: heartbeatInterval,
 		calibrator:        newTokenCalibrator(),
+		activeCombo:       resolved.Model,
 	}, nil
+}
+
+// activeModel returns the combo new top-level runs currently route to.
+func (s *Service) activeModel() string {
+	s.comboMu.RLock()
+	defer s.comboMu.RUnlock()
+	return s.activeCombo
+}
+
+// SetActiveCombo switches the combo new top-level runs route to. It
+// validates comboID against the combos the gateway currently advertises so
+// a typo is a clean error rather than a silent fallback to default_combo on
+// the next call. In-flight runs keep the combo they started with — each run
+// captures activeModel() once at its start.
+func (s *Service) SetActiveCombo(ctx context.Context, comboID string) error {
+	if comboID == "" {
+		return fmt.Errorf("combo must not be empty")
+	}
+	status, err := s.gateway.Status(ctx)
+	if err != nil {
+		return fmt.Errorf("checking combos: %w", err)
+	}
+	for _, c := range status.Combos {
+		if c.ID == comboID {
+			s.comboMu.Lock()
+			s.activeCombo = comboID
+			s.comboMu.Unlock()
+			return nil
+		}
+	}
+	return fmt.Errorf("unknown combo %q", comboID)
 }
 
 // Tools passes through the registry's full tool listing (enabled or not)
@@ -455,11 +495,16 @@ func (s *Service) Run(ctx context.Context, sessionID, userContent string, images
 		return RunResult{}, err
 	}
 
+	// Capture the active combo once, so an image-capability check and the
+	// run itself can't read two different combos across a concurrent switch,
+	// and a mid-run SetActiveCombo only affects the NEXT top-level run.
+	model := s.activeModel()
+
 	imageNotice := ""
 	if len(images) > 0 {
-		ok, err := s.comboSupportsImages(ctx)
+		ok, err := s.comboSupportsImages(ctx, model)
 		if err == nil && !ok {
-			imageNotice = fmt.Sprintf("images were attached, but no provider in combo %q supports image input — sent as text only", s.cfg.Model)
+			imageNotice = fmt.Sprintf("images were attached, but no provider in combo %q supports image input — sent as text only", model)
 			images = nil
 			emit(onEvent, Event{Kind: EventNotice, Notice: imageNotice})
 		}
@@ -472,7 +517,7 @@ func (s *Service) Run(ctx context.Context, sessionID, userContent string, images
 		return RunResult{}, fmt.Errorf("persisting user message: %w", err)
 	}
 
-	return s.runLoop(ctx, sessionID, s.cfg.Model, 0, imageNotice, onEvent)
+	return s.runLoop(ctx, sessionID, model, 0, imageNotice, onEvent)
 }
 
 // RunTask implements tools.Delegator: runs goal (plus optional context) to
@@ -500,7 +545,7 @@ func (s *Service) RunTask(ctx context.Context, goal, taskContext, model string, 
 
 	useModel := model
 	if useModel == "" {
-		useModel = s.cfg.Model
+		useModel = s.activeModel()
 	}
 
 	result, err := s.runLoop(ctx, id, useModel, depth, "", nil)
@@ -516,6 +561,7 @@ func (s *Service) RunTask(ctx context.Context, goal, taskContext, model string, 
 // depth instead of always reading s.cfg.Model and assuming depth 0.
 func (s *Service) runLoop(ctx context.Context, sessionID, model string, depth int, imageNotice string, onEvent EventFunc) (RunResult, error) {
 	ctx = tools.WithDepth(ctx, depth)
+	ctx = tools.WithRunModel(ctx, model) // so delegate_task defaults a subagent to this run's combo
 	ctx = tools.WithAsker(ctx, &sessionAsker{svc: s, onEvent: onEvent})
 	ctx = tools.WithApprover(ctx, &sessionApprover{svc: s, onEvent: onEvent})
 	// One opaque ID for this whole run — every model call streamCall
@@ -950,12 +996,12 @@ func (s *Service) recentMemoryMessage() (openai.ChatMessage, bool) {
 	}, true
 }
 
-func (s *Service) comboSupportsImages(ctx context.Context) (bool, error) {
+func (s *Service) comboSupportsImages(ctx context.Context, model string) (bool, error) {
 	status, err := s.gateway.Status(ctx)
 	if err != nil {
 		return false, err
 	}
-	return status.ComboSupportsImages(s.cfg.Model), nil
+	return status.ComboSupportsImages(model), nil
 }
 
 func toModelMessages(msgs []store.Message) []openai.ChatMessage {

@@ -95,7 +95,7 @@ func run() int {
 
 	errCh := make(chan error, 2)
 	gatewayRun := evalGatewayRun
-	go func() { errCh <- gatewayRun(ctx, &gwCfg, logger, nil) }()
+	go func() { errCh <- gatewayRun(ctx, &gwCfg, "", logger, nil) }()
 
 	dbPath := filepath.Join(workspace, "eval.db")
 	// A fixed token shared between this eval's daemon and its client — the

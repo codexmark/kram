@@ -116,7 +116,7 @@ func TestRun_SkipsProviderMissingCredentialAndServesTheRest(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	errCh := make(chan error, 1)
-	go func() { errCh <- Run(ctx, cfg, discardLogger(), nil) }()
+	go func() { errCh <- Run(ctx, cfg, "", discardLogger(), nil) }()
 
 	healthURL := fmt.Sprintf("http://127.0.0.1:%d/health", port)
 	deadline := time.Now().Add(3 * time.Second)
@@ -161,7 +161,7 @@ func TestRun_FailsFastWhenEveryProviderFailsToBuild(t *testing.T) {
 		DefaultCombo: "main",
 	}
 
-	err := Run(context.Background(), cfg, discardLogger(), nil)
+	err := Run(context.Background(), cfg, "", discardLogger(), nil)
 	if err == nil {
 		t.Fatal("expected an error when every configured provider fails to build")
 	}

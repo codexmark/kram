@@ -68,7 +68,7 @@ func newStreamTestServer(t *testing.T, p1Events []provider.StreamEvent) (*Server
 		t.Fatalf("router.New: %v", err)
 	}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	return New(cfg, providers, rt, breakers, tel, logger), rt
+	return New(cfg, "", providers, rt, breakers, tel, logger), rt
 }
 
 const streamTestBody = `{"model":"default","stream":true,"messages":[{"role":"user","content":"hi"}]}`
@@ -347,7 +347,7 @@ func newBufferedTestServer(t *testing.T, p1Events []provider.StreamEvent) (*Serv
 		t.Fatalf("router.New: %v", err)
 	}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	return New(cfg, providers, rt, breakers, tel, logger), breakers
+	return New(cfg, "", providers, rt, breakers, tel, logger), breakers
 }
 
 const bufferedTestBody = `{"model":"default","messages":[{"role":"user","content":"hi"}]}`
@@ -421,7 +421,7 @@ func TestResponseGateRejectionStillPoisonsBreaker(t *testing.T) {
 		t.Fatalf("router.New: %v", err)
 	}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	s := New(cfg, providers, rt, breakers, tel, logger)
+	s := New(cfg, "", providers, rt, breakers, tel, logger)
 
 	for i := 0; i < breakerFailureThreshold; i++ {
 		postBufferedChat(t, s)
@@ -450,7 +450,7 @@ func TestBufferedFallbackUsageIncludesRejectedCandidate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := New(cfg, providers, rt, breakers, tel, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	s := New(cfg, "", providers, rt, breakers, tel, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	rec := postBufferedChat(t, s)
 	var response openai.ChatCompletionResponse
 	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
@@ -541,7 +541,7 @@ func TestAllProvidersFailedIsRetryableIfAnyAttemptWas(t *testing.T) {
 		t.Fatalf("router.New: %v", err)
 	}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	s := New(cfg, providers, rt, breakers, tel, logger)
+	s := New(cfg, "", providers, rt, breakers, tel, logger)
 
 	rec := postBufferedChat(t, s)
 	var errResp openai.ErrorResponse
