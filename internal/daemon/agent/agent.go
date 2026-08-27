@@ -689,6 +689,14 @@ func (s *Service) runLoop(ctx context.Context, sessionID, model string, depth in
 	// nudge; if it happens twice in a row, say so instead of persisting
 	// blank content.
 	emptyRetryUsed := false
+	// Verification gate (#116) state — see verifygate.go. verifyNudgeUsed
+	// is the never-loops guarantee (one nudge per run, ever);
+	// verifyNudgePending is true only for the single call that should
+	// carry the nudge in its postscript, cleared as soon as that call
+	// returns.
+	var verify verifyTracker
+	verifyNudgeUsed := false
+	verifyNudgePending := false
 
 	totalTurns := s.cfg.MaxTurns * s.cfg.MaxSegmentsPerRun
 	emit(onEvent, Event{Kind: EventSegment, Segment: 1, Segments: s.cfg.MaxSegmentsPerRun})
@@ -720,7 +728,7 @@ func (s *Service) runLoop(ctx context.Context, sessionID, model string, depth in
 		injectProjectContext := haveProjectContext && needsFreshInjection(effective, projectContextMarkerName, formatProjectContextContent(projectContext))
 		injectMemory := haveMemory && needsFreshInjection(effective, memoryMarkerName, memoryMsg.Content)
 		preambleParts := compilePreamble(s.cfg.Workspace, projectContext, injectProjectContext, memoryMsg, injectMemory, s.tools, s.cfg.ToolOrder, s.cfg.SystemPromptOverride, envContext, haveSkills)
-		postscriptParts := compileTurnPostscript(emptyRetryUsed, nearBudget)
+		postscriptParts := compileTurnPostscript(emptyRetryUsed, verifyNudgePending, nearBudget)
 		// Keep the visible definitions separately from the subset offered on
 		// this turn. The final soft-landing turn deliberately offers no tools,
 		// but a local model can still print a textual <tool_call> from habit.
@@ -832,6 +840,10 @@ func (s *Service) runLoop(ctx context.Context, sessionID, model string, depth in
 		if err != nil {
 			return RunResult{}, fmt.Errorf("gateway call failed: %w", humanizeGatewayFailure(err, s.cfg.MaxGatewayRounds))
 		}
+		// The nudge rides exactly one call's postscript: the call just made.
+		// Whatever the model does next (verify, or answer again anyway —
+		// accepted, see below), the nudge itself is spent.
+		verifyNudgePending = false
 		result.Attempts = callResult.Attempts
 		result.Usage = sumUsage(result.Usage, callResult.Usage)
 		routeCall := result.RouteTrace.addCall(model, callResult.Strategy, callResult.Attempts, callResult.Ranking)
@@ -866,6 +878,28 @@ func (s *Service) runLoop(ctx context.Context, sessionID, model string, depth in
 			if strings.TrimSpace(callResult.Content) == "" && !emptyRetryUsed {
 				emptyRetryUsed = true
 				continue // one retry with a nudge (added to the preamble above) before giving up
+			}
+			// Verification gate (#116): a final answer over unverified
+			// source changes is not accepted on the first try. The answer
+			// itself is preserved (persisted like a steering continuation,
+			// not discarded) and the turn continues once with the verify
+			// nudge in the next call's postscript. verifyNudgeUsed makes a
+			// second gate trip impossible: if the model answers again
+			// without verifying — ideally stating why not, as the nudge
+			// asks — that answer stands. The near-budget turn is exempt
+			// (no room for an extra round).
+			if verify.pending && !verifyNudgeUsed && !nearBudget && strings.TrimSpace(callResult.Content) != "" {
+				verifyNudgeUsed = true
+				verifyNudgePending = true
+				partial, err := s.store.AppendMessage(sessionID, store.Message{
+					Role: "assistant", Content: callResult.Content, Provider: callResult.Provider, ProviderItems: callResult.ProviderItems,
+				})
+				if err != nil {
+					return RunResult{}, fmt.Errorf("persisting pre-verification answer: %w", err)
+				}
+				result.Message = partial
+				emit(onEvent, Event{Kind: EventNotice, Notice: "verification gate: files changed but no build/test ran — asking the model to verify before finishing"})
+				continue
 			}
 			content := callResult.Content
 			if strings.TrimSpace(content) == "" {
@@ -938,6 +972,7 @@ func (s *Service) runLoop(ctx context.Context, sessionID, model string, depth in
 				emit(onEvent, Event{Kind: EventNotice, Notice: "checkpoint " + snap.ShortID() + " saved (ctrl+g rewinds)"})
 			}
 		}
+		verify.observe(callResult.ToolCalls)
 		outcomes := s.runToolBatch(ctx, callResult.ToolCalls, onEvent)
 		for tcIdx, tc := range callResult.ToolCalls {
 			activity, toolMsg := outcomes[tcIdx].activity, outcomes[tcIdx].msg

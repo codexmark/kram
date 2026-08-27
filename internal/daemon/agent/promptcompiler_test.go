@@ -294,14 +294,14 @@ func TestCompileBackgroundJobGuidanceAbsentWhenPermissionDenied(t *testing.T) {
 }
 
 func TestCompileTurnPostscriptNeitherFlag(t *testing.T) {
-	parts := compileTurnPostscript(false, false)
+	parts := compileTurnPostscript(false, false, false)
 	if len(parts) != 0 {
 		t.Errorf("expected 0 parts when neither flag is set, got %+v", parts)
 	}
 }
 
 func TestCompileTurnPostscriptEmptyRetryOnly(t *testing.T) {
-	parts := compileTurnPostscript(true, false)
+	parts := compileTurnPostscript(true, false, false)
 	if len(parts) != 1 {
 		t.Fatalf("parts = %d, want 1: %+v", len(parts), parts)
 	}
@@ -315,7 +315,7 @@ func TestCompileTurnPostscriptEmptyRetryOnly(t *testing.T) {
 }
 
 func TestCompileTurnPostscriptNearBudgetOnly(t *testing.T) {
-	parts := compileTurnPostscript(false, true)
+	parts := compileTurnPostscript(false, false, true)
 	if len(parts) != 1 {
 		t.Fatalf("parts = %d, want 1: %+v", len(parts), parts)
 	}
@@ -330,12 +330,31 @@ func TestCompileTurnPostscriptNearBudgetOnly(t *testing.T) {
 // immediately after history, the near-budget message later (after
 // toolDefs was computed) — both land after history, empty-retry first.
 func TestCompileTurnPostscriptBothFlagsPreservesOrder(t *testing.T) {
-	parts := compileTurnPostscript(true, true)
+	parts := compileTurnPostscript(true, false, true)
 	if len(parts) != 2 {
 		t.Fatalf("parts = %d, want 2: %+v", len(parts), parts)
 	}
 	if parts[0].ID != "empty-retry-nudge" || parts[1].ID != "turn-budget-soft-landing" {
 		t.Errorf("order = [%s, %s], want [empty-retry-nudge, turn-budget-soft-landing]", parts[0].ID, parts[1].ID)
+	}
+}
+
+// TestCompileTurnPostscriptVerifyNudge (#116): the verification gate's
+// nudge renders between the empty-retry nudge and the soft landing.
+func TestCompileTurnPostscriptVerifyNudge(t *testing.T) {
+	parts := compileTurnPostscript(true, true, true)
+	if len(parts) != 3 {
+		t.Fatalf("parts = %d, want 3: %+v", len(parts), parts)
+	}
+	if parts[0].ID != "empty-retry-nudge" || parts[1].ID != "verify-nudge" || parts[2].ID != "turn-budget-soft-landing" {
+		t.Errorf("order = [%s, %s, %s], want [empty-retry-nudge, verify-nudge, turn-budget-soft-landing]", parts[0].ID, parts[1].ID, parts[2].ID)
+	}
+	p := parts[1]
+	if p.Placement != PlacementPostHistory || p.Refresh != RefreshIteration || p.Source != "runtime" {
+		t.Errorf("verify-nudge part = %+v, want Placement=PostHistory Refresh=Iteration Source=runtime", p)
+	}
+	if !strings.Contains(p.Content, "verification") {
+		t.Errorf("verify-nudge content doesn't mention verification: %q", p.Content)
 	}
 }
 

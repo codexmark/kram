@@ -5927,3 +5927,19 @@ several independent tasks fans out concurrently (3 at a time, depth 1).
 The section now states the trigger, the self-containment requirement,
 and keeps the restraint line; a test pins all three so none silently
 disappears.
+
+## Verification became a gate, not a hope (#116)
+
+The verification-before-completion skill is advice a model can skip, and
+weaker models do. The loop now tracks, in batch execution order, whether
+a source-file mutation has a bash/lsp_diagnostics call after it; a final
+answer over an unverified change is refused ONCE — persisted (the model's
+words are kept, like a steering continuation), then the next call carries
+a one-shot postscript nudge asking it to verify or state why not. Bounded
+on purpose: one nudge per run ever, never on the near-budget turn,
+doc-only edits (.md/.txt/...) exempt. The tracker reads calls, not
+outcomes, accepting two rare mispredictions (a permission-denied edit can
+arm it; a denied bash can disarm it) in exchange for staying at the same
+batch-level view batchHasMutation already takes — and an exit code is not
+required to be zero, because running tests and reporting the failure IS
+verification.
