@@ -25,6 +25,16 @@ const (
 	stallCtxAnalyzing = "model re-reading tool results"
 )
 
+// One-key rewind (Ctrl+G) notices — see rewind.go.
+const (
+	rewindTurnRunningNotice  = "a turn is running — esc interrupts it first, then ctrl+g rewinds"
+	rewindNoCheckpointNotice = "no checkpoint yet — one is saved before a turn's first file change"
+	rewindArmedNoticeFmt     = "rewind to checkpoint %s (%s)? ctrl+g confirms · esc cancels"
+	rewindRestoringNotice    = "restoring checkpoint…"
+	rewindFailedPrefix       = "rewind failed: "
+	rewindDoneNoticeFmt      = "✓ rewound %d file(s) to checkpoint %s"
+)
+
 // Transcript and top-level view chrome.
 const (
 	transcriptErrPrefix    = "error: "

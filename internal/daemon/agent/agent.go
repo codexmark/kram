@@ -33,6 +33,7 @@ import (
 	"github.com/codexmark/kram/internal/daemon/store"
 	"github.com/codexmark/kram/internal/daemon/tools"
 	"github.com/codexmark/kram/internal/openai"
+	"github.com/codexmark/kram/internal/snapshot"
 )
 
 // ErrNotFound is returned when a session ID doesn't exist.
@@ -321,6 +322,53 @@ func (s *Service) SetActiveCombo(ctx context.Context, comboID string) error {
 // for the daemon's GET /tools endpoint.
 func (s *Service) Tools() []tools.ToolInfo { return s.tools.AllTools() }
 
+// AutoCheckpointPrefix marks the snapshots runLoop takes on its own
+// before a turn's first mutating tool call — the rewind endpoint filters
+// on it so one-key rewind only ever targets automatic checkpoints, never
+// a snapshot the model or user created deliberately.
+const AutoCheckpointPrefix = "auto checkpoint"
+
+// LatestAutoCheckpoint returns the newest automatic pre-mutation
+// checkpoint, or ok=false when none exists yet.
+func (s *Service) LatestAutoCheckpoint(ctx context.Context) (snapshot.Snapshot, bool, error) {
+	snaps, err := s.tools.Snapshots().List(ctx)
+	if err != nil {
+		return snapshot.Snapshot{}, false, err
+	}
+	for _, sn := range snaps { // List is newest-first
+		if strings.HasPrefix(sn.Message, AutoCheckpointPrefix) {
+			return sn, true, nil
+		}
+	}
+	return snapshot.Snapshot{}, false, nil
+}
+
+// Rewind restores the workspace to the given snapshot id and returns
+// what changed plus the snapshot's own metadata for display.
+// It first captures the *current* state as a "pre-rewind" snapshot.
+// That does two jobs at once: it makes the rewind itself undoable (the
+// pre-rewind snapshot restores like any other), and it brings files
+// created after the target checkpoint under the snapshot repository's
+// knowledge — Restore deliberately never touches a file no snapshot ever
+// captured (see snapshot.Store.Restore), so without this capture a file
+// the turn *created* would survive the rewind as an orphan.
+func (s *Service) Rewind(ctx context.Context, id string) (snapshot.RestoreResult, snapshot.Snapshot, error) {
+	if _, err := s.tools.Snapshots().Create(ctx, "pre-rewind state (restore this to undo the rewind)"); err != nil {
+		return snapshot.RestoreResult{}, snapshot.Snapshot{}, fmt.Errorf("capturing pre-rewind state: %w", err)
+	}
+	res, err := s.tools.Snapshots().Restore(ctx, id)
+	if err != nil {
+		return snapshot.RestoreResult{}, snapshot.Snapshot{}, err
+	}
+	snaps, _ := s.tools.Snapshots().List(ctx)
+	for _, sn := range snaps {
+		if sn.ID == res.SnapshotID || strings.HasPrefix(sn.ID, id) || strings.HasPrefix(res.SnapshotID, sn.ID) {
+			return res, sn, nil
+		}
+	}
+	return res, snapshot.Snapshot{ID: res.SnapshotID}, nil
+}
+
 // Skills passes through the registry's discovered-skills listing for the
 // same endpoint.
 func (s *Service) Skills() []tools.Skill { return s.tools.Skills() }
@@ -585,6 +633,7 @@ func (s *Service) runLoop(ctx context.Context, sessionID, model string, depth in
 	result := RunResult{ImageNotice: imageNotice}
 	compactions := 0
 	graceUsed := false
+	checkpointed := false
 	var stagnation toolStagnation
 	// emptyRetryUsed guards against a real, observed failure mode of weak
 	// free-tier models: after a tool result that reads like a failure (an
@@ -807,6 +856,18 @@ func (s *Service) runLoop(ctx context.Context, sessionID, model string, depth in
 		// see enforceTurnOutputBudget's doc comment.
 		turnOutputChars := 0
 		turnOutputBudget := policy.ToolOutputBudgetChars(compaction.EstimateTokens(effective), maxTurnToolOutputChars)
+		// Automatic checkpoint, lazily: the first batch of this run that
+		// contains a mutating call snapshots the workspace *before* it runs,
+		// so one key can rewind everything this turn changed (see the
+		// daemon's /rewind endpoint). Read-only turns never pay for it, and
+		// a failure (git missing, exotic workspace) is logged into the run
+		// as a notice rather than blocking the turn — best-effort by design.
+		if !checkpointed && batchHasMutation(callResult.ToolCalls) {
+			checkpointed = true
+			if snap, err := s.tools.Snapshots().Create(ctx, AutoCheckpointPrefix+" — before this turn's first change"); err == nil {
+				emit(onEvent, Event{Kind: EventNotice, Notice: "checkpoint " + snap.ShortID() + " saved (ctrl+g rewinds)"})
+			}
+		}
 		outcomes := s.runToolBatch(ctx, callResult.ToolCalls, onEvent)
 		for tcIdx, tc := range callResult.ToolCalls {
 			activity, toolMsg := outcomes[tcIdx].activity, outcomes[tcIdx].msg
@@ -1032,6 +1093,18 @@ func (s *Service) execTool(ctx context.Context, tc openai.ToolCall) toolOutcome 
 // run at once — enough to collapse the common "read three files, grep
 // two patterns" round-trip, small enough to stay gentle on disk and CPU.
 const maxParallelReadOnlyTools = 4
+
+// batchHasMutation reports whether any call in the batch is not on the
+// read-only allowlist — the trigger for the automatic pre-mutation
+// checkpoint above.
+func batchHasMutation(calls []openai.ToolCall) bool {
+	for _, tc := range calls {
+		if !tools.IsReadOnly(tc.Function.Name) {
+			return true
+		}
+	}
+	return false
+}
 
 // runToolBatch executes one model turn's tool calls, preserving request
 // order in the returned outcomes. Contiguous stretches of read-only

@@ -315,6 +315,51 @@ func (c *Client) SetCombo(ctx context.Context, combo string) error {
 	return c.doJSON(ctx, http.MethodPost, "/combo", map[string]string{"combo": combo}, nil)
 }
 
+// RewindCheckpoint mirrors the daemon's snapshot metadata for the
+// automatic pre-mutation checkpoint a one-key rewind would restore to.
+type RewindCheckpoint struct {
+	ID        string    `json:"id"`
+	Message   string    `json:"message"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// ShortID mirrors snapshot.Snapshot.ShortID for display.
+func (c RewindCheckpoint) ShortID() string {
+	if len(c.ID) > 12 {
+		return c.ID[:12]
+	}
+	return c.ID
+}
+
+// RewindResult is what a rewind actually changed.
+type RewindResult struct {
+	Restored struct {
+		SnapshotID string `json:"snapshot_id"`
+		Changes    []struct {
+			Path   string `json:"path"`
+			Status string `json:"status"`
+		} `json:"changes"`
+	} `json:"restored"`
+	Snapshot RewindCheckpoint `json:"snapshot"`
+}
+
+// RewindInfo fetches the newest automatic checkpoint — what Rewind would
+// restore to — for a confirm-before-destroy flow.
+func (c *Client) RewindInfo(ctx context.Context) (RewindCheckpoint, error) {
+	var out RewindCheckpoint
+	err := c.doJSON(ctx, http.MethodGet, "/rewind", nil, &out)
+	return out, err
+}
+
+// Rewind restores the workspace to the given checkpoint id (from
+// RewindInfo — passing the id pins the confirmation to exactly what the
+// user was shown).
+func (c *Client) Rewind(ctx context.Context, id string) (RewindResult, error) {
+	var out RewindResult
+	err := c.doJSON(ctx, http.MethodPost, "/rewind", map[string]string{"id": id}, &out)
+	return out, err
+}
+
 // ContextCategory is one real contributor to a session's context-window usage.
 type ContextCategory struct {
 	Name   string `json:"name"`

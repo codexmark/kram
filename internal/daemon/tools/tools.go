@@ -46,7 +46,16 @@ type Registry struct {
 	grants     *permission.GrantStore
 	lspManager *lsp.Manager
 	artifacts  *artifact.Store
+	snapshots  *snapshot.Store
 }
+
+// Snapshots exposes the workspace snapshot store to callers above the
+// tool layer — the agent's automatic pre-mutation checkpoint and the
+// daemon's rewind endpoint. Deliberately direct store access, not routed
+// through tool execution: an automatic checkpoint must neither trigger a
+// permission ask nor be skipped because the user disabled the snapshot
+// *tools* for the model — it's a harness feature, not a model action.
+func (r *Registry) Snapshots() *snapshot.Store { return r.snapshots }
 
 // StopBackgroundProcesses kills every process started by run_background —
 // called on daemon shutdown so a background dev server doesn't outlive
@@ -144,7 +153,7 @@ func NewRegistry(workspace string, st *store.Store, disabled map[string]bool) *R
 	r := &Registry{
 		workspace: workspace, byName: make(map[string]Tool), disabled: disabled,
 		processes: processes, permEval: permEval, grants: grants, lspManager: lspManager,
-		artifacts: artifacts,
+		artifacts: artifacts, snapshots: snapshots,
 	}
 	todos := newTodoStore(workspace)
 	toolList := []Tool{

@@ -187,6 +187,11 @@ type Model struct {
 	routePickerLevel routeLevel
 	comboPickerFocus int
 
+	// rewindArmed holds the checkpoint the first Ctrl+G press fetched and
+	// showed; the second press restores exactly it (see rewind.go).
+	rewindArmed *daemonclient.RewindCheckpoint
+	rewindBusy  bool
+
 	contextData daemonclient.ContextUsage
 	contextErr  error
 	haveContext bool
@@ -650,8 +655,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case strategyNoticeClearMsg:
 		if msg.revision == m.strategyNoticeRev {
 			m.strategyNotice = ""
+			m.rewindArmed = nil // an armed rewind expires with its notice
 		}
 		return m, nil
+
+	case rewindInfoMsg:
+		return m.handleRewindInfo(msg)
+
+	case rewindDoneMsg:
+		return m.handleRewindDone(msg)
 
 	case contextResultMsg:
 		m.contextErr = msg.err
@@ -877,7 +889,17 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "ctrl+b":
 		return m.togglePanel(panelProcesses)
 
+	case "ctrl+g":
+		return m.handleRewindKey()
+
 	case "esc":
+		if m.rewindArmed != nil {
+			// An armed rewind is the most destructive pending action on
+			// screen — esc cancels it before anything else.
+			m.rewindArmed = nil
+			m.strategyNotice = ""
+			return m, nil
+		}
 		if m.active == panelProcesses {
 			return m.closeProcessPanel()
 		}
