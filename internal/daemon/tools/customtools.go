@@ -73,6 +73,7 @@ func (t *customTool) Execute(ctx context.Context, raw json.RawMessage) (string, 
 	defer cancel()
 
 	cmd := shell.Command(cmdCtx, t.workspace, t.manifest.Command)
+	cmd.Env = redactedEnviron() // strip Kram's provider credentials — see env.go
 	cmd.Stdin = bytes.NewReader(raw)
 
 	sw := artifact.NewSpillWriter(customToolMaxOutputBytes)

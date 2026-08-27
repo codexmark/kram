@@ -88,6 +88,7 @@ func (t *bash) Execute(ctx context.Context, raw json.RawMessage) (string, error)
 	defer cancel()
 
 	cmd := shell.Command(cmdCtx, t.workspace, args.Command)
+	cmd.Env = redactedEnviron() // never expose Kram's own provider API keys to a model-driven shell — see env.go
 
 	sw := artifact.NewSpillWriter(bashMaxOutputBytes)
 	cmd.Stdout = sw

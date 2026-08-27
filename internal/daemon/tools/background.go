@@ -187,6 +187,7 @@ func (m *processManager) start(command string) (*backgroundProcess, error) {
 	// cleanup (killAll, process_kill) reach children the command spawns,
 	// not just the shell itself.
 	cmd := shell.Command(context.Background(), m.workspace, command)
+	cmd.Env = redactedEnviron() // strip Kram's provider credentials — see env.go
 
 	p := &backgroundProcess{id: id, command: command, cmd: cmd, running: true, started: time.Now()}
 	cmd.Stdout = writerFunc(p.write)

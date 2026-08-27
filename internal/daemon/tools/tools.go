@@ -401,5 +401,45 @@ func resolvePath(workspace, userPath string) (string, error) {
 	if cleaned != root && !strings.HasPrefix(cleaned, root+string(filepath.Separator)) {
 		return "", fmt.Errorf("path %q escapes the workspace", userPath)
 	}
+
+	// The lexical check above is necessary but not sufficient:
+	// filepath.Clean is purely textual, so a symlink *inside* the
+	// workspace pointing out (a cloned repo carrying `link -> ~/.ssh`,
+	// say) passes it yet resolves outside. Re-check containment against
+	// the real, symlink-resolved path — resolving the deepest existing
+	// ancestor when the path itself doesn't exist yet (a write_file
+	// creating a new file, whose parent dir is where a malicious symlink
+	// would live).
+	realRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		realRoot = root // workspace should exist; fall back to the lexical root rather than failing every call
+	}
+	resolved := resolveExistingAncestor(cleaned)
+	if resolved != realRoot && !strings.HasPrefix(resolved, realRoot+string(filepath.Separator)) {
+		return "", fmt.Errorf("path %q escapes the workspace (resolves outside it through a symlink)", userPath)
+	}
 	return cleaned, nil
+}
+
+// resolveExistingAncestor returns path with symlinks resolved on its
+// deepest existing prefix and the (not-yet-existing) tail re-appended —
+// so a path being newly created still gets its parent directories'
+// symlinks resolved, which is exactly where a workspace-escaping symlink
+// would sit. If nothing along the path exists (or EvalSymlinks fails for
+// another reason) path is returned unchanged; the caller's lexical
+// containment check already ran, so this degrades to "no worse than
+// before this defense", never to a false escape.
+func resolveExistingAncestor(path string) string {
+	tail := ""
+	for p := path; ; {
+		if real, err := filepath.EvalSymlinks(p); err == nil {
+			return filepath.Join(real, tail)
+		}
+		parent := filepath.Dir(p)
+		if parent == p { // reached the filesystem root without resolving anything
+			return path
+		}
+		tail = filepath.Join(filepath.Base(p), tail)
+		p = parent
+	}
 }
