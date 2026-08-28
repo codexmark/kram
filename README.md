@@ -842,6 +842,7 @@ Important properties:
 - read-only tool calls issued in one batch (reads, greps, globs, searches) run in parallel; any call that mutates keeps its exact sequential position;
 - a stream that dies mid-answer retries with backoff and **continues from the text already streamed** instead of restarting the answer; rate limits honor the provider's own `Retry-After` and say so visibly;
 - steering messages typed during the run are folded in at the next model-call boundary (see "Mid-turn steering");
+- a final answer over unverified source changes is not accepted on the first try: if the run modified source files and no build/test/check command ran afterwards, Kram keeps that answer and continues one extra round with an explicit "verify or state why not" nudge — exactly once per run, never able to loop, doc-only edits exempt;
 - the default run budget is four automatic segments of 50 model calls (200-call emergency ceiling);
 - identical tool calls/results trigger a strategy-change nudge and then a visible stagnation stop instead of looping to that ceiling;
 - final-budget behavior uses a soft landing rather than a hard mid-task cutoff;
@@ -1218,6 +1219,8 @@ Kram system rules
 + persistent memory snapshot
 + effective conversation history
 ```
+
+The system rules themselves have **model profiles**: one prompt no longer serves gpt-5.5 and a local 9B alike. When every provider in the active combo is a frontier-class model (classified by model name, decided automatically from the gateway config), Kram compiles a frontier variant — few-shot examples dropped, brief orientation and richer answer structure allowed. Any small or unknown model in the pool keeps the compact profile: terse trigger-style rules, proven on the zero-cost fallback chain, since fallback can hand any call to the weakest member. The standalone daemon exposes this as `-prompt-profile`.
 
 ---
 
