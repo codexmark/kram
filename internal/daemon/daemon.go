@@ -65,6 +65,11 @@ type Config struct {
 	// the first token streams, failing every turn outright — buffered
 	// mode has no such window and works fine for the exact same setup.
 	PreferStreaming bool
+	// PromptProfile threads through to agent.Config.PromptProfile (#130)
+	// — "frontier" or empty for compact. cmd/kram derives it from the
+	// active combo's configured model names (see resolvePromptProfile);
+	// the standalone daemon takes it as a flag.
+	PromptProfile string
 	// AuthToken is the bearer token the daemon's HTTP surface requires on
 	// every route except /health (see server.New). Empty means Run
 	// generates a fresh random one at boot. The single-binary cmd/kram
@@ -161,6 +166,7 @@ func Run(ctx context.Context, cfg Config, logger *slog.Logger) error {
 		// this is caller-controlled rather than hardcoded, and
 		// agent.Config.PreferStreaming's for the tradeoff it accepts.
 		PreferStreaming:  cfg.PreferStreaming,
+		PromptProfile:    agent.PromptProfile(cfg.PromptProfile),
 		MaxContextTokens: cfg.MaxContextTokens,
 	})
 	if err != nil {

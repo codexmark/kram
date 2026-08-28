@@ -245,6 +245,29 @@ func (c *Config) ComboContextWindow(comboID string) int {
 	return min
 }
 
+// ComboModels returns the configured upstream model names of the named
+// combo's providers, in combo order. Providers with no pinned Model
+// contribute an empty string — the caller decides what "unknown model"
+// means (agent.ProfileForModels treats it as not-frontier). Returns nil
+// for an unknown combo.
+func (c *Config) ComboModels(comboID string) []string {
+	models := make(map[string]string, len(c.Providers))
+	for _, p := range c.Providers {
+		models[p.ID] = p.Model
+	}
+	for _, combo := range c.Combos {
+		if combo.ID != comboID {
+			continue
+		}
+		out := make([]string, 0, len(combo.Providers))
+		for _, pid := range combo.Providers {
+			out = append(out, models[pid])
+		}
+		return out
+	}
+	return nil
+}
+
 func (c *Config) validate() error {
 	if len(c.Providers) == 0 {
 		return fmt.Errorf("config: at least one provider is required")
