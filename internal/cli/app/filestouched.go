@@ -9,7 +9,7 @@ import (
 )
 
 // filesTouchedShownLimit caps how many chips the summary row shows
-// before folding the rest into a "+N mais" suffix — a turn with a dozen
+// before folding the rest into a "+N more" suffix — a turn with a dozen
 // edits shouldn't grow the row into its own scroll-worthy block.
 const filesTouchedShownLimit = 6
 
@@ -74,7 +74,7 @@ func touchedFiles(activities []daemonclient.ToolActivity) []string {
 
 // renderFilesTouched is the turn-ending "what changed" row: the distinct
 // paths from touchedFiles, up to filesTouchedShownLimit, with the rest
-// folded into a "+N mais" suffix rather than growing the row unbounded.
+// folded into a "+N more" suffix rather than growing the row unbounded.
 // Empty input renders nothing — a read-only turn (or one with nothing
 // yet to summarize) shouldn't grow an empty label.
 func renderFilesTouched(paths []string) string {

@@ -45,7 +45,7 @@ import (
 // turns them into PromptParts in this same order; systemPrompt itself
 // stays as the single-string form SystemPromptOverride's fallback and
 // this file's own tests compare against, produced by joining the same
-// nine sections identically to how compileBaseSections assembles them —
+// eleven sections identically to how compileBaseSections assembles them —
 // see systemPrompt's own doc comment for why the two must never drift.
 
 // Cache stability, per section: every section below depends only on

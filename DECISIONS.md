@@ -357,6 +357,8 @@ in an earlier turn before it was disabled.
 It emits an SSE event and parks the daemon's handler until a *separate*
 HTTP call (`POST /sessions/{id}/answer`) delivers an answer.
 
+**Later:** with detachable turns (see `internal/daemon/server/turns.go`), no HTTP handler parks anymore — the detached run goroutine does, which also means a dropped terminal no longer kills a pending question. The contract is unchanged: the turn stays blocked until `POST /sessions/{id}/answer`.
+
 **Why:** the alternative — returning a placeholder and continuing — means
 the model proceeds on an assumption it just said it couldn't make. The
 `Asker` interface is injected per-turn via context rather than wired into
@@ -397,6 +399,8 @@ both are different from dumping 200 lines of passing tests.
 
 The auto-built combo picks: no rotation when a paid provider is present,
 round-robin when everything is free tier.
+
+**Later:** the paid/free split is gone. The auto-built combo now picks by provider count — empty (priority) for a single provider, `smart` for two or more; smart's default stickiness preserves the cache-warmth property the old no-rotation default existed for, without giving up failover (see `gatewayconfig.autoStrategy`).
 
 **Why:** these two cases want opposite things.
 
@@ -581,6 +585,8 @@ loop's tool round-trips want. Default `true` for the weighted family
 example config explicitly sets it `false`, since spreading load across
 rate-limited peers matters more there than cache warmth.
 
+**Later:** that example config no longer ships in the repo; `config.example.yaml` carries no `strategy_options` block. The free-tier reasoning — spreading beats cache warmth there — still holds for anyone writing one.
+
 Sticky's own state (`stickyStore`) is a bounded, in-memory map
 (`stickyMaxEntries = 256`, oldest-evicted-on-overflow) — no TTL sweeper
 goroutine. A pin for an abandoned session costs a little memory, never
@@ -683,6 +689,8 @@ the executor moves to the next ranked candidate, exactly like a buffered
 response's gate rejection. If it does commit, every buffered event is
 replayed to the client in order before continuing to read fresh events
 from the source — the client never knows a peek happened.
+
+**Later:** the fixed 5s timer became `streamPeekIdleTimeout`, an idle budget reset by any received event (chosen per attempt — see chat.go's `peekIdleFor`), and the event cap now counts only uninformative events — see the reasoning-model peek-timeout entry below for the failure that forced it.
 
 ### Streaming success is decided by the terminal event, not the first byte
 
@@ -1156,6 +1164,8 @@ category of call" hook, likely living in `internal/permission` or the
 agent loop rather than this package, so `internal/snapshot` itself stays
 a pure capability with no opinion about when it's used.
 
+**Later:** built, in the agent loop as predicted. `runLoop` now snapshots automatically before the first mutating tool batch of a run (prefix `auto checkpoint`, best-effort, read-only turns pay nothing), and the daemon's `GET/POST /rewind` plus the CLI's Ctrl+G restore the latest one — the rewind itself is undoable via a pre-rewind snapshot. `snapshot_create` remains the explicit, model-facing primitive.
+
 ---
 
 ## Local state
@@ -1332,6 +1342,8 @@ global config file from a generic gateway admin endpoint would make ownership
 ambiguous and could persist a TUI experiment into unrelated sessions. The
 picker says the next call changes immediately; durable policy remains an
 explicit `config.yaml` edit.
+
+**Later:** persistence became an explicit opt-in — `persist: true` (and `make_default`) on the same endpoint writes the live strategy back to the gateway's own config file, refusing when none exists on disk. The objection above was to *silent* rewriting, and that part stands: without the flag, the selection is still runtime-only.
 
 ### Two real bugs, found only by testing this live
 
@@ -1669,6 +1681,8 @@ backstop already exists one layer down: every provider adapter's
 `http.Client` carries its own 120s timeout, which doesn't fire while
 tokens keep arriving — the right place for an absolute ceiling.
 
+**Later:** that backstop was itself wrong — `http.Client.Timeout` covers the whole exchange, body reads included, so it did fire mid-answer on long generations. The adapters now carry no client timeout at all; `internal/provider/timeout.go`'s phase watchdog bounds connect/headers and every idle stretch between body reads at the same default, which is the byte-level version of the ceiling this paragraph wanted. A guard test forbids a whole-call `Timeout` from coming back.
+
 **The two failures compounded into "almost never two prompts in a row."**
 With Anthropic permanently unusable (see "Browser login" above — no API
 credit balance) and Gemini permanently 404ing, only four of six
@@ -1753,6 +1767,8 @@ auth) and, when present, is *not* stored in this new package at all — it
 reuses `internal/credentials.Store` under a synthesized env var
 (`CUSTOM_<ID>_API_KEY`), the same pattern an OAuth-connected account's
 synthetic env var already established. One place for every secret.
+
+**Later:** the row reads "+ add custom provider" since the pt-BR → English UI migration (#74).
 
 ### A custom provider with no key crashed the entire gateway, not just that one provider
 
@@ -2012,6 +2028,8 @@ a hand-written config.yaml declaring only `anthropic`, plus a
 newly-configured provider" log lines and a gateway with every live-
 credentialed provider actually built and routable.
 
+**Later:** this logic moved out of `cmd/kram/autodetect.go` into the shared `internal/gatewayconfig` package as `gatewayconfig.Reconcile`, still run on every boot from `cmd/kram`. Behavior unchanged; only the seam moved so other entry points could reuse it.
+
 **A custom provider with no pinned model silently corrupted its own
 requests.** `req.Model` at the point any provider adapter reads it is
 always the *combo ID* for a Kram-originated call (`agent.Config.Model`'s
@@ -2108,6 +2126,8 @@ binary (`~/.local/bin/kram`, real separate gateway+daemon processes,
 `devtools/mock-provider`, a workspace with a real `AGENTS.md`) — a
 genuine turn completed cleanly with no wiring regression.
 
+**Later:** the contract this test pins has since changed twice, exactly the way it was designed to change — consciously: the Tool Semantics Registry inserted the generated tools-overview after base, and the Model Profile phase split base itself into named sections and added further parts (background-job guidance, env-context). The test still pins the exact ordering; the indices above describe the v1 shape only.
+
 ## Gateway Round retry: "last attempt wins" was the wrong retry decision
 
 A second review of the hardening pass above (by the same reviewer who
@@ -2153,6 +2173,8 @@ state this accurately, including the real (previously undocumented)
 consequence: a stream still slowly, genuinely producing tokens past
 120s total would still get cut off there. No behavior changed, only the
 documentation of an existing, real limitation.
+
+**Later:** the limitation documented here was removed outright — the whole-call `http.Client.Timeout` was replaced by per-phase watchdogs (`internal/provider/timeout.go`) that reset on every byte read, so a slow but genuinely producing stream is no longer cut off at 120s total.
 
 Two other findings from the same review — non-`GatewayError` transport
 errors (daemon↔gateway network failures) not going through retry
@@ -2560,6 +2582,8 @@ of scoped changes, never all of it at once. `PromptPart`'s `Placement`/
 that sequence has real data to build against instead of starting cold —
 but which item is next, and its own design, is a separate decision each
 time, not a queue to work through automatically.
+
+**Later:** Model Profiles came off this list — phase #130 built `PromptProfile` (compact/frontier) on top of the section split of `base`, keyed by configured model name rather than provider kind. The rest of the list remains not started.
 
 ### No account rotation or provider evasion
 
@@ -3134,6 +3158,8 @@ locally. Buffered-call heartbeats increment a visible pulse without claiming
 which provider-internal step is happening. Only when even those events stop for
 the stall threshold does the label become the precise symptom `CONEXÃO SEM
 EVENTOS`, including time since the last event. No prompt or model token is used.
+
+**Later:** the state machine is unchanged but its labels were localized to English (#74): `PREPARING ROUTE`, `MODEL ACTIVE`, `RUNNING · tool`, `ANALYZING RESULT`, `WRITING`, `segment 2/4`, and the stall symptom was renamed `NO DATA`, now paired with a phase-context line saying what was in flight when the stream went quiet. The neutral rail also gained a data-direction animation (#132) when bytes are actively moving.
 
 ### A background process needs a user observation path that bypasses the model
 
@@ -3735,6 +3761,8 @@ routine cases, `styleBadgeWarn`'s "⚠" for the three that warrant a second
 look — replacing both call sites in `refreshTranscript` (the streaming
 and settled-turn notice loops) that previously duplicated the same
 `styleHint.Render("· "+n)` inline.
+
+**Later:** the six-notice universe did not stay fixed — the v0.6 work (steering pickup, auto checkpoints, verification gate, emergency prune, salvage/rate-limit retries) grew the daemon to a dozen notice texts, while `noticeWarnPhrases` still matches only the original three warning phrases. The fixed-set classifier design survives; its set needs revisiting whenever a new notice warrants the warn glyph.
 
 `TestNoticeIsWarningClassifiesKnownDaemonNotices` asserts against the
 actual six strings copied verbatim from `agent.go`/`retry.go` — a
@@ -4903,6 +4931,8 @@ graceful-cancel in headless (the connection close on process exit already
 tears the turn down; a `POST /cancel` endpoint pairs naturally with this
 later, as the interrupt entry noted).
 
+**Later:** detachable turns reversed the premise — closing a stream now only unsubscribes, and `POST /sessions/{id}/interrupt` is the explicit cancel. Headless still ends its turn only because the in-process daemon dies with the process; `SIGINT`→interrupt remains the open follow-up.
+
 ---
 
 ## Local-store durability: one atomic writer + SQLite WAL (post-audit #73)
@@ -5138,6 +5168,8 @@ interpolation, lost glyphs, and inconsistent terms — zero findings. Final
 gate: `go vet` clean (catches any Printf verb/arg mismatch), the full
 `go test ./... -race` green, and a repo-wide sweep confirming no pt-BR
 remains in any user-facing UI string.
+
+**Later:** a note for readers of *earlier* entries: the specific literals they quote — `+N mais`, `pensando:`, `sessões de subagentes`, `+N linhas`, `interrompido pelo usuário`, `esc interrompe`, the pt-BR activity labels — are the pre-sweep strings; they now read `+N more`, `thinking:`, `subagent sessions`, `+N lines`, `interrupted by user`, `esc interrupts`, and the English labels this entry introduced.
 
 ---
 
