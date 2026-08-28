@@ -208,6 +208,21 @@ verify_dist_file scripts/dist-repo/README.md README.md
 echo "==> promoting verified release to latest"
 gh release edit "$VERSION" --repo "$RELEASES_REPO" --draft=false --latest
 
+# Mirror the release on the source repo so its Releases tab tracks
+# reality (tags alone don't show there — the v0.4-v0.6 gap the mirror
+# exists to prevent). Notes are the same; binaries stay in
+# $RELEASES_REPO, linked below. Best-effort: a mirror failure must not
+# fail an already-published release.
+SOURCE_REPO="${KRAM_SOURCE_REPO:-codexmark/kram}"
+echo "==> mirroring release on $SOURCE_REPO"
+MIRROR_NOTES="$(mktemp)"
+cat "$NOTES_FILE" > "$MIRROR_NOTES"
+printf '\n---\n\nBinaries and checksums: https://github.com/%s/releases/tag/%s · Install: `curl -fsSL https://raw.githubusercontent.com/%s/master/install.sh | sh`\n' "$RELEASES_REPO" "$VERSION" "$RELEASES_REPO" >> "$MIRROR_NOTES"
+if ! gh release create "$VERSION" --repo "$SOURCE_REPO" --title "Kram $VERSION" --notes-file "$MIRROR_NOTES" --verify-tag --latest; then
+  echo "warning: source-repo mirror release failed; create it manually with: gh release create $VERSION --repo $SOURCE_REPO --notes-file $NOTES_FILE" >&2
+fi
+rm -f "$MIRROR_NOTES"
+
 echo
 echo "✓ Release published: $VERSION"
 echo
