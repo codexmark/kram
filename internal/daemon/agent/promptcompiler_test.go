@@ -12,7 +12,7 @@ import (
 )
 
 func TestCompilePreambleBaseOnly(t *testing.T) {
-	parts := compilePreamble("/ws", "", false, openai.ChatMessage{}, false, nil, nil, "", "", true)
+	parts := compilePreamble("/ws", "", false, openai.ChatMessage{}, false, nil, nil, "", "", true, ProfileCompact)
 
 	if len(parts) != len(baseSectionOrder) {
 		t.Fatalf("parts = %d, want %d (base sections only): %+v", len(parts), len(baseSectionOrder), parts)
@@ -30,7 +30,7 @@ func TestCompilePreambleSystemPromptOverrideReplacesBaseOnly(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	reg := tools.NewRegistry(t.TempDir(), nil, nil)
 
-	parts := compilePreamble("/ws", "", false, openai.ChatMessage{}, false, reg, nil, "Custom house persona.", "", true)
+	parts := compilePreamble("/ws", "", false, openai.ChatMessage{}, false, reg, nil, "Custom house persona.", "", true, ProfileCompact)
 
 	if parts[0].ID != "base" || parts[0].Content != "Custom house persona." {
 		t.Errorf("base part = %+v, want Content=%q exactly (override replaces it wholesale)", parts[0], "Custom house persona.")
@@ -50,14 +50,14 @@ func TestCompilePreambleSystemPromptOverrideReplacesBaseOnly(t *testing.T) {
 }
 
 func TestCompilePreambleEmptyOverridePreservesDefaultSystemPrompt(t *testing.T) {
-	parts := compilePreamble("/ws", "", false, openai.ChatMessage{}, false, nil, nil, "", "", true)
+	parts := compilePreamble("/ws", "", false, openai.ChatMessage{}, false, nil, nil, "", "", true, ProfileCompact)
 	if !strings.Contains(parts[0].Content, "Kram") {
 		t.Errorf("empty override should leave the default systemPrompt() output in place, got: %q", parts[0].Content[:min(80, len(parts[0].Content))])
 	}
 }
 
 func TestCompilePreambleWithProjectContextOnly(t *testing.T) {
-	parts := compilePreamble("/ws", "some AGENTS.md text", true, openai.ChatMessage{}, false, nil, nil, "", "", true)
+	parts := compilePreamble("/ws", "some AGENTS.md text", true, openai.ChatMessage{}, false, nil, nil, "", "", true, ProfileCompact)
 
 	want := len(baseSectionOrder) + 1 // base sections + project-context
 	if len(parts) != want {
@@ -77,7 +77,7 @@ func TestCompilePreambleWithProjectContextOnly(t *testing.T) {
 
 func TestCompilePreambleWithMemoryOnly(t *testing.T) {
 	memMsg := openai.ChatMessage{Role: "system", Content: "remembered fact"}
-	parts := compilePreamble("/ws", "", false, memMsg, true, nil, nil, "", "", true)
+	parts := compilePreamble("/ws", "", false, memMsg, true, nil, nil, "", "", true, ProfileCompact)
 
 	want := len(baseSectionOrder) + 1 // base sections + memory
 	if len(parts) != want {
@@ -94,7 +94,7 @@ func TestCompilePreambleWithMemoryOnly(t *testing.T) {
 
 func TestCompilePreambleWithBothProjectContextAndMemory(t *testing.T) {
 	memMsg := openai.ChatMessage{Content: "remembered fact"}
-	parts := compilePreamble("/ws", "ctx", true, memMsg, true, nil, nil, "", "", true)
+	parts := compilePreamble("/ws", "ctx", true, memMsg, true, nil, nil, "", "", true, ProfileCompact)
 
 	want := len(baseSectionOrder) + 2 // base sections, project-context, memory
 	if len(parts) != want {
@@ -399,11 +399,11 @@ func TestSkillsSectionReflectsInstalledSkills(t *testing.T) {
 		return ""
 	}
 
-	empty := find(compilePreamble("/ws", "", false, openai.ChatMessage{}, false, nil, nil, "", "", false))
+	empty := find(compilePreamble("/ws", "", false, openai.ChatMessage{}, false, nil, nil, "", "", false, ProfileCompact))
 	if !strings.Contains(empty, "No skills are installed") || strings.Contains(empty, "Call skill_list BEFORE") {
 		t.Fatalf("empty-shelf skills section = %q", empty)
 	}
-	installed := find(compilePreamble("/ws", "", false, openai.ChatMessage{}, false, nil, nil, "", "", true))
+	installed := find(compilePreamble("/ws", "", false, openai.ChatMessage{}, false, nil, nil, "", "", true, ProfileCompact))
 	if !strings.Contains(installed, "Call skill_list BEFORE") {
 		t.Fatalf("installed skills section = %q", installed)
 	}

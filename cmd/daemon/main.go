@@ -41,6 +41,7 @@ func runMain(ctx context.Context, args []string, output io.Writer) error {
 	maxTurns := fs.Int("max-turns", 50, "model calls per automatic continuation segment (4 segments maximum)")
 	stream := fs.Bool("stream", true, "prefer the streaming gateway path (see daemon.Config.PreferStreaming's doc comment for the tradeoff); disable for a slow local model whose server sends nothing during prompt prefill, which can trip the streaming peek's idle timeout")
 	authToken := fs.String("auth-token", "", "bearer token required on every HTTP route except /health; empty generates a random one at boot and writes it to a daemon.token file next to the DB for a client to read")
+	promptProfile := fs.String("prompt-profile", "", "base-prompt profile: empty (compact, today's prompt) or \"frontier\" for combos made up exclusively of frontier-class models — cmd/kram derives this automatically from the gateway config")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
@@ -48,14 +49,15 @@ func runMain(ctx context.Context, args []string, output io.Writer) error {
 		return err
 	}
 	logger := slog.New(slog.NewTextHandler(output, nil))
-	return daemonRun(ctx, daemonConfig(*host, *port, *dbPath, *gatewayURL, *model, *workspace, *maxTurns, *stream, *authToken), logger)
+	return daemonRun(ctx, daemonConfig(*host, *port, *dbPath, *gatewayURL, *model, *workspace, *maxTurns, *stream, *authToken, *promptProfile), logger)
 }
 
-func daemonConfig(host string, port int, dbPath, gatewayURL, model, workspace string, maxTurns int, stream bool, authToken string) daemon.Config {
+func daemonConfig(host string, port int, dbPath, gatewayURL, model, workspace string, maxTurns int, stream bool, authToken, promptProfile string) daemon.Config {
 	return daemon.Config{
 		Host: host, Port: port, DBPath: dbPath, GatewayURL: gatewayURL,
 		Model: model, Workspace: workspace, MaxTurns: maxTurns,
 		PreferStreaming: stream,
 		AuthToken:       authToken,
+		PromptProfile:   promptProfile,
 	}
 }

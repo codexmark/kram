@@ -31,6 +31,7 @@ import (
 	"github.com/codexmark/kram/internal/config"
 	"github.com/codexmark/kram/internal/credentials"
 	"github.com/codexmark/kram/internal/daemon"
+	"github.com/codexmark/kram/internal/daemon/agent"
 	"github.com/codexmark/kram/internal/gateway"
 	"github.com/codexmark/kram/internal/gatewayconfig"
 	"github.com/codexmark/kram/internal/kramhome"
@@ -331,6 +332,11 @@ func run(opts runOptions) error {
 		// user pinned an explicit --max-context-tokens. 0 either way falls
 		// back to compaction.DefaultMaxTokens inside the agent.
 		MaxContextTokens: resolveMaxContextTokens(opts.maxContextTokens, gwCfg, opts.combo),
+		// Pick the base-prompt profile from what the active combo can
+		// actually route to (#130) — frontier only when every provider's
+		// configured model classifies as frontier-class, since fallback
+		// can hand any call to any of them (see agent.ProfileForModels).
+		PromptProfile: string(resolvePromptProfile(gwCfg, opts.combo)),
 	}
 	daemonRun := kramDaemonRun
 	go func() { errCh <- daemonRun(ctx, daemonCfg, logger) }()
@@ -568,6 +574,20 @@ func resolveMaxContextTokens(override int, cfg *config.Config, combo string) int
 		return cfg.ComboContextWindow(cfg.DefaultCombo)
 	}
 	return 0
+}
+
+// resolvePromptProfile mirrors resolveMaxContextTokens' shape: resolve
+// against the requested combo, falling back to the config's default combo
+// when the requested one is unknown. Unknown combos and unpinned models
+// classify as compact — the always-safe default.
+func resolvePromptProfile(cfg *config.Config, combo string) agent.PromptProfile {
+	if models := cfg.ComboModels(combo); models != nil {
+		return agent.ProfileForModels(models)
+	}
+	if cfg.DefaultCombo != "" && cfg.DefaultCombo != combo {
+		return agent.ProfileForModels(cfg.ComboModels(cfg.DefaultCombo))
+	}
+	return agent.ProfileCompact
 }
 
 func finalizeFileConfig(cfg *config.Config, port int) (*config.Config, error) {

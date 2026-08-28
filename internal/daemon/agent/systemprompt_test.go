@@ -23,7 +23,7 @@ var baseSectionOrder = []string{
 // reproduce its output exactly.
 func TestCompileBaseSectionsMatchesSystemPromptByteForByte(t *testing.T) {
 	workspace := "/some/workspace"
-	parts := compileBaseSections(workspace)
+	parts := compileBaseSections(workspace, ProfileCompact)
 
 	contents := make([]string, len(parts))
 	for i, p := range parts {
@@ -41,7 +41,7 @@ func TestCompileBaseSectionsMatchesSystemPromptByteForByte(t *testing.T) {
 // checkable property instead of something only visible by reading prose
 // closely, per the issue's own stated motivation.
 func TestCompileBaseSectionsOrderAndOwnership(t *testing.T) {
-	parts := compileBaseSections("/ws")
+	parts := compileBaseSections("/ws", ProfileCompact)
 
 	if len(parts) != len(baseSectionOrder) {
 		t.Fatalf("parts = %d, want %d: %+v", len(parts), len(baseSectionOrder), parts)
@@ -68,7 +68,7 @@ func TestCompileBaseSectionsOrderAndOwnership(t *testing.T) {
 // section with real inputs (identitySection) actually threads them
 // through, rather than every section silently being a hardcoded const.
 func TestCompileBaseSectionsIdentityCarriesWorkspaceAndOS(t *testing.T) {
-	parts := compileBaseSections("/my/project/root")
+	parts := compileBaseSections("/my/project/root", ProfileCompact)
 	identity := parts[0]
 	if identity.ID != "identity" {
 		t.Fatalf("parts[0].ID = %q, want identity", identity.ID)

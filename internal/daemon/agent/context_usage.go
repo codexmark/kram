@@ -67,7 +67,7 @@ func (s *Service) ContextUsage(ctx context.Context, sessionID string) (ContextUs
 	// next real turn would actually skip resending.
 	injectProjectContext := haveProjectContext && needsFreshInjection(effective, projectContextMarkerName, formatProjectContextContent(projectContext))
 	injectMemory := haveMemory && needsFreshInjection(effective, memoryMarkerName, memoryMsg.Content)
-	parts := compilePreamble(s.cfg.Workspace, projectContext, injectProjectContext, memoryMsg, injectMemory, s.tools, s.cfg.ToolOrder, s.cfg.SystemPromptOverride, collectEnvContext(ctx, s.cfg.Workspace, s.activeModel()), len(s.tools.Skills()) > 0)
+	parts := compilePreamble(s.cfg.Workspace, projectContext, injectProjectContext, memoryMsg, injectMemory, s.tools, s.cfg.ToolOrder, s.cfg.SystemPromptOverride, collectEnvContext(ctx, s.cfg.Workspace, s.activeModel()), len(s.tools.Skills()) > 0, s.cfg.PromptProfile)
 	toolTokens := estimateToolDefinitionTokens(s.tools.Definitions())
 	partTokens := make(map[string]int, len(parts))
 	for _, part := range parts {

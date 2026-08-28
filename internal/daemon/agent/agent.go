@@ -87,6 +87,12 @@ type Config struct {
 	// what almost every caller wants; this exists as an escape hatch,
 	// not a recommendation.
 	PreferStreaming bool
+	// PromptProfile selects which variant of the base prompt sections
+	// this service compiles (#130) — see profile.go. The zero value is
+	// ProfileCompact: today's prompt exactly. Fixed for the Service's
+	// lifetime, keeping every base section prefix-stable for upstream
+	// prompt caching. SystemPromptOverride, when set, wins over this.
+	PromptProfile PromptProfile
 	// ToolOrder curates the generated Tools overview's presentation
 	// order (see compileToolsOverview) — it never changes which tools
 	// are offered, only where each one is listed. nil means today's
@@ -727,7 +733,7 @@ func (s *Service) runLoop(ctx context.Context, sessionID, model string, depth in
 		// compilePreamble actually consumes.
 		injectProjectContext := haveProjectContext && needsFreshInjection(effective, projectContextMarkerName, formatProjectContextContent(projectContext))
 		injectMemory := haveMemory && needsFreshInjection(effective, memoryMarkerName, memoryMsg.Content)
-		preambleParts := compilePreamble(s.cfg.Workspace, projectContext, injectProjectContext, memoryMsg, injectMemory, s.tools, s.cfg.ToolOrder, s.cfg.SystemPromptOverride, envContext, haveSkills)
+		preambleParts := compilePreamble(s.cfg.Workspace, projectContext, injectProjectContext, memoryMsg, injectMemory, s.tools, s.cfg.ToolOrder, s.cfg.SystemPromptOverride, envContext, haveSkills, s.cfg.PromptProfile)
 		postscriptParts := compileTurnPostscript(emptyRetryUsed, verifyNudgePending, nearBudget)
 		// Keep the visible definitions separately from the subset offered on
 		// this turn. The final soft-landing turn deliberately offers no tools,

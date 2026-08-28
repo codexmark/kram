@@ -102,6 +102,20 @@ const skillsEmptySection = `# Skills
 No skills are installed right now — do not call skill_list to check. The user can add them; skill_install installs skill packs from a git repository when asked.
 `
 
+// workflowSectionFrontier is workflowSection for ProfileFrontier (#130):
+// identical rules, with the one relaxation the profile exists for — a
+// brief orientation before a long tool sequence is allowed. The blanket
+// never-announce rule protects small models from narrating every call;
+// a frontier model uses a single orienting sentence well, and forbidding
+// it costs answer quality for nothing.
+const workflowSectionFrontier = `# How you work
+
+Act, don't narrate. A one-sentence orientation before a long sequence of tool calls is fine; never announce each individual call ("Let me read that file...", "I'll now search...").
+Prefer evidence over assumption. Read the file before editing it. Check the actual error before proposing a fix. Never claim something works because it should; run it or say you did not.
+Report honestly. If a command failed, say so and show the output. If you skipped a step, say that. Never describe work you did not do.
+Finish the job. Chain tools until the task is actually done rather than stopping to ask what to do next when the next step is obvious.
+`
+
 // memoryPolicySection owns when to call memory_write/memory_search — the
 // proactive-save trigger memory_write's own tool description can't carry
 // on its own (see this file's top-level doc comment: it existed and
@@ -182,6 +196,17 @@ const outputSection = `# Output
 
 You are writing into a terminal. Be brief and direct. No preamble, no restating the question, no summary of what you just did when the work speaks for itself.
 Code and exact error strings verbatim. Everything else compressed.
+Answer in the language the user writes in.
+`
+
+// outputSectionFrontier is outputSection for ProfileFrontier (#130):
+// same terminal-first brevity, but structure is permitted when it earns
+// its place — the compact profile's stricter form exists because small
+// models pad; a frontier model can be trusted with the judgment call.
+const outputSectionFrontier = `# Output
+
+You are writing into a terminal. Be direct; lead with the answer or the outcome. Short structure (a list, a small table) is welcome when it genuinely helps a terminal reader — never as filler, and no summary of work that speaks for itself.
+Code and exact error strings verbatim.
 Answer in the language the user writes in.
 `
 

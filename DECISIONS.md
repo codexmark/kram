@@ -5943,3 +5943,22 @@ arm it; a denied bash can disarm it) in exchange for staying at the same
 batch-level view batchHasMutation already takes — and an exit code is not
 required to be zero, because running tests and reporting the failure IS
 verification.
+
+## The prompt got its Model Profile phase (#130)
+
+The section architecture was built for this and it landed as designed: a
+PromptProfile on agent.Config swaps individual section variants at
+compileBaseSections. Keying is by model NAME patterns, not provider kind
+— "openai-compat" serves gpt-5.5 and a local qwen alike, so kind can't
+distinguish what matters. Aggregation is deliberately the minimum, like
+ComboContextWindow: frontier only when EVERY provider's pinned model
+classifies as frontier, because fallback can hand any call to any member
+and the prompt must fit the weakest candidate. Frontier drops the
+examples section (few-shots exist for small models; their tokens are
+paid on every call) and swaps workflow/output for variants allowing a
+one-sentence orientation and earned structure. Compact stays the zero
+value and byte-for-byte today's prompt; unknown model names classify
+compact — a missed frontier model costs an unused optimization, a
+wrongly-frontier small model would cost broken behavior. cmd/kram
+derives the profile from the active combo automatically; the standalone
+daemon takes -prompt-profile.

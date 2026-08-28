@@ -11,7 +11,7 @@ import (
 )
 
 func TestDaemonConfigPreservesEntrypointFlags(t *testing.T) {
-	cfg := daemonConfig("0.0.0.0", 42, "state.db", "http://gateway", "combo", "/workspace", 7, false, "")
+	cfg := daemonConfig("0.0.0.0", 42, "state.db", "http://gateway", "combo", "/workspace", 7, false, "", "")
 	if cfg.Host != "0.0.0.0" || cfg.Port != 42 || cfg.DBPath != "state.db" || cfg.GatewayURL != "http://gateway" || cfg.Model != "combo" || cfg.Workspace != "/workspace" || cfg.MaxTurns != 7 || cfg.PreferStreaming {
 		t.Fatalf("daemonConfig lost a flag value: %+v", cfg)
 	}

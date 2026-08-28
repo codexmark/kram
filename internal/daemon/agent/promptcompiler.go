@@ -116,26 +116,42 @@ func estimateToolDefinitionTokens(defs any) int {
 // systemprompt.go's doc comments for what each one owns); all are
 // RefreshStatic/Source "builtin" for the same reason "base" was — see
 // systemprompt.go's "Cache stability, per section" note.
-func compileBaseSections(workspace string) []PromptPart {
+// profile (#130) swaps individual section variants without touching the
+// rest: ProfileFrontier replaces workflow/output with their frontier
+// forms and omits examples entirely (see profile.go). ProfileCompact —
+// the zero value — reproduces today's sections byte-for-byte, which the
+// systemPrompt parity test still pins. Profile is fixed for a Service's
+// lifetime (it comes from Config), so RefreshStatic and the per-section
+// cache-stability note above hold unchanged under either profile.
+func compileBaseSections(workspace string, profile PromptProfile) []PromptPart {
+	workflow, output := workflowSection, outputSection
+	includeExamples := true
+	if profile == ProfileFrontier {
+		workflow, output = workflowSectionFrontier, outputSectionFrontier
+		includeExamples = false
+	}
 	sections := []struct {
 		id      string
 		content string
 	}{
 		{"identity", identitySection(workspace)},
-		{"workflow", workflowSection},
+		{"workflow", workflow},
 		{"skills", skillsSection},
 		{"memory-policy", memoryPolicySection},
 		{"delegation", delegationSection},
 		{"asking", askingSection},
 		{"tasks", tasksSection},
 		{"coding-policy", codingPolicySection},
-		{"output", outputSection},
+		{"output", output},
 		{"examples", examplesSection},
 		{"safety", safetySection},
 	}
-	parts := make([]PromptPart, len(sections))
-	for i, s := range sections {
-		parts[i] = PromptPart{ID: s.id, Placement: PlacementPreamble, Refresh: RefreshStatic, Source: "builtin", Content: s.content}
+	parts := make([]PromptPart, 0, len(sections))
+	for _, s := range sections {
+		if s.id == "examples" && !includeExamples {
+			continue
+		}
+		parts = append(parts, PromptPart{ID: s.id, Placement: PlacementPreamble, Refresh: RefreshStatic, Source: "builtin", Content: s.content})
 	}
 	return parts
 }
@@ -317,16 +333,19 @@ func needsFreshInjection(effective []store.Message, markerName, freshContent str
 // (see runLoop) — false swaps the skills section's check-the-shelf
 // trigger for skillsEmptySection so a fresh install doesn't burn a tool
 // call finding nothing (#134).
-func compilePreamble(workspace, projectContext string, haveProjectContext bool, memoryMsg openai.ChatMessage, haveMemory bool, reg *tools.Registry, toolOrder []string, systemPromptOverride, envContext string, haveSkills bool) []PromptPart {
+func compilePreamble(workspace, projectContext string, haveProjectContext bool, memoryMsg openai.ChatMessage, haveMemory bool, reg *tools.Registry, toolOrder []string, systemPromptOverride, envContext string, haveSkills bool, profile PromptProfile) []PromptPart {
 	var parts []PromptPart
 	if systemPromptOverride != "" {
 		// Wholesale replacement stays a single "base" part — see
 		// Config.SystemPromptOverride's own doc comment for exactly what
 		// it can and can't replace; the generated tools overview and
 		// background-job guidance below are never suppressed by it.
+		// An override also wins over the profile: replacing the base
+		// prompt wholesale means replacing whichever variant of it the
+		// profile would have picked.
 		parts = append(parts, PromptPart{ID: "base", Placement: PlacementPreamble, Refresh: RefreshStatic, Source: "builtin", Content: systemPromptOverride})
 	} else {
-		parts = append(parts, compileBaseSections(workspace)...)
+		parts = append(parts, compileBaseSections(workspace, profile)...)
 		if !haveSkills {
 			for i := range parts {
 				if parts[i].ID == "skills" {
