@@ -589,16 +589,23 @@ func (m Model) renderToolResultPreview(act daemonclient.ToolActivity) string {
 // noticeWarnPhrases are the substrings of the daemon's known EventNotice
 // texts (see internal/daemon/agent's EventNotice call sites in agent.go
 // and retry.go) that flag a real problem — a stagnating retry loop, a
-// transient gateway failure the daemon is retrying around, or the daemon
-// having to actively stop a provider from leaking raw tool markup — as
-// opposed to a benign informational notice (compaction ran, an image
-// capability fallback, markup the daemon simply normalized and moved
-// past). This is matched against a fixed, known set of daemon-emitted
-// strings, not a general-purpose classifier.
+// failure the daemon is retrying around (transient, rate limit, or a
+// stream that dropped mid-answer), the summarizer being unreachable so
+// this call's context had to be emergency-pruned, or the daemon having
+// to actively stop a provider from leaking raw tool markup — as opposed
+// to a benign informational notice (compaction ran, an image capability
+// fallback, markup the daemon simply normalized, queued steering picked
+// up, an automatic checkpoint saved, the verification gate asking for a
+// test run). This is matched against a fixed, known set of daemon-
+// emitted strings, not a general-purpose classifier — when a new notice
+// ships, deciding its glyph here is part of shipping it (#148).
 var noticeWarnPhrases = []string{
 	"stagnation detected",
 	"transient gateway failure",
 	"Kram stopped it",
+	"stream dropped mid-answer",
+	"provider rate limited",
+	"summary model unavailable",
 }
 
 func noticeIsWarning(text string) bool {

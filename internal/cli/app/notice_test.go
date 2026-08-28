@@ -20,6 +20,12 @@ var knownAgentNotices = []struct {
 	{"provider returned textual tool markup; Kram normalized it and continued", false},
 	{"stagnation detected in edit_file (3 identical failures)", true},
 	{"transient gateway failure, retrying (round 2/3 in 400ms)", true},
+	{"stream dropped mid-answer — resuming where it stopped (round 2/4 in 800ms)", true},
+	{"provider rate limited — retrying in 34s (round 2/4)", true},
+	{"summary model unavailable — oldest turns left out of this call's context (the session keeps them)", true},
+	{"picked up 2 queued message(s) from you", false},
+	{"verification gate: files changed but no build/test ran — asking the model to verify before finishing", false},
+	{"checkpoint a1b2c3d saved (ctrl+g rewinds)", false},
 }
 
 func TestNoticeIsWarningClassifiesKnownDaemonNotices(t *testing.T) {
