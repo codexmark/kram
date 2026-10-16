@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/codexmark/kram/internal/openai"
@@ -43,6 +44,24 @@ type OpenAICompatible struct {
 	temperature *float64 // optional: overrides req.Temperature when set — see config.ProviderConfig.Temperature
 	client      *http.Client
 	timeout     time.Duration
+	// streamUsageRejected latches once this backend answers a request
+	// carrying stream_options with HTTP 400, so every later call skips the
+	// field instead of paying a rejected round-trip first.
+	streamUsageRejected atomic.Bool
+}
+
+// openaiCompatRequest adds stream_options to the shared request type at
+// this adapter boundary only. Without include_usage, OpenAI and
+// llama.cpp-based servers (llamafile, LM Studio, Ollama's OpenAI surface)
+// never send the final usage chunk on a streamed response, so every turn
+// reported zero tokens and the context calibrator never saw a real count.
+type openaiCompatRequest struct {
+	openai.ChatCompletionRequest
+	StreamOptions *openaiCompatStreamOptions `json:"stream_options,omitempty"`
+}
+
+type openaiCompatStreamOptions struct {
+	IncludeUsage bool `json:"include_usage"`
 }
 
 // NewOpenAICompatible constructs an adapter for an OpenAI-shaped backend.
@@ -141,17 +160,24 @@ func normalizeOpenAICompatMessages(messages []openai.ChatMessage) []openai.ChatM
 }
 
 func (p *OpenAICompatible) ChatCompletion(ctx context.Context, req openai.ChatCompletionRequest) (<-chan StreamEvent, error) {
+	return p.chatCompletion(ctx, req, !p.streamUsageRejected.Load())
+}
+
+func (p *OpenAICompatible) chatCompletion(parent context.Context, req openai.ChatCompletionRequest, includeUsage bool) (<-chan StreamEvent, error) {
 	model := req.Model
 	if p.model != "" {
 		model = p.model
 	}
-	body := req
+	body := openaiCompatRequest{ChatCompletionRequest: req}
 	body.Model = model
 	if p.temperature != nil {
 		body.Temperature = p.temperature
 	}
 	body.Stream = true
 	body.Messages = normalizeOpenAICompatMessages(sanitizeToolHistory(body.Messages))
+	if includeUsage {
+		body.StreamOptions = &openaiCompatStreamOptions{IncludeUsage: true}
+	}
 
 	payload, err := json.Marshal(body)
 	if err != nil {
@@ -162,7 +188,7 @@ func (p *OpenAICompatible) ChatCompletion(ctx context.Context, req openai.ChatCo
 	// headers now, then converts into an idle detector on the response
 	// body below — a long generation that keeps streaming bytes is never
 	// cut off mid-answer.
-	ctx, watchdog := newStreamWatchdog(ctx, p.timeout, p.id)
+	ctx, watchdog := newStreamWatchdog(parent, p.timeout, p.id)
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, p.baseURL+"/chat/completions", bytes.NewReader(payload))
 	if err != nil {
@@ -184,6 +210,15 @@ func (p *OpenAICompatible) ChatCompletion(ctx context.Context, req openai.ChatCo
 	if err != nil {
 		watchdog.Stop()
 		return nil, fmt.Errorf("%s: request failed: %w", p.id, watchdog.wrapErr(err))
+	}
+	if resp.StatusCode == http.StatusBadRequest && includeUsage {
+		// Some stricter compatible backends reject unknown request fields.
+		// Retry once without stream_options (losing only token counts, as
+		// before it was sent) and remember the answer for this provider.
+		watchdog.Stop()
+		resp.Body.Close()
+		p.streamUsageRejected.Store(true)
+		return p.chatCompletion(parent, req, false)
 	}
 	if resp.StatusCode >= 400 {
 		defer watchdog.Stop()

@@ -265,3 +265,74 @@ func TestOpenAICompatMissingRetryAfterIsZero(t *testing.T) {
 		t.Errorf("RetryAfter = %v, want 0 when the header is absent", httpErr.RetryAfter)
 	}
 }
+
+// TestOpenAICompatRequestsStreamUsage confirms streamed requests ask for
+// the final usage chunk — llama.cpp-based servers and OpenAI only send it
+// when stream_options.include_usage is set — and that the counts it
+// carries reach the Done event.
+func TestOpenAICompatRequestsStreamUsage(t *testing.T) {
+	var received struct {
+		StreamOptions *struct {
+			IncludeUsage bool `json:"include_usage"`
+		} `json:"stream_options"`
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&received)
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n")
+		fmt.Fprint(w, "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":68,\"completion_tokens\":5,\"total_tokens\":73}}\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer srv.Close()
+
+	p := NewOpenAICompatible("test", srv.URL, "", "", nil, capabilities{})
+	events, err := p.ChatCompletion(context.Background(), openai.ChatCompletionRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := collectEvents(t, events)
+
+	if received.StreamOptions == nil || !received.StreamOptions.IncludeUsage {
+		t.Fatalf("stream_options = %+v, want include_usage true", received.StreamOptions)
+	}
+	last := got[len(got)-1]
+	if !last.Done || last.Usage == nil || last.Usage.PromptTokens != 68 || last.Usage.CompletionTokens != 5 {
+		t.Fatalf("final event = %+v, want Done with prompt 68 / completion 5 usage", last)
+	}
+}
+
+// TestOpenAICompatDropsStreamOptionsWhenRejected covers a stricter backend
+// that 400s on the unknown field: the call is retried once without it,
+// and later calls to the same provider skip it up front.
+func TestOpenAICompatDropsStreamOptionsWhenRejected(t *testing.T) {
+	var calls, withOptions int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		var body map[string]json.RawMessage
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if _, ok := body["stream_options"]; ok {
+			withOptions++
+			http.Error(w, `{"error":{"message":"unknown field stream_options"}}`, http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer srv.Close()
+
+	p := NewOpenAICompatible("test", srv.URL, "", "", nil, capabilities{})
+	for i := 0; i < 2; i++ {
+		events, err := p.ChatCompletion(context.Background(), openai.ChatCompletionRequest{})
+		if err != nil {
+			t.Fatalf("call %d: %v", i+1, err)
+		}
+		got := collectEvents(t, events)
+		if len(got) == 0 || got[0].Delta != "ok" {
+			t.Fatalf("call %d events = %+v, want the retried answer", i+1, got)
+		}
+	}
+	if calls != 3 || withOptions != 1 {
+		t.Fatalf("calls = %d (with stream_options %d), want 3 calls and only the first carrying it", calls, withOptions)
+	}
+}
